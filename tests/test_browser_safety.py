@@ -50,6 +50,15 @@ class ViewerSafetyTests(unittest.TestCase):
     def test_forge_brand_palette(self):
         for color in ('#152c44','#5994f6','#255ab2','#4581e5','#99bfff','#cae5ff','#6ff0dd','#eefffc'):
             self.assertIn(color,HTML)
+    def test_three_user_operation_switcher_maps_only_active_worker_slots(self):
+        for slot in ('1','2','3'):
+            self.assertIn(f'data-worker="{slot}"',HTML)
+            self.assertIn(f'USER {slot}',HTML)
+        self.assertIn('jobsCache.find(item=>Number(item.slot_id)===slot)',HTML)
+        self.assertIn('Different events are required for simultaneous runs',HTML)
+        self.assertIn("d.detail==='CSRF validation failed'",HTML)
+        self.assertIn("fetch('/api/me',{cache:'no-store'})",HTML)
+
     def test_sidebar_navigation_is_clickable(self):
         for target in ('workspace-top','scope-panel','intake-panel','workbook-panel','browser-panel'):
             self.assertIn(f'data-target="{target}"',HTML)
