@@ -16,10 +16,10 @@ EXACT INPUTS
 - Status helper: {{STATUS_HELPER}}
 
 MISSION
-Interpret the uploaded mock RR and reconcile only the confirmed Intake Emerald scope fields of the unpublished event `(C+D) Medtrade Testing Clone 2`. Preserve its name, event code, event key, URL identity, and unpublished status.
+Interpret the uploaded mock RR and reconcile only the confirmed Forge Intake scope fields of the unpublished event `(C+D) Medtrade Testing Clone 2`. Preserve its name, event code, event key, URL identity, and unpublished status.
 
 AUTHORITATIVE SCOPE — FAIL CLOSED
-`Intake Emerald` is the complete automation boundary. Its compiled manifest maps every listed Cvent field to a stable `scopeId` and one status:
+`Forge Intake` is the complete automation boundary. Its compiled manifest maps every listed Cvent field to a stable `scopeId` and one status:
 - `confirmed`: may be inspected and changed when the uploaded RR provides applicable requirements;
 - `unconfirmed`: review/report only; never change it automatically;
 - `deferred`: post-MVP/out of current execution; do not inspect or change it;
@@ -41,7 +41,7 @@ Do not default to Advanced Search, direct URL hopping, or brittle selectors. On 
 
 FIRST ACTIONS
 1. Set status running and log `Reading RR workbook`.
-2. Load and verify the Intake Emerald manifest against its source workbook SHA-256 before interpreting the RR. Stop if they differ.
+2. Load and verify the Forge Intake manifest against its source workbook SHA-256 before interpreting the RR. Stop if they differ.
 3. Use Python/openpyxl directly. Run inspect_rr.py and refresh the compact inspection summary.
 4. Refresh `data/current/expected-domains.json` with only confirmed, applicable scope entries. Every expected field must carry its exact manifest `scopeId`. Preserve exact RR identifiers including M-09, M-10, M-11, AGES, NAICS36D, CSUB4, SUB4, and DONATE only where their requested fields are confirmed.
 5. Record RR requests mapping to unconfirmed/deferred/absent fields as excluded or blocked; never turn them into browser work.
@@ -90,7 +90,7 @@ Before every click/fill/type/js/cdp action that could mutate Cvent, pass `intent
 After each write, perform a fresh Ego read. If the browser marker, target ID, event key, exact visible event name, or gate ownership differs, stop fail-closed.
 
 NON-NEGOTIABLE GUARDRAILS
-Only `(C+D) Medtrade Testing Clone 2` may be opened or modified, and only confirmed Intake Emerald fields may be automated. NEVER publish/go live, send/test/schedule email or invitations, delete, archive, mutate another event, open attendee/contact data, alter account-global/reusable/profile definitions, or touch any field absent from confirmed scope. Draft Save in the locked event is allowed only for confirmed scoped changes. Never change the protected event identity or bypass login/MFA/CAPTCHA/runtime checks.
+Only `(C+D) Medtrade Testing Clone 2` may be opened or modified, and only confirmed Forge Intake fields may be automated. NEVER publish/go live, send/test/schedule email or invitations, delete, archive, mutate another event, open attendee/contact data, alter account-global/reusable/profile definitions, or touch any field absent from confirmed scope. Draft Save in the locked event is allowed only for confirmed scoped changes. Never change the protected event identity or bypass login/MFA/CAPTCHA/runtime checks.
 
 CONTINUOUS STATE
 Atomically update state after meaningful boundaries and append concise product-facing logs: normalized in-scope RR counts, domain started/completed, verified writes, excluded requests, exact blockers, and final verdict. Treat the router-generated `data/current/scope-write-audit.jsonl` as the authoritative write-scope audit. Do not log private reasoning or implementation branding.

@@ -36,7 +36,7 @@ def product_facing(value):
     if isinstance(value,dict): return {key:product_facing(item) for key,item in value.items()}
     return value
 def fresh_state(filename=None):
-    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME} within Intake Emerald scope' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_basics','theme_branding','header_footer_body','registration_paths','registration_types','admission_items','pricing_fees','discounts','registration_questions','terms_policies','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'process_started_at':None,'last_run_seconds':0,'updated_at':t,'pi_pid':None,'pi_session':None}
+    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME} within Forge Intake scope' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_basics','theme_branding','header_footer_body','registration_paths','registration_types','admission_items','pricing_fees','discounts','registration_questions','terms_policies','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'process_started_at':None,'last_run_seconds':0,'updated_at':t,'pi_pid':None,'pi_session':None}
 def auth_settings():
     saved=read_json(AUTH_SETTINGS,{})
     cookie_store=DATA/'steel-profile-local'/'Default'/'Cookies'
@@ -373,7 +373,7 @@ def continue_job():
             st.update({'status':'login_required','current_stage':'login','current_action':f'Finish {where} in OPEN BROWSER, including Stay signed in, before CONTINUE','updated_at':now()}); atomic_json(STATE,st)
             append_log(f'CONTINUE ignored: authentication incomplete at {where}')
             raise HTTPException(409,f'Authentication is still at {where}. Click OPEN BROWSER, finish Microsoft SSO/MFA and Stay signed in, then press CONTINUE.')
-        msg='POLICY REPLACEMENT: discard any prior domain list or scope assumptions. The following complete prompt is now controlling and Intake Emerald is a fail-closed boundary.\n\n'+render_prompt()
+        msg='POLICY REPLACEMENT: discard any prior domain list or scope assumptions. The following complete prompt is now controlling and Forge Intake is a fail-closed boundary.\n\n'+render_prompt()
         pid=spawn_pi(msg,resume=True)
     return {'ok':True,'pid':pid}
 

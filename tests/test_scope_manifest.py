@@ -10,7 +10,7 @@ from scope_manifest import SCOPE_MANIFEST, SCOPE_WORKBOOK, compile_scope, load_m
 class ScopeManifestTests(unittest.TestCase):
     def test_authoritative_scope_counts_and_statuses(self):
         manifest = load_manifest()
-        self.assertEqual(manifest['authority'], 'Intake Emerald')
+        self.assertEqual(manifest['authority'], 'Forge Intake')
         self.assertEqual(manifest['counts'], {'confirmed': 65, 'unconfirmed': 33, 'deferred': 18})
         entries = {entry['id']: entry for entry in manifest['entries']}
         self.assertEqual(entries['scope-004']['cventField'], 'Event Name')

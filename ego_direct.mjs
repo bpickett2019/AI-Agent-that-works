@@ -19,7 +19,15 @@ try{
   let result;
   switch(operation){
     case 'probe': {const info=await ego.pageInfo();result={marker,targetId:wanted,url:info.url,title:info.title};break}
-    case 'snapshotText': result={snapshot:await ego.snapshot()};break;
+    case 'snapshotText': {
+      const snapshot=await ego.snapshot();
+      if(params.saveTo){
+        const out=new URL(`file://${process.cwd()}/${String(params.saveTo).replace(/^\/+/, '')}`);
+        fs.mkdirSync(new URL('.',out),{recursive:true});fs.writeFileSync(out,snapshot,'utf8');
+        result={snapshotFile:out.pathname,bytes:Buffer.byteLength(snapshot)};
+      }else result={snapshot};
+      break;
+    }
     case 'pageInfo': result={page:await ego.pageInfo()};break;
     case 'scroll': {
       const delta=Number(params.deltaY??params.y??Math.max(500,Math.round((await ego.evaluate('window.innerHeight'))*.8)));

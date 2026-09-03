@@ -46,10 +46,10 @@ def guard(runtime,operation,params):
         refs=params.get('scopeIds',[])
         if isinstance(refs,str):refs=[refs]
         if not isinstance(refs,list) or not refs or any(not isinstance(ref,str) for ref in refs):
-            raise RuntimeError('Write blocked: at least one confirmed Intake Emerald scopeId is required')
+            raise RuntimeError('Write blocked: at least one confirmed Forge Intake scopeId is required')
         manifest=load_scope_manifest(SCOPE_WORKBOOK,SCOPE_MANIFEST);entries={entry['id']:entry for entry in manifest['entries']}
         blocked=[ref for ref in refs if ref not in entries or entries[ref].get('status')!='confirmed']
-        if blocked:raise RuntimeError('Write blocked by Intake Emerald scope: '+', '.join(blocked))
+        if blocked:raise RuntimeError('Write blocked by Forge Intake scope: '+', '.join(blocked))
     if operation in ('navigate','browser_navigate'):
         url=params.get('url','');parsed=urlparse(url);host=(parsed.hostname or '').lower();key=event_key(url)
         if host and not (host=='cvent.com' or host.endswith('.cvent.com')):raise RuntimeError('Navigation outside Cvent is blocked')

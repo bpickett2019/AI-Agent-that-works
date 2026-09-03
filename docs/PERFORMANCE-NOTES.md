@@ -18,7 +18,7 @@ Also preserve:
 - the browser action gate;
 - canonical runtime marker and target-ID verification;
 - authorized event-key verification;
-- confirmed Intake Emerald `scopeIds` on every write;
+- confirmed Forge Intake `scopeIds` on every write;
 - unpublished-state and protected-identity safeguards;
 - the existing local Steel profile and authentication boundary.
 
@@ -37,7 +37,7 @@ Desktop Ego Lite keeps its native browser, task space, helper runtime, and CDP c
 9. Perform the action.
 10. Verify the marker again and terminate the process.
 
-Cvent's dynamic UI, full DOM reads, deliberate stabilization waits, fresh post-write reads, and model reasoning add additional latency. The Intake Emerald hash/scope check is small and is not the primary bottleneck.
+Cvent's dynamic UI, full DOM reads, deliberate stabilization waits, fresh post-write reads, and model reasoning add additional latency. The Forge Intake hash/scope check is small and is not the primary bottleneck.
 
 Observed baseline during the demo run:
 
@@ -67,7 +67,7 @@ Route commands to it over a local Unix socket or localhost-only API. The Python 
 
 Allow related operations to execute within one worker transaction rather than launching a process for each step. Examples include observe → click → wait → full readback.
 
-Each mutating sub-action must still carry and validate exact confirmed Intake Emerald `scopeIds`. Never batch across ownership changes, event-key changes, navigation to another event, or uncertain UI state.
+Each mutating sub-action must still carry and validate exact confirmed Forge Intake `scopeIds`. Never batch across ownership changes, event-key changes, navigation to another event, or uncertain UI state.
 
 ### 3. Event-driven stabilization
 
@@ -87,7 +87,7 @@ Today the Python live probe and Ego helper may establish separate CDP connection
 
 ### 5. Cache static policy data safely
 
-Keep the compiled Intake Emerald manifest in memory inside the long-lived router/worker. Revalidate its file identity and SHA-256 whenever its mtime, size, inode, or configured path changes. Never cache authorization lock or live browser identity without a fresh check at mutation time.
+Keep the compiled Forge Intake manifest in memory inside the long-lived router/worker. Revalidate its file identity and SHA-256 whenever its mtime, size, inode, or configured path changes. Never cache authorization lock or live browser identity without a fresh check at mutation time.
 
 ### 6. Reduce orchestration overhead, not DOM coverage
 

@@ -17,6 +17,11 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn('interaction-shield',HTML)
         self.assertIn('TAKE CONTROL',HTML)
         self.assertIn('RETURN TO AGENT',HTML)
+        self.assertLess(HTML.index('id="ownership-label"'),HTML.index('id="take-control"'))
+        self.assertLess(HTML.index('id="take-control"'),HTML.index('id="browser-reload"'))
+        self.assertIn('class="browser-controls"',HTML)
+        self.assertNotIn('class="shield-card"',HTML)
+        self.assertIn('background:transparent;pointer-events:auto',HTML)
         self.assertIn('tabindex="-1"',HTML)
     def test_hover_never_changes_ownership(self):
         lowered=HTML.lower()
@@ -32,20 +37,33 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn("d.ownership==='USER'&&d.desiredOwnership==='USER'",APP)
     def test_product_uses_cvent_agent_branding(self):
         self.assertNotRegex(HTML,r'(?i)\bpi\b')
-        self.assertIn('<title>Emerald · CVENT Agent</title>',HTML)
+        self.assertIn('<title>Forge · CVENT Agent</title>',HTML)
         self.assertIn('Current CVENT Agent execution',HTML)
         self.assertIn('<dt>CVENT Agent</dt>',HTML)
         self.assertIn("FastAPI(title='CVENT Agent')",APP)
         self.assertIn("st['agent_session_saved']",APP)
         self.assertNotIn("st['agent_session']",APP)
+    def test_forge_brand_palette(self):
+        for color in ('#152c44','#5994f6','#255ab2','#4581e5','#99bfff','#cae5ff','#6ff0dd','#eefffc'):
+            self.assertIn(color,HTML)
     def test_sidebar_navigation_is_clickable(self):
-        for target in ('workspace-top','scope-panel','intake-panel','monitor-panel','workbook-panel'):
+        for target in ('workspace-top','scope-panel','intake-panel','workbook-panel','browser-panel'):
             self.assertIn(f'data-target="{target}"',HTML)
             self.assertIn(f'id="{target}"',HTML)
-        self.assertIn("target.scrollIntoView({behavior:'smooth',block:'start'})",HTML)
+        self.assertIn('window.scrollTo({top,behavior})',HTML)
+        self.assertIn("target.classList.add('nav-focus')",HTML)
+        self.assertLess(HTML.index('data-target="workbook-panel"'),HTML.index('data-target="browser-panel"'))
+        self.assertIn('<strong>CVENT browser</strong><small>Watch and take control</small>',HTML)
         self.assertIn("x.setAttribute('aria-current','page')",HTML)
-        self.assertIn('Intake Emerald is authoritative',HTML)
+        self.assertIn('Forge Intake is authoritative',HTML)
         self.assertIn('scope-confirmed',HTML)
+    def test_completed_work_is_visibly_reported(self):
+        self.assertIn('id="completion-summary"',HTML)
+        self.assertIn('id="completion-chips"',HTML)
+        self.assertIn('id="completion-toast"',HTML)
+        self.assertIn("`${prettyStage(last)} complete`",HTML)
+        self.assertIn("completed.length>knownCompleted",HTML)
+        self.assertIn("classList.toggle('is-complete',done)",HTML)
     def test_live_data_is_never_cached(self):
         self.assertIn("opts.cache='no-store'",HTML)
         self.assertIn('state.rr_version!==loadedRRVersion',HTML)
@@ -97,7 +115,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn("st['browser_strategy']='EGO DIRECT · SAME STEEL RUNTIME'",APP)
         self.assertIn('AUTHORITATIVE SCOPE — FAIL CLOSED',PROMPT)
         self.assertIn("params.get('scopeIds',[])",ROUTER)
-        self.assertIn('Intake Emerald scopeId is required',ROUTER)
+        self.assertIn('Forge Intake scopeId is required',ROUTER)
         self.assertIn('Never request viewport-only, element-only, truncated, targeted, or smaller DOM reads',PROMPT)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)

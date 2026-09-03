@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and verify the authoritative Intake Emerald automation scope."""
+"""Compile and verify the authoritative Forge Intake automation scope."""
 from __future__ import annotations
 
 import hashlib
@@ -69,7 +69,7 @@ def compile_scope(path: Path = SCOPE_WORKBOOK) -> dict:
         counts = {name: sum(entry['status'] == name for entry in entries) for name in ('confirmed', 'unconfirmed', 'deferred')}
         return {
             'schemaVersion': 1,
-            'authority': 'Intake Emerald',
+            'authority': 'Forge Intake',
             'sourceWorkbook': 'scope/intake-emerald.xlsx',
             'sourceWorksheet': ws.title,
             'sourceSha256': file_sha256(path),

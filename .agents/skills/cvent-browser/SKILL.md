@@ -23,7 +23,7 @@ Every browser operation must use:
 
 Ego is the only browser tool. Do not create another browser, Steel session, task space, profile, or tab.
 
-## Intake Emerald scope
+## Forge Intake scope
 
 `scope/intake-emerald.xlsx` is the authoritative universe of automation work. Verify and use `scope/intake-emerald-scope.json` before browsing:
 
@@ -62,7 +62,7 @@ Require exactly one exact match before opening it. The only authorized target is
 
 ## Domain workflow
 
-For each confirmed Intake Emerald domain:
+For each confirmed Forge Intake domain:
 
 1. Read the normalized expected state and its exact confirmed `scopeId` values.
 2. Snapshot and scroll only through the relevant confirmed Cvent interface.
@@ -79,6 +79,6 @@ Use `intent: write` plus exact confirmed `scopeIds` for every potentially mutati
 - Ego owns the browser action gate as `PI_EGO` while operating.
 - USER takeover is separate and explicit.
 - Runtime marker, canonical target ID, and event key must match before every write.
-- Only `(C+D) Medtrade Testing Clone 2` may be opened or modified, and only for confirmed Intake Emerald fields.
+- Only `(C+D) Medtrade Testing Clone 2` may be opened or modified, and only for confirmed Forge Intake fields.
 - Never publish/go live, send/test/schedule communications, delete/archive, access attendees/contacts, mutate another event, or modify reusable/account-global/profile fields.
 - Preserve event name, code, event key, URL identity, and unpublished status.
