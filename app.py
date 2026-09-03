@@ -358,8 +358,14 @@ def start(request: Request, job_id: str | None = None):
 def continue_job(request: Request, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
-    if BrowserGate(directory_for(job)).read().get("ownership") != "AGENT":
-        raise HTTPException(409, "Return browser control to the agent before continuing")
+    gate = BrowserGate(directory_for(job))
+    if gate.read().get("ownership") != "AGENT":
+        active = active_job(job)
+        if active and active.process and active.process.poll() is None:
+            raise HTTPException(409, "Return browser control to the agent before continuing")
+        # A completed/timed-out login handoff has no live browser or process to
+        # return. Reset only that stale gate before acquiring a fresh worker.
+        gate.initialize()
     try:
         runner.resume(job["id"], identity["subject"])
     except ValueError as exc:

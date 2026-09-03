@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import app as cvent_app
+from browser_gate import BrowserGate
 from control_store import ControlStore
 from runtime_config import AuthorizedEvent
 
@@ -76,6 +77,28 @@ class AuthorizationTests(unittest.TestCase):
             self.assertEqual(without.status_code, 403)
             with_token = client.post("/api/start", headers={"X-CSRF-Token": me["csrf"]})
             self.assertEqual(with_token.status_code, 404)
+
+    def test_continue_resets_stale_user_gate_after_login_process_exits(self):
+        with TestClient(cvent_app.app) as client:
+            me = client.get("/api/me").json()
+            user = self.store.ensure_user("dev:user-one", "one@example.test", "User One", False)
+            job = self.make_job(user, "resume")
+            directory = Path(self.temp.name) / "stale-login-job"
+            gate = BrowserGate(directory)
+            gate.initialize()
+            value = gate.read()
+            value.update({"ownership": "USER", "desiredOwnership": "USER", "activeActor": "USER"})
+            gate.write(value)
+            with patch.object(cvent_app, "directory_for", return_value=directory), \
+                 patch.object(cvent_app, "active_job", return_value=None), \
+                 patch.object(cvent_app.runner, "resume") as resume:
+                response = client.post(
+                    f"/api/continue?job_id={job['id']}",
+                    headers={"X-CSRF-Token": me["csrf"]},
+                )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(gate.read()["ownership"], "AGENT")
+            resume.assert_called_once_with(job["id"], "dev:user-one")
 
     def test_unauthenticated_api_is_rejected(self):
         del os.environ["CVENT_DEV_AUTH_SUBJECT"]
