@@ -57,6 +57,11 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn('selectedWorker=Number(slot)',HTML)
         self.assertIn('f.append(\'worker_slot\',String(selectedWorker))',HTML)
         self.assertIn('`/api/status?worker_slot=${selectedWorker}`',HTML)
+        self.assertIn('id="active-worker-label"',HTML)
+        self.assertIn('id="intake-worker-context"',HTML)
+        self.assertIn('id="browser-worker-context"',HTML)
+        self.assertIn("url.searchParams.set('worker',String(selectedWorker))",HTML)
+        self.assertIn('No runs yet for User ${selectedWorker}',HTML)
         self.assertIn("d.detail==='CSRF validation failed'",HTML)
         self.assertIn("fetch('/api/me',{cache:'no-store'})",HTML)
 
