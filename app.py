@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
+from browser_gate import initialize as initialize_gate, read as read_gate, write as write_gate, request_user, shield_agent, lock_file
+from browser_runtime import RUNTIME as BROWSER_RUNTIME_PATH, initialize as initialize_browser_runtime, probe as probe_browser_runtime, local_probe as local_runtime_probe, load as load_browser_runtime, tool_probe
 
 ROOT=Path(__file__).resolve().parent
 DATA=ROOT/'data'; CURRENT=DATA/'current'; RUNS=DATA/'runs'
@@ -35,6 +37,7 @@ def ensure():
     CURRENT.mkdir(parents=True,exist_ok=True); RUNS.mkdir(parents=True,exist_ok=True); (DATA/'chrome-profile').mkdir(parents=True,exist_ok=True)
     if not STATE.exists(): atomic_json(STATE,fresh_state('input.xlsx' if (CURRENT/'input.xlsx').exists() else None))
     LOG.touch(exist_ok=True)
+    if not (CURRENT/'browser-gate.json').exists(): initialize_gate()
     if (CURRENT/'input.xlsx').exists() and not REPORT.exists(): atomic_json(REPORT,{'status':'INCOMPLETE','unresolved_items':['Build not started'],'real_reads':[],'real_writes':[],'guardrails':{'published':0,'emails_sent':0,'deletes':0,'global_mutations':0},'updated_at':now()})
 def steel_command(command,url=None,timeout=75):
     cmd=[str(ROOT/'steel_session.py'),command]
@@ -52,11 +55,18 @@ def chrome_status():
 def chrome_auth(): return steel_command('page',timeout=60)
 def chrome_login_required(): return chrome_auth().get('auth_status')!='authenticated'
 def launch_chrome(url='https://app.cvent.com/'):
-    data=steel_command('ensure',timeout=60)
+    data=steel_command('ensure',timeout=90)
     if not data.get('running'): return data
     page=steel_command('page',url=url,timeout=75)
     data['login_required']=page.get('login_required'); data['url']=page.get('url'); data['title']=page.get('title')
     return data
+def ensure_browser_runtime(full_probe=False):
+    try:
+        runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); local_runtime_probe(runtime)
+    except Exception:
+        initialize_gate(); runtime=initialize_browser_runtime()
+    if full_probe:probe_browser_runtime(BROWSER_RUNTIME_PATH,full=True)
+    return load_browser_runtime(BROWSER_RUNTIME_PATH)
 def valid_target(url):
     try:
         u=urlparse(url); host=(u.hostname or '').lower()
@@ -82,7 +92,7 @@ def job_pid():
         return pid if command and Path(command.split()[0]).name=='pi' else None
     except Exception:return None
 def running(): return job_pid() is not None
-def stop_process_tree(root):
+def process_tree(root):
     rows=[]
     try:
         for line in subprocess.check_output(['ps','-axo','pid=,ppid='],text=True).splitlines():
@@ -92,7 +102,9 @@ def stop_process_tree(root):
     def walk(parent):
         for pid,ppid in rows:
             if ppid==parent: walk(pid); children.append(pid)
-    walk(root); pids=children+[root]
+    walk(root); return children+[root]
+def stop_process_tree(root):
+    pids=process_tree(root)
     for sig in (signal.SIGTERM,signal.SIGKILL):
         for pid in pids:
             try: os.kill(pid,sig)
@@ -101,7 +113,7 @@ def stop_process_tree(root):
         time.sleep(.7)
 
 def render_prompt():
-    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'OPERATOR_PATH':str((ROOT/'browser_use_operator.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
+    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'BROWSER_RUNTIME_PATH':str(BROWSER_RUNTIME_PATH.resolve()),'BROWSER_TOOL_PATH':str((ROOT/'browser_tool.py').resolve()),'OPERATOR_PATH':str((ROOT/'browser_use_operator.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
     text=(ROOT/'PI_PROMPT.md').read_text()
     for k,v in vals.items(): text=text.replace('{{'+k+'}}',v)
     (CURRENT/'job-prompt.md').write_text(text); return text
@@ -149,12 +161,22 @@ def steel_viewer():
         import urllib.request
         with urllib.request.urlopen('http://127.0.0.1:3005/v1/sessions/debug',timeout=10) as r: html=r.read().decode('utf-8')
         html=html.replace('ws://0.0.0.0:3000','ws://127.0.0.1:3005').replace('http://0.0.0.0:3000','http://127.0.0.1:3005')
+        safety="""<script>(()=>{let user=false;const stop=e=>{if(!user){e.preventDefault();e.stopImmediatePropagation();try{document.activeElement?.blur()}catch{}}};['pointerdown','pointerup','pointermove','mousedown','mouseup','mousemove','click','dblclick','contextmenu','wheel','touchstart','touchmove','touchend','keydown','keyup','keypress','focusin'].forEach(n=>document.addEventListener(n,stop,{capture:true,passive:false}));async function sync(){try{const r=await fetch('/api/browser/ownership',{cache:'no-store'}),d=await r.json();user=d.ownership==='USER'&&d.desiredOwnership==='USER';document.documentElement.dataset.controlOwner=user?'USER':'AGENT';document.body.style.pointerEvents=user?'auto':'none';if(!user)try{document.activeElement?.blur()}catch{}}catch{user=false;document.body.style.pointerEvents='none'}}sync();setInterval(sync,400)})()</script>"""
+        html=html.replace('</body>',safety+'</body>')
         return HTMLResponse(html,headers={'Cache-Control':'no-store'})
     except Exception as e: raise HTTPException(503,f'Local Steel viewer unavailable: {e}')
 
+@app.get('/api/browser/ownership')
+def browser_ownership():
+    return JSONResponse(read_gate(),headers={'Cache-Control':'no-store'})
+
 @app.get('/api/status')
 def status():
-    ensure(); st=read_json(STATE,fresh_state()); st['run_mode']=RUN_MODE; st['authorized_event_name']=AUTHORIZED_EVENT_NAME; st['browser_use_mode']='FAST · CLAUDE HAIKU 4.5'; st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['pi_process_running']=running()
+    ensure(); st=read_json(STATE,fresh_state()); st['run_mode']=RUN_MODE; st['authorized_event_name']=AUTHORIZED_EVENT_NAME; st['browser_use_mode']='EGO FIRST · BROWSER USE DIRECT/FALLBACK'; st['browser_gate']=read_gate();
+    try:
+        runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); st['browser_runtime']={k:runtime.get(k) for k in ('browserRuntimeId','steelWorkspaceId','providerSessionId','apiOrigin','cdpEndpoint','viewerUrl','targetBrowserIdentity','verifiedAt')}
+    except Exception: st['browser_runtime']=None
+    st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['pi_process_running']=running()
     if st.get('started_at'):
         try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['started_at'])).total_seconds()))
         except Exception: st['elapsed_seconds']=0
@@ -233,9 +255,11 @@ def start():
     ensure()
     with _lock:
         if running(): raise HTTPException(409,'A job is already running')
+        if read_gate().get('ownership')!='AGENT': raise HTTPException(409,'Return browser control to the agent before starting')
         if not (CURRENT/'input.xlsx').exists(): raise HTTPException(400,'Upload the RR workbook first')
         browser=launch_chrome('https://app.cvent.com/')
         if not browser.get('running'): raise HTTPException(500,browser.get('error','Chrome failed'))
+        runtime=ensure_browser_runtime(full_probe=True)
         prompt=render_prompt(); pid=spawn_pi(prompt)
     return {'ok':True,'pid':pid,'browser':browser}
 
@@ -244,9 +268,11 @@ def continue_job():
     ensure()
     with _lock:
         if running(): raise HTTPException(409,'Pi is already running')
+        if read_gate().get('ownership')!='AGENT': raise HTTPException(409,'Return browser control to the agent before continuing')
         st=read_json(STATE,{})
         locked_url=authorized_target_url()
         launch_chrome(locked_url or 'https://app.cvent.com/')
+        runtime=ensure_browser_runtime(full_probe=True)
         auth=chrome_auth()
         if auth.get('auth_status')!='authenticated':
             where='Microsoft SSO/MFA' if auth.get('auth_status')=='microsoft_sso' else 'Cvent login'
@@ -259,8 +285,58 @@ def continue_job():
 
 @app.post('/api/open-browser')
 def open_browser():
-    ensure(); result=launch_chrome(authorized_target_url() or 'https://app.cvent.com/')
+    ensure(); gate=read_gate()
+    # While Pi owns a live runtime, this button only reveals the viewer; it may
+    # never navigate the shared page behind the agent's back.
+    if running() and gate.get('ownership')=='AGENT':
+        runtime=ensure_browser_runtime(full_probe=False)
+        return {**chrome_status(),'browserRuntime':runtime,'displayOnly':True}
+    result=launch_chrome(authorized_target_url() or 'https://app.cvent.com/')
+    if result.get('running'):result['browserRuntime']=ensure_browser_runtime(full_probe=True)
     return result
+
+@app.post('/api/browser/take-control')
+def take_control():
+    runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); local_runtime_probe(runtime)
+    request_user()
+    with lock_file():
+        pid=job_pid(); pids=process_tree(pid) if pid else []
+        for process in pids:
+            try:os.kill(process,signal.SIGSTOP)
+            except ProcessLookupError:pass
+        gate=read_gate(); gate.update({'ownership':'USER','desiredOwnership':'USER','activeActor':'USER','piPaused':bool(pids),'pausedPids':pids,'transition':None,'browserRuntimeId':runtime['browserRuntimeId']});write_gate(gate)
+    append_log('Human takeover enabled at a safe browser action boundary')
+    return {'ok':True,'gate':read_gate()}
+
+@app.post('/api/browser/return-to-agent')
+def return_to_agent():
+    runtime=load_browser_runtime(BROWSER_RUNTIME_PATH);shield_agent()
+    with lock_file():
+        try:
+            viewer=local_runtime_probe(runtime)
+            ego=tool_probe(runtime,['node','ego_direct.mjs','--runtime',str(BROWSER_RUNTIME_PATH),'--operation','snapshotText','--params','{}'])
+            browser_use=tool_probe(runtime,['./browser_use_direct.py','--runtime',str(BROWSER_RUNTIME_PATH),'--operation','probe','--params','{}'])
+            if not ego.get('ok') or not browser_use.get('ok'):raise RuntimeError('Fresh browser read failed')
+            lock=read_json(CURRENT/'authorized-target.json',{})
+            if lock:
+                expected=urlparse(lock.get('url','')).query; actual=urlparse(viewer.get('url','')).query
+                if event_key_from_url(lock.get('url',''))!=event_key_from_url(viewer.get('url','')) or AUTHORIZED_EVENT_NAME.lower() not in json.dumps(ego).lower():raise RuntimeError('Human left the authorized Cvent event; agent remains paused')
+            handoff={'browserRuntimeId':runtime['browserRuntimeId'],'viewer':viewer,'ego':ego,'browserUse':browser_use,'inspectedAt':now()};atomic_json(CURRENT/'human-handoff-state.json',handoff)
+            gate=read_gate();paused=gate.get('pausedPids',[]);gate.update({'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','piPaused':False,'pausedPids':[],'transition':None});write_gate(gate)
+            for process in reversed(paused):
+                try:os.kill(process,signal.SIGCONT)
+                except ProcessLookupError:pass
+        except Exception:
+            gate=read_gate();gate.update({'ownership':'NONE','desiredOwnership':'AGENT','activeActor':'NONE','transition':'RETURN_BLOCKED','piPaused':True});write_gate(gate);raise
+    append_log(f'Returned browser to Pi after fresh Ego/Browser Use read: {viewer["title"]}')
+    return {'ok':True,'gate':read_gate(),'state':handoff}
+
+def event_key_from_url(url):
+    from urllib.parse import parse_qs
+    q=parse_qs(urlparse(url).query)
+    for key in ('evtstub','eventId','eventid','event'):
+        if q.get(key):return q[key][0].lower()
+    return None
 
 @app.post('/api/stop-agent')
 def stop_agent():
@@ -271,6 +347,9 @@ def stop_agent():
             stop_process_tree(pid); _proc=None
             append_log(f'Pi build process tree {pid} stopped by operator')
         steel=steel_command('release',timeout=60)
+        initialize_gate()
+        try:BROWSER_RUNTIME_PATH.unlink()
+        except FileNotFoundError:pass
         st=read_json(STATE,{})
         st.update({'status':'stopped','current_stage':'stopped','current_action':'Build and Steel browser stopped','pi_pid':None,'updated_at':now()}); atomic_json(STATE,st)
         append_log('Steel OSS browser stopped; persistent profile preserved')

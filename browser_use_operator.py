@@ -5,10 +5,11 @@ import argparse, asyncio, json, os, re, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from browser_gate import action
+from browser_runtime import load as load_runtime, local_probe
 
 ROOT=Path(__file__).resolve().parent
 CURRENT=ROOT/'data'/'current'
-CDP=os.getenv('CVENT_CDP_URL','').strip()
 DANGEROUS=re.compile(r'(^|\b)(publish|go live|send( now)?|send invitation|delete|archive|launch event)(\b|$)',re.I)
 DISCOVERY_MUTATION=re.compile(r'(^|\b)(save|edit|create|add|new event|copy|duplicate|enable|disable)(\b|$)',re.I)
 SEARCH_CONTROL=re.compile(r'(search|find|filter|event name|event code)',re.I)
@@ -64,10 +65,7 @@ async def run(args):
         if lock.get('name')!=AUTHORIZED_EVENT_NAME or not target_key or target_key!=locked_key:
             append_log('BLOCKED: requested target does not match the authorized Medtrade Clone 2 lock')
             return {'status':'BLOCKED','message':f'Only {AUTHORIZED_EVENT_NAME} is authorized','chrome_alive':True}
-    if CDP: resolved_cdp=CDP
-    else:
-        from steel_session import cdp_url
-        resolved_cdp=cdp_url()
+    resolved_cdp=load_runtime(Path(args.runtime))['cdpEndpoint']
     browser=Browser(cdp_url=resolved_cdp,is_local=False,keep_alive=True)
     await browser.start()
     try:
@@ -162,6 +160,7 @@ NEVER publish/go live, send/test/schedule email or invitations, delete, archive,
         if status=='DISCOVERED':
             lock={'name':AUTHORIZED_EVENT_NAME,'url':discovered_url,'event_key':event_key(discovered_url),'locked_at':now(),'mode':'mock'}
             tmp=AUTHORIZED_TARGET.with_suffix('.tmp'); tmp.write_text(json.dumps(lock,indent=2)); tmp.replace(AUTHORIZED_TARGET)
+            runtime_path=Path(args.runtime); runtime=json.loads(runtime_path.read_text()); runtime['targetBrowserIdentity'].update({'url':discovered_url,'title':final_title}); runtime_tmp=runtime_path.with_suffix('.tmp'); runtime_tmp.write_text(json.dumps(runtime,indent=2)); runtime_tmp.replace(runtime_path)
             append_log(f'Authorized mock target locked: {AUTHORIZED_EVENT_NAME}')
         duration=round(time.monotonic()-started,1)
         append_log(f'Browser Use finished — {status} in {duration}s')
@@ -172,10 +171,13 @@ NEVER publish/go live, send/test/schedule email or invitations, delete, archive,
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(); mode=p.add_mutually_exclusive_group(required=True); mode.add_argument('--target'); mode.add_argument('--discover',action='store_true')
-    p.add_argument('--identity'); p.add_argument('--mission',required=True); p.add_argument('--max-steps',type=int,default=35)
+    p.add_argument('--runtime',required=True); p.add_argument('--identity'); p.add_argument('--mission',required=True); p.add_argument('--max-steps',type=int,default=35)
     a=p.parse_args()
     if a.discover and not a.identity: p.error('--identity is required with --discover')
-    try: result=asyncio.run(run(a)); print('\nCVENT_BROWSER_RESULT='+json.dumps(result,ensure_ascii=False))
+    try:
+        runtime=load_runtime(Path(a.runtime));local_probe(runtime)
+        with action(runtime['browserRuntimeId'],'BROWSER_USE_AGENT'):result=asyncio.run(run(a))
+        print('\nCVENT_BROWSER_RESULT='+json.dumps(result,ensure_ascii=False))
     except Exception as e:
         result={'status':'FAILED','error':f'{type(e).__name__}: {e}','chrome_alive':True}; append_log('Browser Use failed: '+result['error']); print('\nCVENT_BROWSER_RESULT='+json.dumps(result))
         sys.exit(1)

@@ -1,36 +1,54 @@
 ---
 name: cvent-browser
-version: 1.1.0
-description: Operate only the locked (C+D) Medtrade Clone 2 mock event in one persistent Cvent Chrome through Browser Use.
+version: 2.0.0
+description: Pi-controlled Ego and Browser Use tools for the one locked (C+D) Medtrade Clone 2 Steel Chromium.
 ---
 
-# Cvent Browser Operator
+# Cvent Browser Tools
 
-Run from `/Users/bp/cvent-one-shot`.
-
-## 1. Find the one authorized mock event (read-only)
-
-The uploaded RR is mock requirements data and never authorizes its real event. Search only for the exact literal event name `(C+D) Medtrade Clone 2`:
+Pi is the only reasoning agent. Run from `/Users/bp/cvent-one-shot` and pass the canonical runtime on every call:
 
 ```bash
-./browser_use_operator.py --discover --identity "(C+D) Medtrade Clone 2" \
-  --mission "Find the one exact-name authorized mock event. Ignore RR identity. Read only." --max-steps 25
+RUNTIME=/Users/bp/cvent-one-shot/data/current/browser-runtime.json
 ```
 
-Discovery may search/filter the Cvent event list and open only the exact-name clone for identity verification. It cannot save/edit/create anything. Require exactly one exact-name match and a non-empty `discovered_target_url`. The operator writes `data/current/authorized-target.json`; all later operations are hard-blocked unless their event key matches this lock. Save that URL and the exact clone name in `state.json`. Zero, multiple, fuzzy, or uncertain matches means REVIEW REQUIRED and zero writes.
+## Priority 1 — Ego direct
 
-## 2. Operate only the locked clone target
+Use `browser_tool.py --runtime "$RUNTIME" --tool ego` with operations:
+
+`snapshotText`, `pageInfo`, `click`, `fill`, `type`, `navigate`, `openOrReuseTab`, `js`, `cdp`, `wait`, `tabs`, `switchTab`, `authorizeTarget`.
+
+Examples:
 
 ```bash
-./browser_use_operator.py --target "$DISCOVERED_TARGET_URL" \
-  --mission "$BOUNDED_MISSION" --max-steps 35
+./browser_tool.py --runtime "$RUNTIME" --tool ego --operation snapshotText --params '{}'
+./browser_tool.py --runtime "$RUNTIME" --tool ego --operation fill --params '{"target":"input[aria-label=Search]","text":"(C+D) Medtrade Clone 2","intent":"read"}'
 ```
 
-- Preserve the clone's exact name, event code/ID, URL identity, and unpublished status. Never open or mutate the real event named in the RR.
-- Browser Use always attaches to the one self-hosted Steel OSS browser at localhost CDP `127.0.0.1:9334`. Its Chrome profile persists at `data/steel-profile-local/`.
-- You decide **what** from the RR; Browser Use determines **how** from the live UI.
-- Keep invoking it section-by-section until done. It may restart, but never close/replace Chrome.
-- Read `CVENT_BROWSER_RESULT=...`. Do not claim a write unless Browser Use re-read it.
-- If the result says `LOGIN_REQUIRED` or `MFA REQUIRED`, update state to `login_required`, log `MFA REQUIRED`, and end the Pi turn. CONTINUE resumes this Pi session.
-- On operator failure, keep Chrome alive, re-read RR/state and actual Cvent, then retry narrowly.
-- Never create another Steel session yourself, release the active session, or use Playwright, ego-browser, raw CDP, curl, Cvent APIs, or another browser to operate Cvent. `steel_session.py` owns the one local Steel container/browser. Python/openpyxl is only for the workbook.
+Discovery is read-only. After exactly one literal clone match is open and visible, call `authorizeTarget` with `{"eventName":"(C+D) Medtrade Clone 2","intent":"read"}`. This creates the required event-key lock.
+
+## Priority 2 — Browser Use direct
+
+Use `--tool browser-use` for: `browser_get_state`, `browser_navigate`, `browser_click`, `browser_type`, `browser_scroll`, `browser_extract_content`, `tabs`, `wait`, `send_keys`.
+
+Browser Use indices come from `browser_get_state`. It is direct tooling; Pi chooses every action.
+
+## Priority 3 — bounded autonomous fallback
+
+Use only when direct tools are not progressing:
+
+```bash
+./browser_tool.py --runtime "$RUNTIME" --tool fallback \
+  --operation retry_with_browser_use_agent --params "$CONTRACT"
+```
+
+The JSON contract must include exact `eventId`, `eventName`, `resourceDomain`, `expectedState`, `allowedActions`, `prohibitedActions`, and `successCriteria`. After fallback, verify independently with Ego.
+
+## Hard rules
+
+- Every call is serialized by BrowserActionGate.
+- A runtime marker mismatch, wrong target ID, wrong event key, or USER ownership fails closed.
+- Use `intent: write` for mutations and `intent: read` for discovery/inspection.
+- Only `(C+D) Medtrade Clone 2` is authorized.
+- Never publish/go live, send/test/schedule communications, delete/archive, access attendees/contacts, mutate another event, or modify reusable/account-global/profile fields.
+- Keep one Steel Chromium and one Cvent execution path. No concurrent Ego task spaces.
