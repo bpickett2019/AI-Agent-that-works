@@ -212,6 +212,16 @@ function parseMarker(stdout: string, marker: string): any {
   return result;
 }
 
+async function invokeBrowser(operation: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutSeconds = 90): Promise<any> {
+  await readJobFile(runtimePath, 1024 * 1024);
+  const timeout = Math.max(1, Math.min(timeoutSeconds, 180));
+  const output = await runFixed(python, [
+    join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
+    "--operation", operation, "--params", JSON.stringify(params),
+  ], "browser", signal, (timeout + 10) * 1000);
+  return parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
+}
+
 function browserParams(operation: string, input: any): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   if (operation === "authorizeTarget") params.eventName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
@@ -490,10 +500,28 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_login_handoff",
     label: "Request Cvent login",
-    description: "Pause browser automation at a login page and hand this job's existing Steel viewer to the user for SSO/MFA. Waits without shell or credential access until the user returns control.",
+    description: "Open the fixed Cvent subscriber entry point when the browser is blank, detect a login page, and hand this job's existing Steel viewer to the user for SSO/MFA. If already authenticated, return without handing off; otherwise wait until the user returns control.",
     parameters: Type.Object({}),
     async execute(_id: string, _params: unknown, signal: AbortSignal) {
       return withQueue("browser", async () => {
+        let pageResult = await invokeBrowser("pageInfo", { intent: "read" }, signal, 45);
+        let pageUrl = String(pageResult?.page?.url ?? "");
+        let pageTitle = String(pageResult?.page?.title ?? "");
+        let host = "";
+        try { host = new URL(pageUrl).hostname.toLowerCase(); } catch { /* fixed navigation below */ }
+        const recognizedLoginHost = host.endsWith("cvent.com") || host.includes("microsoftonline.com") || host.includes("login.windows.net") || host.includes("login.live.com");
+        if (!pageUrl || pageUrl === "about:blank" || !recognizedLoginHost) {
+          await invokeBrowser("navigate", { intent: "read", url: "https://app.cvent.com/subscribers/default.aspx" }, signal, 60);
+          pageResult = await invokeBrowser("pageInfo", { intent: "read" }, signal, 45);
+          pageUrl = String(pageResult?.page?.url ?? "");
+          pageTitle = String(pageResult?.page?.title ?? "");
+          try { host = new URL(pageUrl).hostname.toLowerCase(); } catch { host = ""; }
+        }
+        const needsLogin = host.includes("microsoftonline.com") || host.includes("login.windows.net") || host.includes("login.live.com") || /(?:login|sign.?in|sso|authenticate)/i.test(`${pageUrl} ${pageTitle}`);
+        if (!needsLogin) {
+          return toolText({ ok: true, loginRequired: false, url: pageUrl, instruction: "The browser is not on a login page; fresh-read a complete snapshot and continue." });
+        }
+
         const gatePath = join(jobDir, "browser-gate.json");
         const gate = await readJson(gatePath, {});
         if (gate.ownership !== "AGENT" || gate.desiredOwnership !== "AGENT" || ![undefined, null, "NONE"].includes(gate.activeActor)) {
@@ -566,14 +594,9 @@ export default function cventJobTools(pi: any) {
         throw new Error("Write blocked: confirmed Forge Intake scope IDs are required");
       }
       return withQueue("browser", async () => {
-        await readJobFile(runtimePath, 1024 * 1024);
         const input = browserParams(operation, params);
         const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? 90), 180));
-        const output = await runFixed(python, [
-          join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
-          "--operation", operation, "--params", JSON.stringify(input),
-        ], "browser", signal, (timeout + 10) * 1000);
-        const result = parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
+        const result = await invokeBrowser(operation, input, signal, timeout);
         return toolText(await saveLargeSnapshot(result));
       });
     },
