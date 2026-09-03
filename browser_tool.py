@@ -36,7 +36,7 @@ def guard(runtime,operation,params):
         if key and key!=locked:raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs'] if tool=='ego' else ['./browser_use_direct.py']
-    actor='PI_EGO' if tool=='ego' else 'PI_BROWSER_USE'
+    actor='CVENT_EGO' if tool=='ego' else 'CVENT_BROWSER_USE'
     with action(runtime['browserRuntimeId'],actor):
         guard(runtime,operation,params)
         if operation=='authorizeTarget':

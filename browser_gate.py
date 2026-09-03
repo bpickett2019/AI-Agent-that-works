@@ -6,15 +6,20 @@ from datetime import datetime,timezone
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 CURRENT=ROOT/'data'/'current'; GATE=CURRENT/'browser-gate.json'; LOCK=CURRENT/'browser-gate.lock'
-ACTORS={'PI_EGO','PI_BROWSER_USE','BROWSER_USE_AGENT','USER','NONE'}
+ACTORS={'CVENT_EGO','CVENT_BROWSER_USE','BROWSER_USE_AGENT','USER','NONE'}
 def now():return datetime.now(timezone.utc).isoformat()
 def read():
-    try:return json.loads(GATE.read_text())
-    except Exception:return {'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','piPaused':False,'updatedAt':now()}
+    try:
+        data=json.loads(GATE.read_text())
+        if 'piPaused' in data:data['agentPaused']=data.pop('piPaused')
+        if data.get('activeActor')=='PI_EGO':data['activeActor']='CVENT_EGO'
+        if data.get('activeActor')=='PI_BROWSER_USE':data['activeActor']='CVENT_BROWSER_USE'
+        return data
+    except Exception:return {'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','agentPaused':False,'updatedAt':now()}
 def write(data):
     GATE.parent.mkdir(parents=True,exist_ok=True);data['updatedAt']=now();tmp=GATE.with_suffix('.tmp');tmp.write_text(json.dumps(data,indent=2));tmp.replace(GATE)
 def initialize():
-    data={'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','piPaused':False,'transition':None,'updatedAt':now()};write(data);LOCK.touch();return data
+    data={'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','agentPaused':False,'transition':None,'updatedAt':now()};write(data);LOCK.touch();return data
 def request_user():
     data=read();data.update({'desiredOwnership':'USER','transition':'WAITING_FOR_SAFE_BOUNDARY'});write(data);return data
 def shield_agent():

@@ -124,13 +124,13 @@ def spawn_pi(message,target=None,resume=False):
     cmd=['pi','-p','--approve','--no-extensions','--no-skills','--skill',str(ROOT/'.agents/skills/cvent-browser/SKILL.md'),'--no-prompt-templates','--no-context-files','--session-dir',str(sessions),'--name','cvent-one-shot']
     if resume:
         files=sorted(sessions.glob('*.jsonl'),key=lambda p:p.stat().st_mtime,reverse=True)
-        if not files: raise HTTPException(409,'No Pi session to continue')
+        if not files: raise HTTPException(409,'No CVENT Agent session to continue')
         cmd += ['--session',str(files[0]),message]
     else: cmd += [message]
     out=open(CURRENT/'pi-output.log','a',buffering=1)
     _proc=subprocess.Popen(cmd,cwd=ROOT,stdout=out,stderr=subprocess.STDOUT,text=True,start_new_session=True)
-    st=read_json(STATE,fresh_state('input.xlsx')); st.update({'status':'running','current_stage':'starting','current_action':'Pi is starting','target_url':target or st.get('target_url',''),'pi_pid':_proc.pid,'started_at':st.get('started_at') or now(),'process_started_at':now(),'updated_at':now()}); atomic_json(STATE,st)
-    append_log(('Resuming' if resume else 'Started')+f' Pi process PID {_proc.pid}')
+    st=read_json(STATE,fresh_state('input.xlsx')); st.update({'status':'running','current_stage':'starting','current_action':'CVENT Agent is starting','target_url':target or st.get('target_url',''),'pi_pid':_proc.pid,'started_at':st.get('started_at') or now(),'process_started_at':now(),'updated_at':now()}); atomic_json(STATE,st)
+    append_log(('Resuming' if resume else 'Started')+f' CVENT Agent process PID {_proc.pid}')
     threading.Thread(target=monitor_pi,args=(_proc,out),daemon=True).start()
     return _proc.pid
 
@@ -141,7 +141,7 @@ def monitor_pi(proc,out):
     sessions=sorted((CURRENT/'pi-sessions').glob('*.jsonl'),key=lambda p:p.stat().st_mtime,reverse=True) if (CURRENT/'pi-sessions').exists() else []
     if sessions: st['pi_session']=str(sessions[0])
     if st.get('status')=='running':
-        st['status']='agent_stopped' if code==0 else 'failed'; st['current_action']='Pi stopped before a final verdict' if code==0 else f'Pi exited with code {code}'
+        st['status']='agent_stopped' if code==0 else 'failed'; st['current_action']='CVENT Agent stopped before a final verdict' if code==0 else f'CVENT Agent exited with code {code}'
         append_log(st['current_action'])
     if st.get('process_started_at'):
         try:st['last_run_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['process_started_at'])).total_seconds()))
@@ -156,7 +156,7 @@ def startup():
     ensure()
 
 @app.get('/',response_class=HTMLResponse)
-def home(): return (ROOT/'templates/index.html').read_text()
+def home(): return HTMLResponse((ROOT/'templates/index.html').read_text(),headers={'Cache-Control':'no-store, no-cache, must-revalidate','Pragma':'no-cache','Expires':'0'})
 
 @app.get('/steel-viewer',response_class=HTMLResponse)
 def steel_viewer():
@@ -179,12 +179,14 @@ def status():
     try:
         runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); st['browser_runtime']={k:runtime.get(k) for k in ('browserRuntimeId','steelWorkspaceId','providerSessionId','apiOrigin','cdpEndpoint','viewerUrl','targetBrowserIdentity','verifiedAt')}
     except Exception: st['browser_runtime']=None
-    st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['pi_process_running']=running()
-    if st['pi_process_running'] and st.get('process_started_at'):
+    st['activity_log']=[line.replace('Pi','CVENT Agent').replace('pi agent','CVENT Agent') for line in LOG.read_text(errors='replace').splitlines()[-200:]]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['agent_process_running']=running(); st['agent_pid']=st.get('pi_pid'); st['agent_session']=st.get('pi_session'); st['current_action']=(st.get('current_action') or '').replace('Pi','CVENT Agent')
+    path=CURRENT/'input.xlsx';st['rr_version']=path.stat().st_mtime_ns if path.exists() else None
+    if st['agent_process_running'] and st.get('process_started_at'):
         try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['process_started_at'])).total_seconds()))
         except Exception: st['elapsed_seconds']=0
     else:
-        st['elapsed_seconds']=0;st['pi_pid']=None
+        st['elapsed_seconds']=0;st['agent_pid']=None
+    st.pop('pi_pid',None);st.pop('pi_session',None)
     return JSONResponse(st,headers={'Cache-Control':'no-store'})
 
 @app.get('/api/workbook')
@@ -195,7 +197,7 @@ def workbook_info():
     wb=load_workbook(path,read_only=True,data_only=False)
     try: sheets=[{'name':ws.title,'rows':ws.max_row,'columns':ws.max_column} for ws in wb.worksheets]
     finally: wb.close()
-    return {'file':read_json(STATE,{}).get('rr_file') or path.name,'sheets':sheets}
+    return JSONResponse({'file':read_json(STATE,{}).get('rr_file') or path.name,'version':path.stat().st_mtime_ns,'sheets':sheets},headers={'Cache-Control':'no-store'})
 
 @app.get('/api/workbook/sheet')
 def workbook_sheet(name:str,start:int=1,limit:int=80):
@@ -212,13 +214,13 @@ def workbook_sheet(name:str,start:int=1,limit:int=80):
             if hasattr(v,'isoformat'):return v.isoformat()
             return str(v)
         rows=[[value(ws.cell(r,c).value) for c in range(1,width+1)] for r in range(start,end+1)]
-        return {'name':name,'start':start,'end':end,'total_rows':ws.max_row,'total_columns':ws.max_column,'columns':[get_column_letter(c) for c in range(1,width+1)],'rows':rows}
+        return JSONResponse({'name':name,'version':path.stat().st_mtime_ns,'start':start,'end':end,'total_rows':ws.max_row,'total_columns':ws.max_column,'columns':[get_column_letter(c) for c in range(1,width+1)],'rows':rows},headers={'Cache-Control':'no-store'})
     finally: wb.close()
 
 @app.post('/api/upload')
 def upload(rr:UploadFile=File(...)):
     ensure()
-    if running(): raise HTTPException(409,'Pi is running')
+    if running(): raise HTTPException(409,'CVENT Agent is running')
     name=rr.filename or ''
     if not name.lower().endswith('.xlsx'): raise HTTPException(400,'Upload an .xlsx file')
     archive_current(); CURRENT.mkdir(parents=True,exist_ok=True)
@@ -271,7 +273,7 @@ def start():
 def continue_job():
     ensure()
     with _lock:
-        if running(): raise HTTPException(409,'Pi is already running')
+        if running(): raise HTTPException(409,'CVENT Agent is already running')
         if read_gate().get('ownership')!='AGENT': raise HTTPException(409,'Return browser control to the agent before continuing')
         st=read_json(STATE,{})
         locked_url=authorized_target_url()
@@ -308,7 +310,7 @@ def take_control():
         for process in pids:
             try:os.kill(process,signal.SIGSTOP)
             except ProcessLookupError:pass
-        gate=read_gate(); gate.update({'ownership':'USER','desiredOwnership':'USER','activeActor':'USER','piPaused':bool(pids),'pausedPids':pids,'transition':None,'browserRuntimeId':runtime['browserRuntimeId']});write_gate(gate)
+        gate=read_gate(); gate.update({'ownership':'USER','desiredOwnership':'USER','activeActor':'USER','agentPaused':bool(pids),'pausedPids':pids,'transition':None,'browserRuntimeId':runtime['browserRuntimeId']});write_gate(gate)
     append_log('Human takeover enabled at a safe browser action boundary')
     return {'ok':True,'gate':read_gate()}
 
@@ -326,13 +328,13 @@ def return_to_agent():
                 expected=urlparse(lock.get('url','')).query; actual=urlparse(viewer.get('url','')).query
                 if event_key_from_url(lock.get('url',''))!=event_key_from_url(viewer.get('url','')) or AUTHORIZED_EVENT_NAME.lower() not in json.dumps(ego).lower():raise RuntimeError('Human left the authorized Cvent event; agent remains paused')
             handoff={'browserRuntimeId':runtime['browserRuntimeId'],'viewer':viewer,'ego':ego,'browserUse':browser_use,'inspectedAt':now()};atomic_json(CURRENT/'human-handoff-state.json',handoff)
-            gate=read_gate();paused=gate.get('pausedPids',[]);gate.update({'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','piPaused':False,'pausedPids':[],'transition':None});write_gate(gate)
+            gate=read_gate();paused=gate.get('pausedPids',[]);gate.update({'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','agentPaused':False,'pausedPids':[],'transition':None});write_gate(gate)
             for process in reversed(paused):
                 try:os.kill(process,signal.SIGCONT)
                 except ProcessLookupError:pass
         except Exception:
-            gate=read_gate();gate.update({'ownership':'NONE','desiredOwnership':'AGENT','activeActor':'NONE','transition':'RETURN_BLOCKED','piPaused':True});write_gate(gate);raise
-    append_log(f'Returned browser to Pi after fresh Ego/Browser Use read: {viewer["title"]}')
+            gate=read_gate();gate.update({'ownership':'NONE','desiredOwnership':'AGENT','activeActor':'NONE','transition':'RETURN_BLOCKED','agentPaused':True});write_gate(gate);raise
+    append_log(f'Returned browser to CVENT Agent after fresh Ego/Browser Use read: {viewer["title"]}')
     return {'ok':True,'gate':read_gate(),'state':handoff}
 
 def event_key_from_url(url):
@@ -349,7 +351,7 @@ def stop_agent():
         pid=job_pid()
         if pid:
             stop_process_tree(pid); _proc=None
-            append_log(f'Pi build process tree {pid} stopped by operator')
+            append_log(f'CVENT Agent process tree {pid} stopped by operator')
         steel=steel_command('release',timeout=60)
         initialize_gate()
         try:BROWSER_RUNTIME_PATH.unlink()

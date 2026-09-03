@@ -27,6 +27,14 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn("'wheel'",APP);self.assertIn("'focusin'",APP)
         self.assertIn("document.body.style.pointerEvents=user?'auto':'none'",APP)
         self.assertIn("d.ownership==='USER'&&d.desiredOwnership==='USER'",APP)
+    def test_product_uses_cvent_agent_branding(self):
+        self.assertNotIn('Pi ',HTML)
+        self.assertIn('Current CVENT Agent execution',HTML)
+        self.assertIn('<dt>CVENT Agent</dt>',HTML)
+    def test_live_data_is_never_cached(self):
+        self.assertIn("opts.cache='no-store'",HTML)
+        self.assertIn('state.rr_version!==loadedRRVersion',HTML)
+        self.assertIn("'Cache-Control':'no-store, no-cache, must-revalidate'",APP)
 
 class BrowserGateTests(unittest.TestCase):
     def setUp(self):
@@ -37,12 +45,12 @@ class BrowserGateTests(unittest.TestCase):
     def tearDown(self):
         browser_gate.GATE,browser_gate.LOCK=self.old;self.tmp.cleanup()
     def test_agent_action_and_user_transition(self):
-        with browser_gate.action('runtime-x','PI_EGO'):
-            self.assertEqual(browser_gate.read()['activeActor'],'PI_EGO')
+        with browser_gate.action('runtime-x','CVENT_EGO'):
+            self.assertEqual(browser_gate.read()['activeActor'],'CVENT_EGO')
         self.assertEqual(browser_gate.read()['activeActor'],'NONE')
         browser_gate.request_user()
         with self.assertRaisesRegex(RuntimeError,'not agent-owned'):
-            with browser_gate.action('runtime-x','PI_BROWSER_USE'):pass
+            with browser_gate.action('runtime-x','CVENT_BROWSER_USE'):pass
     def test_only_explicit_request_changes_desired_ownership(self):
         self.assertEqual(browser_gate.read()['desiredOwnership'],'AGENT')
         browser_gate.request_user()
