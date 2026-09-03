@@ -20,6 +20,19 @@ def clear_stale_profile_locks():
         try:(PROFILE/name).unlink()
         except FileNotFoundError:pass
 
+def recover_container_profile_locks():
+    # Docker Desktop can retain an unlinked SingletonLock inside the bind mount
+    # even when the macOS host no longer sees it. Only recover when CDP has
+    # remained unavailable, so no usable canonical Chromium is disturbed.
+    cleanup=subprocess.run([
+        'docker','exec',CONTAINER,'sh','-lc',
+        'rm -f /tmp/steel-chrome/SingletonLock '
+        '/tmp/steel-chrome/SingletonSocket /tmp/steel-chrome/SingletonCookie'
+    ],text=True,capture_output=True,timeout=15)
+    if cleanup.returncode:raise RuntimeError((cleanup.stderr or cleanup.stdout)[-1500:])
+    restarted=subprocess.run(['docker','restart',CONTAINER],text=True,capture_output=True,timeout=60)
+    if restarted.returncode:raise RuntimeError((restarted.stderr or restarted.stdout)[-1500:])
+
 def get_json(url,timeout=2):
     with urllib.request.urlopen(url,timeout=timeout) as r:return json.load(r)
 def container_running():
@@ -37,9 +50,12 @@ def ensure():
         clear_stale_profile_locks()
         r=subprocess.run(['docker','compose','up','-d','steel'],cwd=ROOT,text=True,capture_output=True,timeout=180)
         if r.returncode:raise RuntimeError((r.stderr or r.stdout)[-1500:])
-    for _ in range(120):
+    recovered=False
+    for attempt in range(120):
         s=status()
         if s['running']:return s
+        if attempt==20 and container_running() and not recovered:
+            recover_container_profile_locks();recovered=True
         time.sleep(.5)
     raise RuntimeError('Open-source Steel CDP did not become ready')
 def release():
