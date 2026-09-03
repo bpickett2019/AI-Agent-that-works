@@ -231,6 +231,11 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"})
     if persisted and persisted["state"] in TERMINAL_STATES:
         state.update({"status": persisted["state"], "current_action": persisted.get("error") or state.get("current_action")})
+        provider_failure = runner._provider_failure(directory)
+        if provider_failure:
+            state["provider_failure"] = provider_failure
+            if provider_failure.lower() not in str(state.get("current_action", "")).lower():
+                state["current_action"] = f"{provider_failure}; {state.get('current_action', 'agent stopped')}"
     if persisted and persisted["state"] == "queued":
         lease = next((item for item in store.active_leases()["events"] if item["event_id"] == persisted["event_id"]), None)
         if lease and lease["holder_job_id"] != persisted["id"]:
