@@ -231,6 +231,14 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"})
     if persisted and persisted["state"] in TERMINAL_STATES:
         state.update({"status": persisted["state"], "current_action": persisted.get("error") or state.get("current_action")})
+    if persisted and persisted["state"] == "queued":
+        lease = next((item for item in store.active_leases()["events"] if item["event_id"] == persisted["event_id"]), None)
+        if lease and lease["holder_job_id"] != persisted["id"]:
+            holder = store.get_job(lease["holder_job_id"])
+            state["current_action"] = (
+                f"Queued — this event is currently leased by User {holder.get('slot_id') or holder.get('preferred_slot') or '?'}; "
+                "a different authorized event can run concurrently"
+            )
     state["automation_scope"] = scope_summary()
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)
@@ -328,7 +336,7 @@ def workbook_sheet(request: Request, name: str, start: int = 1, limit: int = 80,
 def update_workbook(request: Request, payload: dict, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
-    if job["state"] not in {"draft", "failed", "failed_prewrite", "review_required", "login_required"}:
+    if job["state"] not in {"draft", "cancelled", "failed", "failed_prewrite", "review_required", "login_required"}:
         raise HTTPException(409, "This job is not editable in its current state")
     result = update_workbook_data(directory_for(job), payload, bool(active_job(job)))
     store.audit(identity["subject"], "workbook.updated", job["id"], {"saved": result["saved"]})

@@ -69,6 +69,12 @@ class ControlStoreTests(unittest.TestCase):
         self.assertEqual(sum(result is not None for result in results), 1)
         self.assertEqual(len(self.store.active_leases()["events"]), 1)
 
+    def test_cancelled_preworker_job_can_be_started_again(self):
+        job = self.job(0, 1)
+        self.store.finish(job["id"], None, "cancelled", "Cancelled before worker acquisition", False)
+        self.store.queue_job(job["id"], self.users[0]["subject"])
+        self.assertEqual(self.store.get_job(job["id"])["state"], "queued")
+
     def test_release_allows_next_same_event_job(self):
         first = self.job(0, 1)
         second = self.job(1, 1)

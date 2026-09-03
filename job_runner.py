@@ -354,6 +354,15 @@ class JobRunner:
             job = self.store.get_job(job_id)
             if job and job["state"] == "queued":
                 self.store.finish(job_id, None, "cancelled", "Cancelled before worker acquisition", False, actor)
+                directory = job_dir(job["workspace_id"], job_id)
+                state = read_json(directory / "state.json", fresh_state(job))
+                state.update({
+                    "status": "cancelled", "current_stage": "cancelled",
+                    "current_action": "Cancelled before worker acquisition; this RR can be started again",
+                    "pi_pid": None, "process_started_at": None, "worker_slot": None, "updated_at": now(),
+                })
+                atomic_json(directory / "state.json", state)
+                append_log(directory, "Queued build cancelled before worker acquisition; safe to start again")
                 return
             raise ValueError("Job is not running or queued")
         job = self.store.get_job(job_id)

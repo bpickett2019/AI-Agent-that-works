@@ -70,6 +70,8 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn('id="workbook-file-name"',HTML)
         self.assertIn('id="workbook-file-meta"',HTML)
         self.assertIn('renderWorkbookIdentity(state.rr_file',HTML)
+        self.assertIn("['draft','cancelled'].includes(jobState)",HTML)
+        self.assertIn("jobState==='cancelled'?'START AGAIN':'START BUILD'",HTML)
         self.assertIn("d.detail==='CSRF validation failed'",HTML)
         self.assertIn("fetch('/api/me',{cache:'no-store'})",HTML)
 

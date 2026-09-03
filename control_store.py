@@ -191,7 +191,7 @@ class ControlStore:
         now = iso()
         with self.immediate() as conn:
             current = conn.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if not current or current["state"] not in {"draft", "login_required", "review_required", "failed", "failed_prewrite"}:
+            if not current or current["state"] not in {"draft", "login_required", "review_required", "failed", "failed_prewrite", "cancelled"}:
                 raise ValueError("Job cannot be queued from its current state")
             conn.execute(
                 "UPDATE jobs SET state='queued',queued_at=?,finished_at=NULL,error=NULL,updated_at=? WHERE id=?",
