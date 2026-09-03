@@ -1,54 +1,72 @@
 ---
 name: cvent-browser
-version: 2.0.0
-description: Pi-controlled Ego and Browser Use tools for the one locked (C+D) Medtrade Clone 2 Steel Chromium.
+version: 4.0.0
+description: Ego browser operations inside the canonical Steel Chromium for the locked (C+D) Medtrade Testing Clone 2 event.
 ---
 
-# Cvent Browser Tools
+# Cvent Browser Tools — Ego in Steel
 
-Pi is the only reasoning agent. Run from `/Users/bp/cvent-one-shot` and pass the canonical runtime on every call:
+Use Ego direct for all Cvent browsing, building, and verification. Ego attaches to the exact canonical Steel Chromium used by the viewer and persisted login.
 
 ```bash
+cd /Users/bp/cvent-one-shot
 RUNTIME=/Users/bp/cvent-one-shot/data/current/browser-runtime.json
 ```
 
-## Priority 1 — Ego direct
-
-Use `browser_tool.py --runtime "$RUNTIME" --tool ego` with operations:
-
-`snapshotText`, `pageInfo`, `click`, `fill`, `type`, `navigate`, `openOrReuseTab`, `js`, `cdp`, `wait`, `tabs`, `switchTab`, `authorizeTarget`.
-
-Examples:
+Every browser operation must use:
 
 ```bash
-./browser_tool.py --runtime "$RUNTIME" --tool ego --operation snapshotText --params '{}'
-./browser_tool.py --runtime "$RUNTIME" --tool ego --operation fill --params '{"target":"input[aria-label=Search]","text":"(C+D) Medtrade Clone 2","intent":"read"}'
+./browser_tool.py --runtime "$RUNTIME" --tool ego \
+  --operation <operation> --params '<json>'
 ```
 
-Discovery is read-only. After exactly one literal clone match is open and visible, call `authorizeTarget` with `{"eventName":"(C+D) Medtrade Clone 2","intent":"read"}`. This creates the required event-key lock.
+Ego is the only browser tool. Do not create another browser, Steel session, task space, profile, or tab.
 
-## Priority 2 — Browser Use direct
+## Operations
 
-Use `--tool browser-use` for: `browser_get_state`, `browser_navigate`, `browser_click`, `browser_type`, `browser_scroll`, `browser_extract_content`, `tabs`, `wait`, `send_keys`.
+- Reads: `snapshotText`, `pageInfo`, `tabs`, `probe`
+- Natural movement/search: `scroll`, `scanEventList`, `wait`
+- Interaction: `click`, `fill`, `type`
+- Bounded escape hatches: `js`, `cdp`
+- Target authorization: `authorizeTarget`
 
-Browser Use indices come from `browser_get_state`. It is direct tooling; Pi chooses every action.
+On unfamiliar pages: observe → read → scroll → understand → interact → reread. Do not default to Advanced Search or direct URL hopping.
 
-## Priority 3 — bounded autonomous fallback
+## Event discovery
 
-Use only when direct tools are not progressing:
+Cancel any stale Advanced Search form and scan a normal list view:
 
 ```bash
-./browser_tool.py --runtime "$RUNTIME" --tool fallback \
-  --operation retry_with_browser_use_agent --params "$CONTRACT"
+./browser_tool.py --runtime "$RUNTIME" --tool ego \
+  --operation scanEventList \
+  --params '{"intent":"read","exactName":"(C+D) Medtrade Testing Clone 2","maxScrolls":30}'
 ```
 
-The JSON contract must include exact `eventId`, `eventName`, `resourceDomain`, `expectedState`, `allowedActions`, `prohibitedActions`, and `successCriteria`. After fallback, verify independently with Ego.
+Require exactly one exact match before opening it. The only authorized target is:
 
-## Hard rules
+- Name: `(C+D) Medtrade Testing Clone 2`
+- Event key: `e712e34c-6117-4d13-bf4c-8ed54cf2b495`
+- Event code: `NLNMYJD28PH`
 
-- Every call is serialized by BrowserActionGate.
-- A runtime marker mismatch, wrong target ID, wrong event key, or USER ownership fails closed.
-- Use `intent: write` for mutations and `intent: read` for discovery/inspection.
-- Only `(C+D) Medtrade Clone 2` is authorized.
+## Domain workflow
+
+For each RR-derived domain:
+
+1. Read the normalized expected state.
+2. Snapshot and scroll through the complete relevant Cvent interface.
+3. Compare existing objects semantically.
+4. Keep correct objects, create missing objects, and minimally update safe differences.
+5. Save meaningful draft changes.
+6. Fresh-read and verify persistence and no duplicates.
+7. Continue through the remaining domains without routine user pauses.
+
+Use `intent: write` for every potentially mutating operation and `intent: read` for inspection. Known repeated operations may use Ego JS/CDP only after the interaction is fully understood and independently verified.
+
+## Ownership and safety
+
+- Ego owns the browser action gate as `PI_EGO` while operating.
+- USER takeover is separate and explicit.
+- Runtime marker, canonical target ID, and event key must match before every write.
+- Only `(C+D) Medtrade Testing Clone 2` may be opened or modified.
 - Never publish/go live, send/test/schedule communications, delete/archive, access attendees/contacts, mutate another event, or modify reusable/account-global/profile fields.
-- Keep one Steel Chromium and one Cvent execution path. No concurrent Ego task spaces.
+- Preserve event name, code, event key, URL identity, and unpublished status.

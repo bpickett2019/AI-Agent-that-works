@@ -1,8 +1,9 @@
 #!/opt/homebrew/opt/python@3.11/bin/python3.11
 """Lifecycle for one localhost-only, open-source Steel Browser container."""
 from __future__ import annotations
-import argparse, asyncio, json, subprocess, sys, time, urllib.request
+import argparse, json, subprocess, sys, time, urllib.request
 from pathlib import Path
+from browser_runtime import command, pages, select_page
 
 ROOT=Path(__file__).resolve().parent
 API='http://127.0.0.1:3005'
@@ -56,23 +57,25 @@ def auth_status(url,title):
     if 'cvent.com' in host and ('login' in value or name in {'log in','sign in'}):return 'login_required'
     if 'cvent.com' in host:return 'authenticated'
     return 'unknown'
-async def page(url=None):
-    from browser_use import BrowserSession
-    ensure(); browser=BrowserSession(cdp_url=cdp_url(),is_local=False,keep_alive=True)
-    await browser.start()
-    try:
-        if url:await browser.navigate_to(url)
-        state=await browser.get_browser_state_summary(include_screenshot=False)
-        auth=auth_status(state.url,state.title)
-        return {**status(),'url':state.url,'title':state.title,'auth_status':auth,'login_required':auth!='authenticated'}
-    finally:
-        try:await browser.stop()
-        except Exception:pass
+def page(url=None):
+    ensure(); target=select_page(pages())
+    if not target:raise RuntimeError('Steel has no page target')
+    def live_state():
+        reply=command(target['webSocketDebuggerUrl'],'Runtime.evaluate',{'expression':'({url:location.href,title:document.title,ready:document.readyState})','returnByValue':True})
+        return reply.get('result',{}).get('value',{})
+    current=live_state()
+    if url and current.get('url')!=url:
+        command(target['webSocketDebuggerUrl'],'Page.navigate',{'url':url})
+        for _ in range(60):
+            time.sleep(.25);current=live_state()
+            if current.get('ready')=='complete' and current.get('url')!='about:blank':break
+    auth=auth_status(current.get('url'),current.get('title'))
+    return {**status(),'url':current.get('url'),'title':current.get('title'),'auth_status':auth,'login_required':auth!='authenticated'}
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('command',choices=['ensure','status','release','cdp','page']);p.add_argument('--url');a=p.parse_args()
     try:
-        result=asyncio.run(page(a.url)) if a.command=='page' else {'ensure':ensure,'status':status,'release':release,'cdp':lambda:{'cdp_url':cdp_url()}}[a.command]()
+        result=page(a.url) if a.command=='page' else {'ensure':ensure,'status':status,'release':release,'cdp':lambda:{'cdp_url':cdp_url()}}[a.command]()
         print('STEEL_RESULT='+json.dumps(result))
     except Exception as e:
         print('STEEL_RESULT='+json.dumps({'provider':'steel-oss','running':False,'error':f'{type(e).__name__}: {e}'}));sys.exit(1)

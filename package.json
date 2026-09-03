@@ -1,7 +1,7 @@
 {
   "name": "cvent-one-shot",
   "version": "1.0.0",
-  "description": "One user, one mock RR workbook, one Pi session, one persistent **open-source Steel Browser**, and one authorized unpublished test event: **`(C+D) Medtrade Clone 2`**.",
+  "description": "One user, one mock RR workbook, one CVENT Agent session, one persistent open-source Steel Browser, and one authorized unpublished test event: (C+D) Medtrade Testing Clone 2.",
   "main": "index.js",
   "scripts": {
     "test": "python3 -m unittest discover -s tests -v && node --check ego_direct.mjs"

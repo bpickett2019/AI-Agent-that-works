@@ -10,7 +10,7 @@ ROOT=Path(__file__).resolve().parent
 CURRENT=ROOT/'data'/'current'
 RUNTIME=CURRENT/'browser-runtime.json'
 CDP_HTTP='http://127.0.0.1:9334'
-AUTHORIZED_NAME='(C+D) Medtrade Clone 2'
+AUTHORIZED_NAME='(C+D) Medtrade Testing Clone 2'
 
 def now():return datetime.now(timezone.utc).isoformat()
 def get_json(url):
@@ -89,10 +89,9 @@ def probe(path=RUNTIME,full=True):
     result={'ok':True,'browserRuntimeId':runtime['browserRuntimeId'],'viewer':viewer}
     if full:
         ego=tool_probe(runtime,['node','ego_direct.mjs','--runtime',str(path),'--operation','probe','--params','{}'])
-        bu=tool_probe(runtime,['./browser_use_direct.py','--runtime',str(path),'--operation','probe','--params','{}'])
-        result.update({'ego':ego,'browserUse':bu})
-        markers=[viewer.get('marker'),ego.get('marker'),bu.get('marker')]
-        targets=[viewer.get('targetId'),ego.get('targetId'),bu.get('targetId')]
+        result.update({'ego':ego})
+        markers=[viewer.get('marker'),ego.get('marker')]
+        targets=[viewer.get('targetId'),ego.get('targetId')]
         result['sameBrowserVerified']=len(set(markers))==1 and markers[0]==runtime['browserRuntimeId'] and len(set(targets))==1
         if not result['sameBrowserVerified']:raise RuntimeError('Cross-browser identity probe failed closed')
     runtime['targetBrowserIdentity'].update({'url':viewer['url'],'title':viewer['title']});runtime['verifiedAt']=now();runtime['identityProbe']=result

@@ -2,4 +2,4 @@ fastapi
 uvicorn
 python-multipart
 openpyxl
-browser-use==0.9.5
+websockets

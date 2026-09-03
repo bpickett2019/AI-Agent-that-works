@@ -21,11 +21,30 @@ try{
     case 'probe': {const info=await ego.pageInfo();result={marker,targetId:wanted,url:info.url,title:info.title};break}
     case 'snapshotText': result={snapshot:await ego.snapshot()};break;
     case 'pageInfo': result={page:await ego.pageInfo()};break;
+    case 'scroll': {
+      const delta=Number(params.deltaY??params.y??Math.max(500,Math.round((await ego.evaluate('window.innerHeight'))*.8)));
+      result={scroll:await ego.evaluate(`(() => { window.scrollBy(0,${JSON.stringify(delta)}); return {beforeY:scrollY,height:innerHeight,scrollHeight:document.documentElement.scrollHeight} })()`)};
+      await ego.waitForTimeout(params.settleMs??500);
+      result.scroll.afterY=await ego.evaluate('scrollY');break;
+    }
+    case 'scanEventList': {
+      const exactName=String(params.exactName||'').trim();if(!exactName)throw new Error('scanEventList requires exactName');
+      const seen=new Map(),passes=[];const maxScrolls=Math.max(1,Math.min(Number(params.maxScrolls??30),100));
+      await ego.evaluate('window.scrollTo(0,0)');await ego.waitForTimeout(params.settleMs??350);
+      for(let i=0;i<maxScrolls;i++){
+        const view=await ego.evaluate(`(() => { const rows=[...document.querySelectorAll('table tr')].map(row=>{const r=row.getBoundingClientRect();if(r.bottom<0||r.top>innerHeight)return null;const cells=[...row.querySelectorAll('td')].map(x=>(x.innerText||'').trim());const link=row.querySelector('td a');return link&&cells.length?{name:(link.innerText||'').trim(),code:cells[1]||'',status:cells[2]||'',href:link.href||'',top:Math.round(r.top)}:null}).filter(Boolean);return {y:scrollY,height:innerHeight,scrollHeight:document.documentElement.scrollHeight,rows} })()`);
+        for(const row of view.rows)seen.set(`${row.name}\u0000${row.code}`,row);
+        passes.push({y:view.y,visibleRows:view.rows.length});
+        if(view.y+view.height>=view.scrollHeight-2)break;
+        await ego.evaluate(`window.scrollBy(0,Math.max(500,Math.round(innerHeight*.8)))`);await ego.waitForTimeout(params.settleMs??500);
+      }
+      const rows=[...seen.values()],exactMatches=rows.filter(row=>row.name===exactName);
+      result={exactName,exactMatches,observedRows:rows,passes,finalY:await ego.evaluate('scrollY'),scrollHeight:await ego.evaluate('document.documentElement.scrollHeight')};break;
+    }
     case 'click': result={result:await ego.click(params.target)};break;
     case 'fill': result={result:await ego.fill(params.target,params.text??'')};break;
     case 'type': await ego.focus(params.target);result={result:await ego.insertText(params.text??'')};break;
     case 'navigate': result={result:await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:params.timeout||30000})};break;
-    case 'openOrReuseTab': result={result:await ego.openOrReuseTab(params.url,{wait:params.wait!==false,timeout:params.timeout||30})};break;
     case 'js': result={value:await ego.evaluate(params.expression)};break;
     case 'cdp': result={value:await ego.cdp(params.method,params.params||{})};break;
     case 'wait': await ego.waitForTimeout(params.ms??params.timeout??1000);result={waitedMs:params.ms??params.timeout??1000};break;

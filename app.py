@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, json, os, shutil, signal, subprocess, threading, time
+import asyncio, json, os, re, shutil, signal, subprocess, threading, time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -12,9 +12,9 @@ ROOT=Path(__file__).resolve().parent
 DATA=ROOT/'data'; CURRENT=DATA/'current'; RUNS=DATA/'runs'
 STATE=CURRENT/'state.json'; LOG=CURRENT/'activity.log'; REPORT=CURRENT/'final-report.json'
 AUTH_SETTINGS=DATA/'auth-settings.json'
-AUTHORIZED_EVENT_NAME='(C+D) Medtrade Clone 2'
+AUTHORIZED_EVENT_NAME='(C+D) Medtrade Testing Clone 2'
 RUN_MODE='mock'
-app=FastAPI(title='Cvent One Shot')
+app=FastAPI(title='CVENT Agent')
 _proc: subprocess.Popen|None=None
 _lock=threading.Lock()
 
@@ -27,6 +27,12 @@ def atomic_json(path,data):
 def append_log(msg):
     CURRENT.mkdir(parents=True,exist_ok=True)
     with LOG.open('a') as f: f.write(f'{now()}  {msg}\n')
+def product_facing(value):
+    if value=='PI_EGO': return 'CVENT_EGO'
+    if isinstance(value,str): return re.sub(r'\bpi(?:\s+agent)?\b','CVENT Agent',value.replace(str(ROOT),'[CVENT Agent workspace]'),flags=re.I)
+    if isinstance(value,list): return [product_facing(item) for item in value]
+    if isinstance(value,dict): return {key:product_facing(item) for key,item in value.items()}
+    return value
 def fresh_state(filename=None):
     t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME}' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_details','registration_types','admission_items','optional_items','questions','discounts','agenda','speakers','registration_paths','site','email_configuration','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'process_started_at':None,'last_run_seconds':0,'updated_at':t,'pi_pid':None,'pi_session':None}
 def auth_settings():
@@ -74,8 +80,8 @@ def valid_target(url):
     except Exception: return False
 def authorized_target_url():
     lock=read_json(CURRENT/'authorized-target.json',{})
-    url=lock.get('url','')
-    return url if lock.get('name')==AUTHORIZED_EVENT_NAME and valid_target(url) else ''
+    url=lock.get('url','');key=event_key_from_url(url)
+    return url if lock.get('name')==AUTHORIZED_EVENT_NAME and valid_target(url) and key and lock.get('event_key')==key else ''
 def archive_current():
     if not CURRENT.exists() or not any(CURRENT.iterdir()): return
     stamp=datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -113,7 +119,7 @@ def stop_process_tree(root):
         time.sleep(.7)
 
 def render_prompt():
-    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'BROWSER_RUNTIME_PATH':str(BROWSER_RUNTIME_PATH.resolve()),'BROWSER_TOOL_PATH':str((ROOT/'browser_tool.py').resolve()),'OPERATOR_PATH':str((ROOT/'browser_use_operator.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
+    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'BROWSER_RUNTIME_PATH':str(BROWSER_RUNTIME_PATH.resolve()),'BROWSER_TOOL_PATH':str((ROOT/'browser_tool.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
     text=(ROOT/'PI_PROMPT.md').read_text()
     for k,v in vals.items(): text=text.replace('{{'+k+'}}',v)
     (CURRENT/'job-prompt.md').write_text(text); return text
@@ -175,11 +181,11 @@ def browser_ownership():
 
 @app.get('/api/status')
 def status():
-    ensure(); st=read_json(STATE,fresh_state()); st['run_mode']=RUN_MODE; st['authorized_event_name']=AUTHORIZED_EVENT_NAME; st['browser_use_mode']='EGO FIRST · BROWSER USE DIRECT/FALLBACK'; st['browser_gate']=read_gate();
+    ensure(); st=read_json(STATE,fresh_state()); st['run_mode']=RUN_MODE; st['authorized_event_name']=AUTHORIZED_EVENT_NAME; st['browser_strategy']='EGO DIRECT · SAME STEEL RUNTIME'; st['browser_gate']=read_gate();
     try:
-        runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); st['browser_runtime']={k:runtime.get(k) for k in ('browserRuntimeId','steelWorkspaceId','providerSessionId','apiOrigin','cdpEndpoint','viewerUrl','targetBrowserIdentity','verifiedAt')}
+        runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); st['browser_runtime']={k:runtime.get(k) for k in ('browserRuntimeId','apiOrigin','cdpEndpoint','viewerUrl','targetBrowserIdentity','verifiedAt')}
     except Exception: st['browser_runtime']=None
-    st['activity_log']=[line.replace('Pi','CVENT Agent').replace('pi agent','CVENT Agent') for line in LOG.read_text(errors='replace').splitlines()[-200:]]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['agent_process_running']=running(); st['agent_pid']=st.get('pi_pid'); st['agent_session']=st.get('pi_session'); st['current_action']=(st.get('current_action') or '').replace('Pi','CVENT Agent')
+    st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['browser'].pop('id',None); st['auth_settings']=auth_settings(); st['auth_settings'].pop('cookie_store',None); st['agent_process_running']=running(); st['agent_pid']=st.get('pi_pid'); st['agent_session_saved']=bool(st.get('pi_session'))
     path=CURRENT/'input.xlsx';st['rr_version']=path.stat().st_mtime_ns if path.exists() else None
     if st['agent_process_running'] and st.get('process_started_at'):
         try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['process_started_at'])).total_seconds()))
@@ -187,7 +193,7 @@ def status():
     else:
         st['elapsed_seconds']=0;st['agent_pid']=None
     st.pop('pi_pid',None);st.pop('pi_session',None)
-    return JSONResponse(st,headers={'Cache-Control':'no-store'})
+    return JSONResponse(product_facing(st),headers={'Cache-Control':'no-store'})
 
 @app.get('/api/workbook')
 def workbook_info():
@@ -263,9 +269,11 @@ def start():
         if running(): raise HTTPException(409,'A job is already running')
         if read_gate().get('ownership')!='AGENT': raise HTTPException(409,'Return browser control to the agent before starting')
         if not (CURRENT/'input.xlsx').exists(): raise HTTPException(400,'Upload the RR workbook first')
-        browser=launch_chrome('https://app.cvent.com/')
+        locked_url=authorized_target_url();browser=chrome_status()
+        if not browser.get('running'):browser=launch_chrome(locked_url or 'https://app.cvent.com/')
         if not browser.get('running'): raise HTTPException(500,browser.get('error','Chrome failed'))
-        runtime=ensure_browser_runtime(full_probe=True)
+        runtime=ensure_browser_runtime(full_probe=False);live=local_runtime_probe(runtime)
+        if locked_url and event_key_from_url(live.get('url',''))!=event_key_from_url(locked_url):raise HTTPException(409,'The live browser is not on the authorized Cvent event; use OPEN BROWSER and verify it before starting')
         prompt=render_prompt(); pid=spawn_pi(prompt)
     return {'ok':True,'pid':pid,'browser':browser}
 
@@ -285,7 +293,7 @@ def continue_job():
             st.update({'status':'login_required','current_stage':'login','current_action':f'Finish {where} in OPEN BROWSER, including Stay signed in, before CONTINUE','updated_at':now()}); atomic_json(STATE,st)
             append_log(f'CONTINUE ignored: authentication incomplete at {where}')
             raise HTTPException(409,f'Authentication is still at {where}. Click OPEN BROWSER, finish Microsoft SSO/MFA and Stay signed in, then press CONTINUE.')
-        msg=f'Manual Cvent/Microsoft login and MFA are complete in the SAME persistent Steel browser session. Reconnect through browser_use_operator.py and continue the MOCK mission idempotently. The one and only authorized event is exactly {AUTHORIZED_EVENT_NAME}; the uploaded RR must never select or authorize another event. Re-read state and actual Cvent state and continue through final QA. Do not return a plan.'
+        msg=f'Manual Cvent/Microsoft login and MFA are complete in the SAME persistent Steel browser session. Continue through Ego in the canonical Steel runtime and resume the MOCK mission idempotently. The one and only authorized event is exactly {AUTHORIZED_EVENT_NAME}; the uploaded RR must never select or authorize another event. Re-read state and actual Cvent state and continue through final QA. Do not return a plan.'
         pid=spawn_pi(msg,resume=True)
     return {'ok':True,'pid':pid}
 
@@ -310,7 +318,7 @@ def take_control():
         for process in pids:
             try:os.kill(process,signal.SIGSTOP)
             except ProcessLookupError:pass
-        gate=read_gate(); gate.update({'ownership':'USER','desiredOwnership':'USER','activeActor':'USER','agentPaused':bool(pids),'pausedPids':pids,'transition':None,'browserRuntimeId':runtime['browserRuntimeId']});write_gate(gate)
+        gate=read_gate(); gate.update({'ownership':'USER','desiredOwnership':'USER','activeActor':'USER','automationOwner':'USER','agentPaused':bool(pids),'pausedPids':pids,'transition':None,'browserRuntimeId':runtime['browserRuntimeId']});write_gate(gate)
     append_log('Human takeover enabled at a safe browser action boundary')
     return {'ok':True,'gate':read_gate()}
 
@@ -321,28 +329,29 @@ def return_to_agent():
         try:
             viewer=local_runtime_probe(runtime)
             ego=tool_probe(runtime,['node','ego_direct.mjs','--runtime',str(BROWSER_RUNTIME_PATH),'--operation','snapshotText','--params','{}'])
-            browser_use=tool_probe(runtime,['./browser_use_direct.py','--runtime',str(BROWSER_RUNTIME_PATH),'--operation','probe','--params','{}'])
-            if not ego.get('ok') or not browser_use.get('ok'):raise RuntimeError('Fresh browser read failed')
+            ego_page=tool_probe(runtime,['node','ego_direct.mjs','--runtime',str(BROWSER_RUNTIME_PATH),'--operation','pageInfo','--params','{}'])
+            if not ego.get('ok') or not ego_page.get('ok'):raise RuntimeError('Fresh Ego browser read failed')
             lock=read_json(CURRENT/'authorized-target.json',{})
             if lock:
-                expected=urlparse(lock.get('url','')).query; actual=urlparse(viewer.get('url','')).query
-                if event_key_from_url(lock.get('url',''))!=event_key_from_url(viewer.get('url','')) or AUTHORIZED_EVENT_NAME.lower() not in json.dumps(ego).lower():raise RuntimeError('Human left the authorized Cvent event; agent remains paused')
-            handoff={'browserRuntimeId':runtime['browserRuntimeId'],'viewer':viewer,'ego':ego,'browserUse':browser_use,'inspectedAt':now()};atomic_json(CURRENT/'human-handoff-state.json',handoff)
-            gate=read_gate();paused=gate.get('pausedPids',[]);gate.update({'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','agentPaused':False,'pausedPids':[],'transition':None});write_gate(gate)
+                expected_key=event_key_from_url(lock.get('url',''));viewer_key=event_key_from_url(viewer.get('url',''));ego_key=event_key_from_url((ego_page.get('page') or {}).get('url',''))
+                if not expected_key or lock.get('event_key')!=expected_key or viewer_key!=expected_key or ego_key!=expected_key or AUTHORIZED_EVENT_NAME.lower() not in json.dumps(ego).lower():raise RuntimeError('Human left the authorized Cvent event; CVENT Agent remains paused')
+            handoff={'browserRuntimeId':runtime['browserRuntimeId'],'viewer':viewer,'ego':ego,'egoPage':ego_page,'inspectedAt':now()};atomic_json(CURRENT/'human-handoff-state.json',handoff)
+            gate=read_gate();paused=gate.get('pausedPids',[]);gate.update({'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','automationOwner':'PI_EGO','agentPaused':False,'pausedPids':[],'transition':None});write_gate(gate)
             for process in reversed(paused):
                 try:os.kill(process,signal.SIGCONT)
                 except ProcessLookupError:pass
         except Exception:
-            gate=read_gate();gate.update({'ownership':'NONE','desiredOwnership':'AGENT','activeActor':'NONE','transition':'RETURN_BLOCKED','agentPaused':True});write_gate(gate);raise
-    append_log(f'Returned browser to CVENT Agent after fresh Ego/Browser Use read: {viewer["title"]}')
+            gate=read_gate();gate.update({'ownership':'NONE','desiredOwnership':'AGENT','activeActor':'NONE','automationOwner':'NONE','transition':'RETURN_BLOCKED','agentPaused':True});write_gate(gate);raise
+    append_log(f'Returned browser to CVENT Agent after fresh Ego verification: {viewer["title"]}')
     return {'ok':True,'gate':read_gate(),'state':handoff}
 
 def event_key_from_url(url):
     from urllib.parse import parse_qs
-    q=parse_qs(urlparse(url).query)
-    for key in ('evtstub','eventId','eventid','event'):
+    q={key.lower():value for key,value in parse_qs(urlparse(url).query).items()}
+    for key in ('evtstub','eventid','event'):
         if q.get(key):return q[key][0].lower()
-    return None
+    match=re.search(r'/events/([0-9a-f-]{20,})',urlparse(url).path,re.I)
+    return match.group(1).lower() if match else None
 
 @app.post('/api/stop-agent')
 def stop_agent():

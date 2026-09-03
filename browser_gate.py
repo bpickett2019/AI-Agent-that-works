@@ -6,20 +6,20 @@ from datetime import datetime,timezone
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 CURRENT=ROOT/'data'/'current'; GATE=CURRENT/'browser-gate.json'; LOCK=CURRENT/'browser-gate.lock'
-ACTORS={'CVENT_EGO','CVENT_BROWSER_USE','BROWSER_USE_AGENT','USER','NONE'}
+ACTORS={'PI_EGO','USER','NONE'}
 def now():return datetime.now(timezone.utc).isoformat()
 def read():
     try:
         data=json.loads(GATE.read_text())
         if 'piPaused' in data:data['agentPaused']=data.pop('piPaused')
-        if data.get('activeActor')=='PI_EGO':data['activeActor']='CVENT_EGO'
-        if data.get('activeActor')=='PI_BROWSER_USE':data['activeActor']='CVENT_BROWSER_USE'
+        if data.get('activeActor')=='CVENT_EGO':data['activeActor']='PI_EGO'
+        data.setdefault('automationOwner','PI_EGO')
         return data
-    except Exception:return {'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','agentPaused':False,'updatedAt':now()}
+    except Exception:return {'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','automationOwner':'PI_EGO','agentPaused':False,'updatedAt':now()}
 def write(data):
     GATE.parent.mkdir(parents=True,exist_ok=True);data['updatedAt']=now();tmp=GATE.with_suffix('.tmp');tmp.write_text(json.dumps(data,indent=2));tmp.replace(GATE)
 def initialize():
-    data={'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','agentPaused':False,'transition':None,'updatedAt':now()};write(data);LOCK.touch();return data
+    data={'ownership':'AGENT','desiredOwnership':'AGENT','activeActor':'NONE','automationOwner':'PI_EGO','agentPaused':False,'transition':None,'updatedAt':now()};write(data);LOCK.touch();return data
 def request_user():
     data=read();data.update({'desiredOwnership':'USER','transition':'WAITING_FOR_SAFE_BOUNDARY'});write(data);return data
 def shield_agent():
@@ -38,7 +38,7 @@ def action(runtime_id,actor):
         data=read()
         if data.get('ownership')!='AGENT' or data.get('desiredOwnership')!='AGENT':raise RuntimeError('Browser is not agent-owned; action paused')
         if data.get('activeActor') not in (None,'NONE'):raise RuntimeError('Browser action gate is occupied')
-        data.update({'activeActor':actor,'browserRuntimeId':runtime_id});write(data)
+        data.update({'activeActor':actor,'automationOwner':actor,'browserRuntimeId':runtime_id});write(data)
         try:yield
         finally:
-            data=read();data['activeActor']='NONE';write(data)
+            data=read();data.update({'activeActor':'NONE','automationOwner':'PI_EGO'});write(data)
