@@ -67,6 +67,9 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn('Type an exact server-authorized event name, code, or ID.',HTML)
         self.assertIn('workspaceEpoch',HTML)
         self.assertIn("$('rr').value=''",HTML)
+        self.assertIn('id="workbook-file-name"',HTML)
+        self.assertIn('id="workbook-file-meta"',HTML)
+        self.assertIn('renderWorkbookIdentity(state.rr_file',HTML)
         self.assertIn("d.detail==='CSRF validation failed'",HTML)
         self.assertIn("fetch('/api/me',{cache:'no-store'})",HTML)
 
