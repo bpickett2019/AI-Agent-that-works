@@ -234,10 +234,10 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     params.eventName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
     params.eventKey = requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY");
   }
-  if (operation === "scanEventList") {
-    params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
+  if (["scanEventList", "openAuthorizedEvent"].includes(operation)) {
     params.maxScrolls = Math.max(1, Math.min(Number(input.maxScrolls ?? 30), 60));
   }
+  if (operation === "scanEventList") params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
   if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait"].includes(operation) && input.target) {
     params.target = cleanText(input.target, 4000);
   }

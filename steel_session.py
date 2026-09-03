@@ -21,8 +21,8 @@ API = os.environ.get("CVENT_STEEL_API_ORIGIN", SLOT.api_origin)
 CDP = os.environ.get("CVENT_CDP_ORIGIN", SLOT.cdp_origin)
 VIEWER = os.environ.get("CVENT_VIEWER_URL", f"/api/jobs/{JOB_ID}/viewer")
 CONTAINER = SLOT.container_name
-PROFILE = JOB_DIR / "chromium-profile"
-CACHE = JOB_DIR / "steel-cache"
+PROFILE = Path(os.environ.get("CVENT_BROWSER_PROFILE_DIR", JOB_DIR / "chromium-profile")).resolve()
+CACHE = Path(os.environ.get("CVENT_BROWSER_CACHE_DIR", JOB_DIR / "steel-cache")).resolve()
 
 
 def clear_stale_profile_locks():
@@ -112,7 +112,7 @@ def create_container():
         "docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped", "--init",
         "--shm-size", "2g", "--label", f"com.forge.cvent.job={JOB_ID}",
         "--label", f"com.forge.cvent.slot={SLOT.slot_id}",
-        "-e", "FILTER_CHROME_ARGS=--disable-dev-shm-usage",
+        "-e", "FILTER_CHROME_ARGS=--disable-dev-shm-usage --restore-last-session",
         "-p", f"127.0.0.1:{SLOT.api_port}:3000", "-p", f"127.0.0.1:{SLOT.cdp_port}:9223",
         "-v", f"{CACHE}:/app/.cache", "-v", f"{PROFILE}:/tmp/steel-chrome", STEEL_IMAGE,
     ]
@@ -143,6 +143,10 @@ def ensure():
 def release():
     if container_job_id() not in ("", JOB_ID):
         return {"released": False, "provider": "steel-oss", "error": "Container ownership changed"}
+    if container_running():
+        stopped = subprocess.run(["docker", "stop", "-t", "10", CONTAINER], text=True, capture_output=True, timeout=30)
+        if stopped.returncode and "No such container" not in (stopped.stderr or ""):
+            return {"released": False, "provider": "steel-oss", "error": (stopped.stderr or stopped.stdout)[-1000:]}
     result = subprocess.run(["docker", "rm", "-f", CONTAINER], text=True, capture_output=True, timeout=60)
     released = result.returncode == 0 or "No such container" in (result.stderr or "")
     if released:

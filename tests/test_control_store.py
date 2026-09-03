@@ -67,7 +67,7 @@ class ControlStoreTests(unittest.TestCase):
         self.store.finish(first["id"], lease["token"], "completed")
         self.assertIsNotNone(self.store.acquire(second["id"]))
 
-    def test_same_event_waiter_acquires_after_crash_only_after_owner_is_uncertain(self):
+    def test_same_event_waiter_acquires_after_prewrite_crash(self):
         first = self.job(0, 1)
         waiter = self.job(1, 1)
         different = self.job(2, 2)
@@ -84,8 +84,8 @@ class ControlStoreTests(unittest.TestCase):
         successor = self.store.acquire(waiter["id"])
         self.assertIsNotNone(successor)
         crashed = self.store.get_job(first["id"])
-        self.assertEqual(crashed["state"], "failed_uncertain")
-        self.assertEqual(crashed["uncertain"], 1)
+        self.assertEqual(crashed["state"], "failed_prewrite")
+        self.assertEqual(crashed["uncertain"], 0)
         self.assertTrue(self.store.valid_event_lease(waiter["id"], successor["token"], "event-1"))
         self.assertTrue(self.store.valid_event_lease(different["id"], different_lease["token"], "event-2"))
 
@@ -99,16 +99,35 @@ class ControlStoreTests(unittest.TestCase):
         self.assertEqual(active["events"][0]["token"], lease["token"])
         self.assertEqual(active["workers"][0]["token"], lease["token"])
 
-    def test_controller_recovery_fails_active_job_closed(self):
+    def write_attempt(self, job):
+        directory = Path(self.temp.name) / "workspaces" / job["workspace_id"] / "jobs" / job["id"]
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "scope-write-audit.jsonl").write_text('{"result":"attempted"}\n')
+
+    def test_controller_recovery_before_first_write_is_safely_recoverable(self):
         job = self.job(0, 1)
         lease = self.store.acquire(job["id"])
         self.assertTrue(self.store.mark_running(job["id"], lease["token"], 12345))
         recovered = self.store.recover_after_controller_restart()
         self.assertEqual(recovered, [job["id"]])
         saved = self.store.get_job(job["id"])
+        self.assertEqual(saved["state"], "failed_prewrite")
+        self.assertEqual(saved["uncertain"], 0)
+        self.store.queue_job(job["id"], self.users[0]["subject"])
+        self.assertEqual(self.store.get_job(job["id"])["state"], "queued")
+        self.assertEqual(self.store.active_leases(), {"events": [], "workers": []})
+
+    def test_controller_recovery_after_write_attempt_remains_uncertain(self):
+        job = self.job(0, 1)
+        lease = self.store.acquire(job["id"])
+        self.assertTrue(self.store.mark_running(job["id"], lease["token"], 12345))
+        self.write_attempt(job)
+        self.store.recover_after_controller_restart()
+        saved = self.store.get_job(job["id"])
         self.assertEqual(saved["state"], "failed_uncertain")
         self.assertEqual(saved["uncertain"], 1)
-        self.assertEqual(self.store.active_leases(), {"events": [], "workers": []})
+        with self.assertRaisesRegex(ValueError, "current state"):
+            self.store.queue_job(job["id"], self.users[0]["subject"])
 
     def test_users_only_have_distinct_workspaces(self):
         self.assertEqual(len({user["workspace_id"] for user in self.users}), 4)

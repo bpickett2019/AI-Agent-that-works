@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-TERMINAL_STATES = {"completed", "review_required", "failed", "failed_uncertain", "cancelled"}
+TERMINAL_STATES = {"completed", "review_required", "failed", "failed_prewrite", "failed_uncertain", "cancelled"}
 ACTIVE_STATES = {"starting", "running", "login_required", "stopping"}
 
 
@@ -185,7 +185,7 @@ class ControlStore:
         now = iso()
         with self.immediate() as conn:
             current = conn.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if not current or current["state"] not in {"draft", "login_required", "review_required", "failed"}:
+            if not current or current["state"] not in {"draft", "login_required", "review_required", "failed", "failed_prewrite"}:
                 raise ValueError("Job cannot be queued from its current state")
             conn.execute(
                 "UPDATE jobs SET state='queued',queued_at=?,finished_at=NULL,error=NULL,updated_at=? WHERE id=?",
@@ -303,26 +303,29 @@ class ControlStore:
             ).fetchall()]
 
     def recover_after_controller_restart(self) -> list[str]:
-        """Fail closed: interrupted mutation jobs are uncertain and never auto-retried."""
+        """Classify interrupted jobs from durable write-attempt evidence; never auto-retry."""
         now = iso()
         recovered: list[str] = []
         with self.immediate() as conn:
             rows = conn.execute(
-                "SELECT id FROM jobs WHERE state IN ('starting','running','stopping')"
+                "SELECT id,workspace_id FROM jobs WHERE state IN ('starting','running','stopping')"
             ).fetchall()
             recovered = [row["id"] for row in rows]
-            if recovered:
-                marks = ",".join("?" for _ in recovered)
-                conn.execute(
-                    f"""UPDATE jobs SET state='failed_uncertain',uncertain=1,pid=NULL,slot_id=NULL,
-                    lease_token=NULL,finished_at=?,error='Controller restarted during an active job; mutation outcome requires review',updated_at=?
-                    WHERE id IN ({marks})""",
-                    (now, now, *recovered),
+            for row in rows:
+                attempted = self._mutation_attempted(row["workspace_id"], row["id"])
+                state = "failed_uncertain" if attempted else "failed_prewrite"
+                error = (
+                    "Controller restarted after a Cvent write attempt; mutation outcome requires review"
+                    if attempted else "Controller restarted before any Cvent write attempt; fresh preflight required"
                 )
+                conn.execute(
+                    """UPDATE jobs SET state=?,uncertain=?,pid=NULL,slot_id=NULL,lease_token=NULL,
+                    finished_at=?,error=?,updated_at=? WHERE id=?""",
+                    (state, int(attempted), now, error, now, row["id"]),
+                )
+                self._audit(conn, "system", "job.recovered_uncertain" if attempted else "job.recovered_prewrite", row["id"], {})
             conn.execute("DELETE FROM event_leases")
             conn.execute("DELETE FROM worker_leases")
-            for job_id in recovered:
-                self._audit(conn, "system", "job.recovered_uncertain", job_id, {})
         return recovered
 
     def active_leases(self) -> dict[str, list[dict[str, Any]]]:
@@ -344,18 +347,31 @@ class ControlStore:
             (iso(), actor, action, job_id, json.dumps(details, separators=(",", ":"))),
         )
 
-    @staticmethod
-    def _expire_stale(conn: sqlite3.Connection, now: str) -> None:
-        stale = [row[0] for row in conn.execute(
-            "SELECT DISTINCT holder_job_id FROM event_leases WHERE expires_at<=? UNION SELECT DISTINCT holder_job_id FROM worker_leases WHERE expires_at<=?",
+    def _mutation_attempted(self, workspace_id: str, job_id: str) -> bool:
+        directory = self.path.parent / "workspaces" / workspace_id / "jobs" / job_id
+        audit = directory / "scope-write-audit.jsonl"
+        uncertain = directory / "browser-mutation-uncertain.json"
+        return uncertain.exists() or (audit.exists() and audit.stat().st_size > 0)
+
+    def _expire_stale(self, conn: sqlite3.Connection, now: str) -> None:
+        stale = conn.execute(
+            """SELECT DISTINCT j.id,j.workspace_id FROM jobs j JOIN (
+            SELECT holder_job_id FROM event_leases WHERE expires_at<=?
+            UNION SELECT holder_job_id FROM worker_leases WHERE expires_at<=?
+            ) stale ON stale.holder_job_id=j.id""",
             (now, now),
-        )]
-        for job_id in stale:
+        ).fetchall()
+        for row in stale:
+            attempted = self._mutation_attempted(row["workspace_id"], row["id"])
+            state = "failed_uncertain" if attempted else "failed_prewrite"
+            error = (
+                "Worker lease heartbeat expired after a Cvent write attempt; mutation outcome requires review"
+                if attempted else "Worker lease heartbeat expired before any Cvent write attempt; fresh preflight required"
+            )
             conn.execute(
-                """UPDATE jobs SET state='failed_uncertain',uncertain=1,pid=NULL,slot_id=NULL,
-                lease_token=NULL,finished_at=?,error='Worker lease heartbeat expired; mutation outcome requires review',updated_at=?
-                WHERE id=? AND state IN ('starting','running','stopping')""",
-                (now, now, job_id),
+                """UPDATE jobs SET state=?,uncertain=?,pid=NULL,slot_id=NULL,lease_token=NULL,
+                finished_at=?,error=?,updated_at=? WHERE id=? AND state IN ('starting','running','stopping')""",
+                (state, int(attempted), now, error, now, row["id"]),
             )
         conn.execute("DELETE FROM event_leases WHERE expires_at<=?", (now,))
         conn.execute("DELETE FROM worker_leases WHERE expires_at<=?", (now,))

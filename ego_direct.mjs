@@ -46,12 +46,26 @@ try{
       result={exactName,exactMatches,observedRows:rows,passes,finalY:await ego.evaluate('scrollY'),scrollHeight:await ego.evaluate('document.documentElement.scrollHeight')};break;
     }
     case 'openAuthorizedEvent': {
-      const exactName=String(params.eventName||''),expectedKey=String(params.eventKey||'').toLowerCase();
+      const exactName=String(params.eventName||'').trim(),expectedKey=String(params.eventKey||'').trim().toLowerCase();
       if(!exactName||!expectedKey)throw new Error('Server-authorized event identity is required');
-      const matches=await ego.evaluate(`(() => [...document.querySelectorAll('a')].filter(a=>(a.textContent||'').trim()===${JSON.stringify(exactName)}).map(a=>a.href).filter(Boolean))()`);
-      const authorized=[...new Set(matches)].filter(href=>{try{const url=new URL(href);const query=new URLSearchParams(url.search);const key=(query.get('evtstub')||query.get('eventid')||query.get('event')||'').toLowerCase();return key===expectedKey&&url.hostname.toLowerCase().endsWith('cvent.com')}catch{return false}});
-      if(authorized.length!==1)throw new Error(`Exact authorized event link count was ${authorized.length}, expected 1`);
-      result={openedEventKey:expectedKey,result:await ego.goto(authorized[0],{waitUntil:'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??60),180)*1000)})};break;
+      const before=await ego.pageInfo(),beforeUrl=new URL(before.url);
+      if(!beforeUrl.hostname.toLowerCase().endsWith('cvent.com')||!/\/events2\/eventselection/i.test(beforeUrl.pathname))throw new Error('Authorized event opening requires the authenticated Cvent event inventory');
+      await ego.evaluate('window.scrollTo(0,0)');await ego.waitForTimeout(350);
+      const candidates=new Map(),passes=[];const maxScrolls=Math.max(1,Math.min(Number(params.maxScrolls??30),60));
+      for(let i=0;i<maxScrolls;i++){
+        const view=await ego.evaluate(`(() => {const found=[];for(const row of document.querySelectorAll('table tr')){const box=row.getBoundingClientRect();if(box.bottom<0||box.top>innerHeight)continue;const link=row.querySelector('td a');if(!link)continue;const name=(link.innerText||link.textContent||'').trim();if(name!==${JSON.stringify(exactName)})continue;const rect=link.getBoundingClientRect(),x=Math.max(0,Math.min(innerWidth-1,rect.left+rect.width/2)),y=Math.max(0,Math.min(innerHeight-1,rect.top+rect.height/2)),cover=document.elementFromPoint(x,y);found.push({name,href:link.href||'',tag:link.tagName,connected:link.isConnected,visible:rect.width>0&&rect.height>0&&rect.bottom>=0&&rect.top<=innerHeight,pointerEvents:getComputedStyle(link).pointerEvents,coveredBy:cover?cover.tagName:null,linkContainsCover:Boolean(cover&&(cover===link||link.contains(cover))),bounds:{left:Math.round(rect.left),top:Math.round(rect.top),width:Math.round(rect.width),height:Math.round(rect.height)}})}return {y:scrollY,height:innerHeight,scrollHeight:document.documentElement.scrollHeight,found}})()`);
+        passes.push({y:view.y,matches:view.found.length});for(const item of view.found)candidates.set(item.href,item);
+        if(view.found.length||view.y+view.height>=view.scrollHeight-2)break;
+        await ego.evaluate('window.scrollBy(0,Math.max(500,Math.round(innerHeight*.8)))');await ego.waitForTimeout(500);
+      }
+      const authorized=[...candidates.values()].filter(item=>{try{const url=new URL(item.href);const query=new URLSearchParams(url.search);const key=(query.get('evtstub')||query.get('eventid')||query.get('event')||'').toLowerCase();return item.name===exactName&&item.connected&&item.visible&&key===expectedKey&&url.hostname.toLowerCase().endsWith('cvent.com')}catch{return false}});
+      if(authorized.length!==1)throw new Error(`Visible exact authorized event navigation target count was ${authorized.length}, expected 1`);
+      const chosen=authorized[0],timeout=Math.max(1000,Math.min(Number(params.timeoutSeconds??60),180)*1000);
+      await ego.goto(chosen.href,{waitUntil:'domcontentloaded',timeout});
+      const afterPage=await ego.pageInfo(),afterUrl=new URL(afterPage.url),afterQuery=new URLSearchParams(afterUrl.search),afterKey=(afterQuery.get('evtstub')||afterQuery.get('eventid')||afterQuery.get('event')||'').toLowerCase();
+      if(!afterUrl.hostname.toLowerCase().endsWith('cvent.com')||afterKey!==expectedKey||/\/events2\/eventselection/i.test(afterUrl.pathname))throw new Error('Bounded event navigation did not enter the exact authorized event');
+      const snapshot=await ego.snapshot();
+      result={openedEventKey:expectedKey,activation:'exact-visible-inventory-href',inventoryUrl:before.url,navigationTarget:{name:chosen.name,href:chosen.href,diagnostics:chosen,passes},snapshot};break;
     }
     case 'click': result={result:await ego.click(params.target)};break;
     case 'activate': result={result:await ego.evaluateLocator(params.target,(element)=>{if(!(element instanceof HTMLElement))throw new Error('activate target must be an HTML element');element.click();return true})};break;

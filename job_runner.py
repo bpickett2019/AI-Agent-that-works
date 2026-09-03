@@ -17,7 +17,7 @@ from typing import Any
 from browser_gate import BrowserGate
 from browser_runtime import initialize as initialize_browser_runtime
 from control_store import ControlStore
-from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, event_by_id, job_dir, pi_model, pi_provider, slot_by_id
+from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, event_by_id, job_dir, pi_model, pi_provider, slot_by_id
 from scope_manifest import SCOPE_MANIFEST, SCOPE_WORKBOOK, load_manifest as load_scope_manifest
 
 
@@ -146,6 +146,8 @@ class JobRunner:
         environment.update({
             "CVENT_REPO_ROOT": str(ROOT), "CVENT_JOB_DIR": str(directory), "CVENT_JOB_ID": job["id"],
             "CVENT_WORKSPACE_ID": job["workspace_id"], "CVENT_WORKER_SLOT": str(slot_id),
+            "CVENT_BROWSER_PROFILE_DIR": str(browser_profile_dir(job["workspace_id"], slot_id)),
+            "CVENT_BROWSER_CACHE_DIR": str(browser_cache_dir(job["workspace_id"], slot_id)),
             "CVENT_STEEL_API_ORIGIN": slot.api_origin, "CVENT_CDP_ORIGIN": slot.cdp_origin,
             "CVENT_VIEWER_URL": f"/api/jobs/{job['id']}/viewer",
             "CVENT_LEASE_VALIDATE_URL": os.environ.get("CVENT_LEASE_VALIDATE_URL", "http://127.0.0.1:8877/internal/leases/validate"),
@@ -295,7 +297,7 @@ class JobRunner:
         report = read_json(directory / "final-report.json", {})
         report_status = str(report.get("status", "")).upper()
         reported_state = str(state.get("status", "")).lower()
-        writes_exist = (directory / "scope-write-audit.jsonl").exists() and (directory / "scope-write-audit.jsonl").stat().st_size > 0
+        writes_exist = self._mutation_attempted(directory)
         if code == 0 and report_status == "DRAFT_COMPLETE":
             finish_state, uncertain, error = "completed", False, None
         elif code == 0 and (report_status == "REVIEW_REQUIRED" or reported_state == "review_required"):
@@ -303,9 +305,12 @@ class JobRunner:
         elif reported_state == "login_required" and not writes_exist:
             finish_state, uncertain, error = "login_required", False, None
         else:
-            uncertain = writes_exist or code != 0
-            finish_state = "failed_uncertain" if uncertain else "failed"
-            error = f"Pi exited with code {code} without a final successful verdict"
+            uncertain = writes_exist
+            finish_state = "failed_uncertain" if uncertain else "failed_prewrite"
+            error = (
+                f"Pi exited with code {code} after a Cvent write attempt; mutation outcome requires review"
+                if uncertain else f"Pi exited with code {code} before any Cvent write attempt; fresh preflight required"
+            )
         try:
             self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
         finally:
@@ -347,9 +352,11 @@ class JobRunner:
         if process:
             return
         self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
+        attempted = self._mutation_attempted(job_dir(job["workspace_id"], job_id))
         self._finish_after_lease_loss(
-            job_id, active.token, "failed_uncertain" if uncertain else "cancelled",
-            "Stopped during worker startup", uncertain,
+            job_id, active.token, "failed_uncertain" if attempted else "failed_prewrite",
+            "Stopped during worker startup after a Cvent write attempt" if attempted else "Stopped before any Cvent write attempt; fresh preflight required",
+            attempted,
         )
         self._remove_active(active)
 
@@ -448,6 +455,12 @@ class JobRunner:
         active.stop_heartbeat.set()
         with self._lock:
             self._active.pop(active.job_id, None)
+
+    @staticmethod
+    def _mutation_attempted(directory: Path) -> bool:
+        audit = directory / "scope-write-audit.jsonl"
+        uncertain = directory / "browser-mutation-uncertain.json"
+        return uncertain.exists() or (audit.exists() and audit.stat().st_size > 0)
 
     @staticmethod
     def _is_pi_process(pid: int) -> bool:

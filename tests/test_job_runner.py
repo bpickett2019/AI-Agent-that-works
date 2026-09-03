@@ -43,6 +43,15 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         })
         self.assertEqual(command[-1], "job prompt")
 
+    def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
+        first = self.runner.environment(self.job, "lease-token", 1)
+        same = self.runner.environment(dict(self.job, id="job_next"), "lease-next", 1)
+        second = self.runner.environment(self.job, "lease-token", 2)
+        self.assertEqual(first["CVENT_BROWSER_PROFILE_DIR"], same["CVENT_BROWSER_PROFILE_DIR"])
+        self.assertNotEqual(first["CVENT_BROWSER_PROFILE_DIR"], second["CVENT_BROWSER_PROFILE_DIR"])
+        self.assertIn("browser-profiles/slot-1/chromium-profile", first["CVENT_BROWSER_PROFILE_DIR"])
+        self.assertIn("browser-profiles/slot-2/chromium-profile", second["CVENT_BROWSER_PROFILE_DIR"])
+
     def test_pi_environment_excludes_application_auth_secrets(self):
         with patch.dict(os.environ, {
             "ANTHROPIC_API_KEY": "provider-key",

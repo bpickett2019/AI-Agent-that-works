@@ -68,6 +68,17 @@ def job_dir(workspace_id: str, job_id: str) -> Path:
     return workspace_dir(workspace_id) / "jobs" / _safe_component(job_id)
 
 
+def browser_profile_dir(workspace_id: str, slot_id: int) -> Path:
+    """One persistent, non-shared Chromium profile per user workspace and worker slot."""
+    slot = slot_by_id(slot_id)
+    return workspace_dir(workspace_id) / "browser-profiles" / f"slot-{slot.slot_id}" / "chromium-profile"
+
+
+def browser_cache_dir(workspace_id: str, slot_id: int) -> Path:
+    slot = slot_by_id(slot_id)
+    return workspace_dir(workspace_id) / "browser-profiles" / f"slot-{slot.slot_id}" / "steel-cache"
+
+
 def slot_by_id(slot_id: int) -> WorkerSlot:
     try:
         return next(slot for slot in WORKER_SLOTS if slot.slot_id == slot_id)

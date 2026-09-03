@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import urllib.request
@@ -21,12 +22,29 @@ from browser_gate import BrowserGate
 from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page, tool_probe
 from control_store import ACTIVE_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
-from runtime_config import DATA_ROOT, ROOT, authorized_events, job_dir, validate_production_environment
+from runtime_config import DATA_ROOT, ROOT, authorized_events, browser_profile_dir, job_dir, validate_production_environment
 from scope_manifest import load_manifest as load_scope_manifest
 from workbook_ops import info as workbook_info_data, sheet as workbook_sheet_data, update as update_workbook_data
 
+def session_secret() -> str:
+    configured = os.environ.get("CVENT_SESSION_SECRET")
+    if configured:
+        return configured
+    # Development restarts and multiple local workers must verify the same signed
+    # session/CSRF cookie. Production still requires an approved external secret.
+    path = DATA_ROOT / ".development-session-secret"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            output.write(secrets.token_hex(32))
+    except FileExistsError:
+        pass
+    return path.read_text().strip()
+
+
 app = FastAPI(title="CVENT Agent", docs_url=None, redoc_url=None)
-_session_secret = os.environ.get("CVENT_SESSION_SECRET") or os.urandom(32).hex()
+_session_secret = session_secret()
 app.add_middleware(
     SessionMiddleware,
     secret_key=_session_secret,
@@ -216,7 +234,8 @@ def status(request: Request, job_id: str | None = None):
     state["auth_settings"] = {
         "organization_id": saved_auth.get("organization_id", ""),
         "authenticated_at": saved_auth.get("authenticated_at"),
-        "cookies_saved": bool(saved_auth.get("authenticated_at") and (directory / "chromium-profile").exists()),
+        "cookies_saved": bool(saved_auth.get("authenticated_at") and saved_auth.get("profile_slot") and
+                              browser_profile_dir(job["workspace_id"], int(saved_auth["profile_slot"])).exists()),
         "microsoft_sso_persistent": bool(saved_auth.get("microsoft_sso_persistent")),
         "cvent_cookie_count": saved_auth.get("cvent_cookie_count", 0),
         "microsoft_cookie_count": saved_auth.get("microsoft_cookie_count", 0),
@@ -296,7 +315,7 @@ def workbook_sheet(request: Request, name: str, start: int = 1, limit: int = 80,
 def update_workbook(request: Request, payload: dict, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
-    if job["state"] not in {"draft", "failed", "review_required", "login_required"}:
+    if job["state"] not in {"draft", "failed", "failed_prewrite", "review_required", "login_required"}:
         raise HTTPException(409, "This job is not editable in its current state")
     result = update_workbook_data(directory_for(job), payload, bool(active_job(job)))
     store.audit(identity["subject"], "workbook.updated", job["id"], {"saved": result["saved"]})
@@ -328,6 +347,10 @@ def save_auth_settings(request: Request, job_id: str | None = None):
         "microsoft_sso_persistent": any(cookie.get("name") == "ESTSAUTHPERSISTENT" for cookie in cookies),
         "cvent_cookie_count": sum(cookie.get("domain", "").endswith("cvent.com") for cookie in cookies),
         "microsoft_cookie_count": sum("microsoftonline.com" in cookie.get("domain", "") for cookie in cookies),
+        "cvent_session_cookie_count": sum(
+            cookie.get("domain", "").endswith("cvent.com") and cookie.get("session") is True for cookie in cookies
+        ),
+        "profile_slot": active.slot_id,
         "authenticated_at": now(),
     }
     path = directory / "auth-settings.json"
@@ -343,8 +366,14 @@ def start(request: Request, job_id: str | None = None):
     job = authorize_job(identity, job_id)
     if not (directory_for(job) / "input.xlsx").exists():
         raise HTTPException(400, "Upload the RR workbook first")
-    if BrowserGate(directory_for(job)).read().get("ownership") != "AGENT":
-        raise HTTPException(409, "Return browser control to the agent before starting")
+    gate = BrowserGate(directory_for(job))
+    if gate.read().get("ownership") != "AGENT":
+        active = active_job(job)
+        if not active and job["state"] in {"login_required", "failed_prewrite", "failed", "review_required"}:
+            gate.initialize()
+            store.audit(identity["subject"], "browser.stale_control_reset_on_start", job["id"], {})
+        else:
+            raise HTTPException(409, "Return browser control to the agent before starting")
     if not scope_summary().get("valid"):
         raise HTTPException(500, "Automation scope is invalid")
     try:
@@ -528,13 +557,20 @@ def take_control(request: Request, job_id: str | None = None):
 def return_to_agent(request: Request, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
+    directory = directory_for(job)
+    gate = BrowserGate(directory)
     active = active_job(job)
     if not active or not active.process or active.process.poll() is not None:
+        # A prior login handoff may outlive its worker. There is no process or
+        # live browser to resume, so clear only this stale gate and require a
+        # fresh runtime/lease/preflight on Continue.
+        if gate.read().get("ownership") == "USER" and job["state"] in {"login_required", "failed_prewrite", "failed", "review_required"}:
+            gate.initialize()
+            store.audit(identity["subject"], "browser.return_stale_control", job["id"], {})
+            return {"ok": True, "staleReset": True, "gate": gate.read(), "instruction": "Continue to acquire a fresh isolated browser runtime"}
         raise HTTPException(409, "CVENT Agent is not actively running")
-    directory = directory_for(job)
     runtime_path = directory / "browser-runtime.json"
     runtime = load_browser_runtime(runtime_path)
-    gate = BrowserGate(directory)
     gate.shield_agent()
     with gate.lock_file():
         try:

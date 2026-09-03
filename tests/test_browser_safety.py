@@ -80,7 +80,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.old=(browser_tool.CURRENT,browser_tool.local_probe,browser_tool.load_scope_manifest)
         browser_tool.CURRENT=self.base
         browser_tool.load_scope_manifest=lambda workbook,manifest:{'entries':[{'id':'scope-004','status':'confirmed'},{'id':'scope-070','status':'unconfirmed'}]}
-        self.runtime={'browserRuntimeId':'runtime-current','authorizedEventName':'(C+D) Medtrade Testing Clone 2','targetBrowserIdentity':{'url':'https://app.cvent.com/event?evtstub=locked'}}
+        self.runtime={'browserRuntimeId':'runtime-current','authorizedEventName':'(C+D) Medtrade Testing Clone 2','authorizedEventKey':'locked','targetBrowserIdentity':{'url':'https://app.cvent.com/event?evtstub=locked'}}
     def tearDown(self):
         browser_tool.CURRENT,browser_tool.local_probe,browser_tool.load_scope_manifest=self.old;self.tmp.cleanup()
     def write_lock(self):
@@ -131,6 +131,25 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         records=[json.loads(line) for line in (self.base/'scope-write-audit.jsonl').read_text().splitlines()]
         self.assertEqual([record['result'] for record in records],['attempted','uncertain_error'])
         self.assertTrue((self.base/'browser-mutation-uncertain.json').exists())
+    def test_open_authorized_event_requires_live_lease_inventory_and_runtime_identity(self):
+        browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/Subscribers/Events2/EventSelection'}
+        with patch.object(browser_tool, 'assert_event_lease') as lease:
+            browser_tool.guard(self.runtime,'openAuthorizedEvent',{
+                'intent':'read','eventName':self.runtime['authorizedEventName'],'eventKey':'locked',
+            })
+            lease.assert_called_once_with(self.runtime)
+        with patch.object(browser_tool, 'assert_event_lease'):
+            with self.assertRaisesRegex(RuntimeError,'does not match BrowserRuntime'):
+                browser_tool.guard(self.runtime,'openAuthorizedEvent',{
+                    'intent':'read','eventName':self.runtime['authorizedEventName'],'eventKey':'other',
+                })
+        browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/subscribers/events2/Details/EventDetails/Index/Edit?evtstub=locked'}
+        with patch.object(browser_tool, 'assert_event_lease'):
+            with self.assertRaisesRegex(RuntimeError,'event inventory'):
+                browser_tool.guard(self.runtime,'openAuthorizedEvent',{
+                    'intent':'read','eventName':self.runtime['authorizedEventName'],'eventKey':'locked',
+                })
+
     def test_navigation_fails_closed(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/subscribers/events2/EventSelection'}
         with self.assertRaisesRegex(RuntimeError,'non-authorized'):

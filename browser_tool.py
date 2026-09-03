@@ -53,6 +53,13 @@ def guard(runtime,operation,params):
     locked=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
     valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId']) and lock.get('browser_runtime_id')==runtime.get('browserRuntimeId')
     intent=params.get('intent')
+    if operation=='openAuthorizedEvent':
+        assert_event_lease(runtime)
+        current_host=(urlparse(current.get('url','')).hostname or '').lower()
+        if not current_host.endswith('cvent.com') or '/events2/eventselection' not in urlparse(current.get('url','')).path.lower():
+            raise RuntimeError('Authorized event opening requires the authenticated Cvent event inventory')
+        if params.get('eventName')!=runtime.get('authorizedEventName') or params.get('eventKey')!=runtime.get('authorizedEventKey'):
+            raise RuntimeError('Authorized event opening identity does not match BrowserRuntime')
     if operation in INTENT_REQUIRED and intent not in ('read','write'):
         raise RuntimeError(f'{operation} requires explicit read or write intent')
     if intent=='write':
