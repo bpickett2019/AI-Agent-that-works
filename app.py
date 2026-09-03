@@ -20,7 +20,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from auth import EntraAuth, Identity
 from browser_gate import BrowserGate
 from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page, tool_probe
-from control_store import ACTIVE_STATES, ControlStore
+from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
 from runtime_config import DATA_ROOT, ROOT, authorized_events, browser_profile_dir, job_dir, validate_production_environment
 from scope_manifest import load_manifest as load_scope_manifest
@@ -98,7 +98,7 @@ def active_job(job: dict):
 
 def safe_job(job: dict, include_owner: bool = False) -> dict:
     result = {key: job.get(key) for key in (
-        "id", "workspace_id", "event_id", "event_name", "original_filename", "state", "slot_id",
+        "id", "workspace_id", "event_id", "event_name", "original_filename", "state", "preferred_slot", "slot_id",
         "queued_at", "started_at", "finished_at", "heartbeat_at", "error", "uncertain", "created_at", "updated_at",
     )}
     if include_owner:
@@ -203,23 +203,34 @@ def admin_leases(request: Request):
 
 
 @app.get("/api/status")
-def status(request: Request, job_id: str | None = None):
+def status(request: Request, job_id: str | None = None, worker_slot: int | None = None):
     identity = current_user(request)
-    try:
+    if worker_slot is not None and worker_slot not in range(1, store.slots + 1):
+        raise HTTPException(400, "Worker profile must be 1, 2, or 3")
+    job = None
+    if job_id:
         job = authorize_job(identity, job_id)
-    except HTTPException as exc:
-        if exc.status_code == 404 and job_id is None:
-            return JSONResponse({
-                "status": "waiting_for_rr", "current_stage": "upload", "current_action": "Upload mock RR workbook",
-                "completed": [], "review_required": [], "activity_log": [], "agent_process_running": False,
-                "browser": {"running": False}, "browser_gate": {"ownership": "AGENT", "desiredOwnership": "AGENT"},
-                "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME", "automation_scope": scope_summary(),
-                "events": len(authorized_events()),
-            }, headers={"Cache-Control": "no-store"})
-        raise
+    elif worker_slot is not None:
+        job = next((item for item in store.list_jobs(identity["subject"], limit=1000)
+                    if int(item.get("slot_id") or item.get("preferred_slot") or 1) == worker_slot), None)
+    else:
+        job = store.latest_job(identity["subject"])
+    if not job:
+        return JSONResponse({
+            "status": "waiting_for_rr", "current_stage": "upload",
+            "current_action": f"User {worker_slot or 1} is ready for an RR workbook",
+            "completed": [], "review_required": [], "activity_log": [], "agent_process_running": False,
+            "browser": {"running": False, "worker_slot": worker_slot},
+            "browser_gate": {"ownership": "AGENT", "desiredOwnership": "AGENT"},
+            "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME", "automation_scope": scope_summary(),
+            "events": len(authorized_events()), "selected_worker": worker_slot or 1,
+        }, headers={"Cache-Control": "no-store"})
     directory = directory_for(job)
     state = read_json(directory / "state.json", {})
-    state.update({"job": safe_job(store.get_job(job["id"])), "run_mode": "mock", "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"})
+    persisted = store.get_job(job["id"])
+    state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"})
+    if persisted and persisted["state"] in TERMINAL_STATES:
+        state.update({"status": persisted["state"], "current_action": persisted.get("error") or state.get("current_action")})
     state["automation_scope"] = scope_summary()
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)
@@ -272,15 +283,17 @@ def automation_scope(request: Request):
 
 
 @app.post("/api/upload")
-def upload(request: Request, rr: UploadFile = File(...), event_id: str = Form(...)):
+def upload(request: Request, rr: UploadFile = File(...), event_id: str = Form(...), worker_slot: int = Form(1)):
     identity = current_user(request, mutate=True)
+    if worker_slot not in range(1, store.slots + 1):
+        raise HTTPException(400, "Worker profile must be 1, 2, or 3")
     name = rr.filename or ""
     if not name.lower().endswith(".xlsx"):
         raise HTTPException(400, "Upload an .xlsx file")
     event = next((item for item in authorized_events() if item.event_id == event_id.lower()), None)
     if not event:
         raise HTTPException(403, "Event is not in the server-side authorization allowlist")
-    job = store.create_job(identity, event, Path(name).name)
+    job = store.create_job(identity, event, Path(name).name, preferred_slot=worker_slot)
     directory = job_dir(job["workspace_id"], job["id"])
     try:
         runner.create_files(
@@ -295,7 +308,7 @@ def upload(request: Request, rr: UploadFile = File(...), event_id: str = Form(..
         store.finish(job["id"], None, "failed", "Invalid RR workbook", False, identity["subject"])
         shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(400, "The uploaded file is not a valid .xlsx workbook") from exc
-    return {"ok": True, "file": name, "job_id": job["id"], "event_id": event.event_id}
+    return {"ok": True, "file": name, "job_id": job["id"], "event_id": event.event_id, "worker_slot": worker_slot}
 
 
 @app.get("/api/workbook")

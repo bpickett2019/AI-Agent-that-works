@@ -70,6 +70,14 @@ class AuthorizationTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual({job["id"] for job in response.json()}, {own["id"], other["id"]})
 
+    def test_empty_worker_profile_is_selectable_without_falling_back_to_latest_job(self):
+        with TestClient(cvent_app.app) as client:
+            client.get("/api/me")
+            response = client.get("/api/status?worker_slot=2")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "waiting_for_rr")
+            self.assertEqual(response.json()["selected_worker"], 2)
+
     def test_mutations_require_csrf_token(self):
         with TestClient(cvent_app.app) as client:
             me = client.get("/api/me").json()

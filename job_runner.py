@@ -92,6 +92,18 @@ class JobRunner:
             if isinstance(pid, int) and self._is_pi_process(pid):
                 self._stop_process_tree(pid)
         recovered = self.store.recover_after_controller_restart()
+        for job_id in recovered:
+            job = self.store.get_job(job_id)
+            if not job:
+                continue
+            directory = job_dir(job["workspace_id"], job_id)
+            state = read_json(directory / "state.json", fresh_state(job))
+            state.update({
+                "status": job["state"], "current_action": job.get("error") or "Fresh preflight required",
+                "pi_pid": None, "process_started_at": None, "worker_slot": None, "updated_at": now(),
+            })
+            atomic_json(directory / "state.json", state)
+            append_log(directory, f"Controller recovery classified job as {job['state']}")
         # Containers may outlive a hard controller crash. Remove only named slot
         # containers; job profiles and evidence remain untouched for review.
         for slot_id in range(1, self.store.slots + 1):

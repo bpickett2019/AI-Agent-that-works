@@ -31,6 +31,16 @@ class ControlStoreTests(unittest.TestCase):
         self.store.queue_job(job["id"], self.users[user_index]["subject"])
         return job
 
+    def test_preferred_worker_profile_is_honored_without_spilling_to_another_slot(self):
+        first = self.store.create_job(self.users[0], self.event(1), "rr.xlsx", preferred_slot=2)
+        self.store.queue_job(first["id"], self.users[0]["subject"])
+        lease = self.store.acquire(first["id"])
+        self.assertEqual(lease["slot_id"], 2)
+        blocked = self.store.create_job(self.users[1], self.event(2), "rr.xlsx", preferred_slot=2)
+        self.store.queue_job(blocked["id"], self.users[1]["subject"])
+        self.assertIsNone(self.store.acquire(blocked["id"]))
+        self.assertEqual(self.store.get_job(blocked["id"])["state"], "queued")
+
     def test_three_different_events_get_three_isolated_slots(self):
         jobs = [self.job(i, i) for i in range(3)]
         leases = [self.store.acquire(job["id"]) for job in jobs]

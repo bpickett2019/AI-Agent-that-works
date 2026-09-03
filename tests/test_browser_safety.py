@@ -54,8 +54,9 @@ class ViewerSafetyTests(unittest.TestCase):
         for slot in ('1','2','3'):
             self.assertIn(f'data-worker="{slot}"',HTML)
             self.assertIn(f'USER {slot}',HTML)
-        self.assertIn('jobsCache.find(item=>Number(item.slot_id)===slot)',HTML)
-        self.assertIn('Different events are required for simultaneous runs',HTML)
+        self.assertIn('selectedWorker=Number(slot)',HTML)
+        self.assertIn('f.append(\'worker_slot\',String(selectedWorker))',HTML)
+        self.assertIn('`/api/status?worker_slot=${selectedWorker}`',HTML)
         self.assertIn("d.detail==='CSRF validation failed'",HTML)
         self.assertIn("fetch('/api/me',{cache:'no-store'})",HTML)
 

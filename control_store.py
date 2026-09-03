@@ -70,6 +70,7 @@ class ControlStore:
                     event_key TEXT NOT NULL,
                     original_filename TEXT NOT NULL,
                     state TEXT NOT NULL,
+                    preferred_slot INTEGER,
                     slot_id INTEGER,
                     pid INTEGER,
                     lease_token TEXT,
@@ -109,6 +110,9 @@ class ControlStore:
                     details_json TEXT NOT NULL
                 );
                 """)
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+                if "preferred_slot" not in columns:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN preferred_slot INTEGER")
 
     @contextmanager
     def immediate(self) -> Iterator[sqlite3.Connection]:
@@ -147,15 +151,17 @@ class ControlStore:
                 (subject,),
             ).fetchone())
 
-    def create_job(self, owner: dict[str, Any], event: Any, filename: str) -> dict[str, Any]:
+    def create_job(self, owner: dict[str, Any], event: Any, filename: str, preferred_slot: int | None = None) -> dict[str, Any]:
+        if preferred_slot is not None and preferred_slot not in range(1, self.slots + 1):
+            raise ValueError("Preferred worker slot is invalid")
         now = iso()
         job_id = "job_" + uuid.uuid4().hex
         with self.immediate() as conn:
             conn.execute(
                 """INSERT INTO jobs(id,workspace_id,owner_subject,event_id,event_name,event_key,
-                original_filename,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                original_filename,state,preferred_slot,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, owner["workspace_id"], owner["subject"], event.event_id, event.name,
-                 event.event_key, filename, "draft", now, now),
+                 event.event_key, filename, "draft", preferred_slot, now, now),
             )
             self._audit(conn, owner["subject"], "job.created", job_id, {"event_id": event.event_id})
             return dict(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
@@ -210,7 +216,10 @@ class ControlStore:
             if event_busy:
                 return None
             occupied = {row[0] for row in conn.execute("SELECT slot_id FROM worker_leases")}
-            slot_id = next((slot for slot in range(1, self.slots + 1) if slot not in occupied), None)
+            preferred = job["preferred_slot"]
+            slot_id = preferred if preferred in range(1, self.slots + 1) and preferred not in occupied else (
+                next((slot for slot in range(1, self.slots + 1) if slot not in occupied), None) if preferred is None else None
+            )
             if slot_id is None:
                 return None
             token = uuid.uuid4().hex
