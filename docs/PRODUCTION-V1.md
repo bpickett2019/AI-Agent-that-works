@@ -95,18 +95,32 @@ access or URL probing.
 
 ## Prerequisites and RBAC
 
-The deployment identity currently needs all of the following:
+Confirmed Azure targets are subscription
+`e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88`, tenant
+`661c8d9b-e19e-4330-b412-75dce2d26154`, and the `westus3` resource groups
+`rg-chartdarts-stg` and `rg-chartdarts-prod`. The deployment identity is object
+ID `4a6e7af6-72bb-4f11-8fb3-fb7842fcb2e6`; its UPN
+`bpicket@EMERALDEXPO.NET` and primary SMTP `Bailey.Picket@emeraldX.com` identify
+the same account.
 
-1. Resource-group `Contributor` on `rg-cvent-agent-pilot`.
-2. `User Access Administrator` or `Owner` on that RG to create managed-identity
-   and Key Vault role assignments.
-3. Microsoft Entra `Application Administrator` (or equivalent delegated Graph
-   permissions) to create the app/service principal, credentials, app roles, and
-   assignments.
-4. Storage Blob Data Contributor for the Terraform state account/container.
+The identity has effective resource-group `Contributor` through
+`sg-chartdarts-deployers`. It still needs either `User Access Administrator` on
+each group Terraform will target, or an administrator must pre-create all
+managed-identity/Key Vault role assignments. It also needs `Storage Blob Data
+Contributor` on the selected Terraform state account/container.
 
-The current authenticated Azure identity failed even RG read with
-`AuthorizationFailed`; provisioning cannot proceed until RBAC is granted.
+The intended existing Entra application has client ID
+`11f91043-4128-4b76-a405-46e71e034fab`, application object ID
+`6af0ef71-3e5a-4cef-83bb-542efb672425`, and service-principal object ID
+`51f52576-91a2-458c-bcfd-a61eb2b97e5c`. It currently has no app roles,
+`appRoleAssignmentRequired` is false, and the deployment identity is not an
+owner. An approved owner/administrator must safely add the CVENT Agent roles,
+assignments, callbacks, and credential, or provide a dedicated app.
+
+**Do not run the current Terraform unchanged.** It still targets the obsolete
+`rg-cvent-agent-pilot`/`eastus2` layout and creates a new Entra application.
+Choose staging or production first and adapt state, naming, location, and
+existing-app ownership before planning.
 
 ## Deploy
 
@@ -125,12 +139,14 @@ terraform plan -out production-v1.tfplan
 terraform apply production-v1.tfplan
 ```
 
-Then set `anthropic-api-key`, wait for systemd's restart, and inspect:
+Then set `anthropic-api-key`, wait for systemd's restart, and inspect. Replace
+the placeholders with the environment-specific names emitted by the adapted
+Terraform:
 
 ```bash
-az network bastion ssh --name cvent-agent-pilot-bastion \
-  --resource-group rg-cvent-agent-pilot \
-  --target-resource-id "$(az vm show -g rg-cvent-agent-pilot -n cvent-agent-pilot-vm --query id -o tsv)" \
+az network bastion ssh --name '<bastion-name>' \
+  --resource-group '<rg-chartdarts-stg-or-prod>' \
+  --target-resource-id "$(az vm show -g '<rg-chartdarts-stg-or-prod>' -n '<vm-name>' --query id -o tsv)" \
   --auth-type ssh-key --username azureadmin --ssh-key ~/.ssh/id_ed25519
 
 sudo systemctl status cvent-agent caddy docker

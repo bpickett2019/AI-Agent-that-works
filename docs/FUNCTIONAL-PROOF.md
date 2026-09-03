@@ -163,28 +163,46 @@ The local chunk transport itself is not the dominant cost; model turns, selector
 
 ## Exact Azure RBAC blocker
 
-Current deployment principal:
+Confirmed deployment identity and aliases:
 
-- UPN: `bpicket@EMERALDEXPO.NET`
-- object ID: `4a6e7af6-72bb-4f11-8fb3-fb7842fcb2e6`
+- UPN/sign-in: `bpicket@EMERALDEXPO.NET`
+- primary SMTP: `Bailey.Picket@emeraldX.com`
+- object ID shared by both aliases: `4a6e7af6-72bb-4f11-8fb3-fb7842fcb2e6`
 - tenant: `661c8d9b-e19e-4330-b412-75dce2d26154`
 - subscription: `e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88`
-- required resource group: `/subscriptions/e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88/resourceGroups/rg-cvent-agent-pilot`
 
-A live read-only recheck failed with `AuthorizationFailed` for both `Microsoft.Resources/subscriptions/resourcegroups/read` and `Microsoft.Authorization/roleAssignments/read` at that RG scope.
+Confirmed deployment resource groups:
 
-Minimum practical built-in assignments (all resource roles RG/resource scoped, never subscription-wide):
+- `/subscriptions/e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88/resourceGroups/rg-chartdarts-stg` (`westus3`)
+- `/subscriptions/e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88/resourceGroups/rg-chartdarts-prod` (`westus3`)
 
-| Resource/scope | Principal | Role/permission | Why |
+The identity has effective `Contributor` on both resource groups through `sg-chartdarts-deployers`. No effective `User Access Administrator` assignment was returned. The earlier `AuthorizationFailed` was against the obsolete `rg-cvent-agent-pilot` scope and is not evidence of missing read access to the two real ChartDarts groups.
+
+Confirmed existing Entra application:
+
+- application/client ID: `11f91043-4128-4b76-a405-46e71e034fab`
+- application object ID: `6af0ef71-3e5a-4cef-83bb-542efb672425`
+- service-principal object ID: `51f52576-91a2-458c-bcfd-a61eb2b97e5c`
+- display name: `app-chartdarts-dashboard`
+- current app roles: none
+- service-principal `appRoleAssignmentRequired`: `false`
+- current callbacks: production/staging ChartDarts domains and localhost
+- current owners returned by Graph: none
+
+The current Terraform is not yet aligned with these facts: it is restricted to `rg-cvent-agent-pilot`/`eastus2` and creates a new Entra application, service principal, roles, and secret. It must not be applied unchanged to either ChartDarts resource group.
+
+Remaining minimum assignments/configuration (all resource roles RG/resource scoped, never subscription-wide):
+
+| Resource/scope | Principal | Role/permission or action | State/reason |
 |---|---|---|---|
-| `rg-cvent-agent-pilot` | object ID above | `Contributor` at this RG only | Read RG and create/update the VM, identity, network, Bastion, disk, backup, monitor, Key Vault, public IP, and extensions in Terraform |
-| `rg-cvent-agent-pilot` | object ID above | `User Access Administrator` at this RG only | Create the two Key Vault role assignments and storage data-plane assignment; Contributor excludes role assignments |
-| future state account `cvagenttf82cf39cf49` | object ID above | `Storage Blob Data Contributor` at that account only | Terraform AzureAD backend container/blob read/write/lease; management-plane Contributor does not grant blob data access |
-| Entra tenant `661c…6154` | object ID above | `Application Administrator`, or admin-consented delegated Graph permissions `Application.ReadWrite.All`, `AppRoleAssignment.ReadWrite.All`, and required principal reads | Create application, service principal, secret, app roles, and user/group app-role assignments |
-| generated app Key Vault | generated VM user-assigned managed identity | `Key Vault Secrets User` at that vault only | VM startup reads Anthropic, Entra client, and session secrets; Terraform creates this assignment |
-| generated app Key Vault | deployment object ID above | `Key Vault Secrets Officer` at that vault only | Terraform writes/updates application secrets; Terraform creates this assignment after vault creation |
+| `rg-chartdarts-stg` and/or `rg-chartdarts-prod` | object ID above via `sg-chartdarts-deployers` | `Contributor` | **Present** on both groups |
+| each group Terraform will target | deployment principal or deployer group | `User Access Administrator`, or an administrator pre-creates every managed-identity/Key Vault role assignment | **Not observed**; Contributor excludes role assignments |
+| selected Terraform state account/container | deployment principal or deployer group | `Storage Blob Data Contributor` | Required for backend blob read/write/lease; exact account is unresolved until the staging/production state layout is selected |
+| existing Entra application/service principal | an approved Entra administrator or application owner | Safely add the required callbacks and `Cvent.Agent.User`/`Cvent.Agent.Admin` roles, configure assignments, and supply/rotate a client credential | The current principal is not an owner; the app currently has no roles. Changing assignment-required on a shared app can disrupt existing users and requires explicit approval |
+| generated application Key Vault | generated VM user-assigned identity | `Key Vault Secrets User` | VM startup secret reads; Terraform may create this only with role-assignment authority |
+| generated application Key Vault | deployment principal | `Key Vault Secrets Officer` | Terraform secret writes; Terraform may create this only with role-assignment authority |
 
-A custom RG role could replace Contributor with only the exact resource-provider actions used by `main.tf`, but that role itself must be created/assigned by an administrator and offers no acceptance benefit. No subscription-wide Owner/Contributor is required.
+No subscription-wide Owner/Contributor is required. Before Terraform changes, choose the first target (`stg` or `prod`), confirm whether the existing app is dedicated or shared, and select separate/non-colliding state and naming for both environments.
 
 ## Exact Cvent event blocker
 

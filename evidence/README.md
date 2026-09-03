@@ -20,6 +20,7 @@
 | Authorized live Cvent read-only discovery | Auth/login, 47,098-byte complete snapshot, 70-row scan, one exact event match; exposed bounded event-opening gap; zero writes | `live-cvent-capability-discovery.json` |
 | Live OS process kill isolation | Pass locally with authorized USER-owned slot 1 untouched and synthetic slots 2/3 | `live-process-isolation.json` |
 | Anthropic functional concurrency/failure isolation | Pass: 3 healthy concurrent calls, 0 429; isolated B auth failure did not block A/C | `anthropic-concurrency-functional.json` |
+| Azure target/identity inventory | Read-only confirmation of subscription, tenant, two ChartDarts RGs, effective Contributor role, account aliases, and existing Entra app/SP configuration | `azure-target-inventory.json` |
 
 These are real measurements but are not substitutes for Azure/Cvent acceptance.
 Synthetic acceptance probes did not navigate to or mutate Cvent. The authorized live job performed read-only Cvent login/event-list discovery and made no Cvent writes. That run exposed an authorized-event opening gap; bounded `openAuthorizedEvent`, `activate`, and full-page `controlInventory` replacements were added but have not yet been rerun live. See `docs/FUNCTIONAL-PROOF.md`.

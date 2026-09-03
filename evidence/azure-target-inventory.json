@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T20:45:00Z",
+  "source": "read-only Azure CLI and Microsoft Graph queries plus operator confirmation",
+  "subscription": {
+    "id": "e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88"
+  },
+  "tenant": {
+    "id": "661c8d9b-e19e-4330-b412-75dce2d26154"
+  },
+  "deploymentIdentity": {
+    "objectId": "4a6e7af6-72bb-4f11-8fb3-fb7842fcb2e6",
+    "userPrincipalName": "bpicket@EMERALDEXPO.NET",
+    "primarySmtp": "Bailey.Picket@emeraldX.com",
+    "aliasesIdentifySameAccount": true
+  },
+  "resourceGroups": [
+    {
+      "name": "rg-chartdarts-stg",
+      "id": "/subscriptions/e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88/resourceGroups/rg-chartdarts-stg",
+      "location": "westus3",
+      "effectiveDeploymentRole": {
+        "role": "Contributor",
+        "viaGroup": "sg-chartdarts-deployers"
+      }
+    },
+    {
+      "name": "rg-chartdarts-prod",
+      "id": "/subscriptions/e7a6e33b-d0a8-4ab6-9aa0-114ac3ad9a88/resourceGroups/rg-chartdarts-prod",
+      "location": "westus3",
+      "effectiveDeploymentRole": {
+        "role": "Contributor",
+        "viaGroup": "sg-chartdarts-deployers"
+      }
+    }
+  ],
+  "entraApplication": {
+    "clientId": "11f91043-4128-4b76-a405-46e71e034fab",
+    "applicationObjectId": "6af0ef71-3e5a-4cef-83bb-542efb672425",
+    "servicePrincipalObjectId": "51f52576-91a2-458c-bcfd-a61eb2b97e5c",
+    "displayName": "app-chartdarts-dashboard",
+    "signInAudience": "AzureADMyOrg",
+    "appRoles": [],
+    "appRoleAssignmentRequired": false,
+    "applicationOwnersReturned": [],
+    "servicePrincipalOwnersReturned": [],
+    "redirectUris": [
+      "https://app-chartsdarts-dashboard.com/auth/callback",
+      "https://staging.app-chartsdarts-dashboard.com/auth/callback",
+      "http://localhost:3000/auth/callback"
+    ]
+  },
+  "unresolved": [
+    "Select staging or production as the first deployment target.",
+    "Confirm whether app-chartdarts-dashboard is dedicated to this service or shared.",
+    "Obtain role-assignment authority or have an administrator pre-create scoped assignments.",
+    "Select a non-colliding Terraform state and resource naming layout for staging and production.",
+    "Add approved Cvent.Agent.User and Cvent.Agent.Admin roles and assignments, or revise the authentication design under security review."
+  ]
+}
