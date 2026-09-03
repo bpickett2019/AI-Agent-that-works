@@ -158,8 +158,10 @@ resource "azurerm_key_vault" "app" {
   tags                          = local.common_tags
 
   network_acls {
-    bypass         = "AzureServices"
-    default_action = "Deny"
+    bypass                     = "AzureServices"
+    default_action             = "Deny"
+    ip_rules                   = [var.ssh_source_cidr]
+    virtual_network_subnet_ids = [azurerm_subnet.app.id]
   }
 
   access_policy {
