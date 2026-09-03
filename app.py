@@ -28,7 +28,7 @@ def append_log(msg):
     CURRENT.mkdir(parents=True,exist_ok=True)
     with LOG.open('a') as f: f.write(f'{now()}  {msg}\n')
 def fresh_state(filename=None):
-    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME}' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_details','registration_types','admission_items','optional_items','questions','discounts','agenda','speakers','registration_paths','site','email_configuration','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'updated_at':t,'pi_pid':None,'pi_session':None}
+    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME}' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_details','registration_types','admission_items','optional_items','questions','discounts','agenda','speakers','registration_paths','site','email_configuration','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'process_started_at':None,'last_run_seconds':0,'updated_at':t,'pi_pid':None,'pi_session':None}
 def auth_settings():
     saved=read_json(AUTH_SETTINGS,{})
     cookie_store=DATA/'steel-profile-local'/'Default'/'Cookies'
@@ -129,7 +129,7 @@ def spawn_pi(message,target=None,resume=False):
     else: cmd += [message]
     out=open(CURRENT/'pi-output.log','a',buffering=1)
     _proc=subprocess.Popen(cmd,cwd=ROOT,stdout=out,stderr=subprocess.STDOUT,text=True,start_new_session=True)
-    st=read_json(STATE,fresh_state('input.xlsx')); st.update({'status':'running','current_stage':'starting','current_action':'Pi is starting','target_url':target or st.get('target_url',''),'pi_pid':_proc.pid,'started_at':st.get('started_at') or now(),'updated_at':now()}); atomic_json(STATE,st)
+    st=read_json(STATE,fresh_state('input.xlsx')); st.update({'status':'running','current_stage':'starting','current_action':'Pi is starting','target_url':target or st.get('target_url',''),'pi_pid':_proc.pid,'started_at':st.get('started_at') or now(),'process_started_at':now(),'updated_at':now()}); atomic_json(STATE,st)
     append_log(('Resuming' if resume else 'Started')+f' Pi process PID {_proc.pid}')
     threading.Thread(target=monitor_pi,args=(_proc,out),daemon=True).start()
     return _proc.pid
@@ -143,7 +143,10 @@ def monitor_pi(proc,out):
     if st.get('status')=='running':
         st['status']='agent_stopped' if code==0 else 'failed'; st['current_action']='Pi stopped before a final verdict' if code==0 else f'Pi exited with code {code}'
         append_log(st['current_action'])
-    st['updated_at']=now(); atomic_json(STATE,st)
+    if st.get('process_started_at'):
+        try:st['last_run_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['process_started_at'])).total_seconds()))
+        except Exception:pass
+    st['process_started_at']=None;st['pi_pid']=None;st['updated_at']=now(); atomic_json(STATE,st)
     with _lock:
         if _proc is proc: _proc=None
 
@@ -177,10 +180,11 @@ def status():
         runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); st['browser_runtime']={k:runtime.get(k) for k in ('browserRuntimeId','steelWorkspaceId','providerSessionId','apiOrigin','cdpEndpoint','viewerUrl','targetBrowserIdentity','verifiedAt')}
     except Exception: st['browser_runtime']=None
     st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['pi_process_running']=running()
-    if st.get('started_at'):
-        try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['started_at'])).total_seconds()))
+    if st['pi_process_running'] and st.get('process_started_at'):
+        try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['process_started_at'])).total_seconds()))
         except Exception: st['elapsed_seconds']=0
-    else: st['elapsed_seconds']=0
+    else:
+        st['elapsed_seconds']=0;st['pi_pid']=None
     return JSONResponse(st,headers={'Cache-Control':'no-store'})
 
 @app.get('/api/workbook')
@@ -351,6 +355,6 @@ def stop_agent():
         try:BROWSER_RUNTIME_PATH.unlink()
         except FileNotFoundError:pass
         st=read_json(STATE,{})
-        st.update({'status':'stopped','current_stage':'stopped','current_action':'Build and Steel browser stopped','pi_pid':None,'updated_at':now()}); atomic_json(STATE,st)
+        st.update({'status':'stopped','current_stage':'stopped','current_action':'Build and Steel browser stopped','pi_pid':None,'process_started_at':None,'updated_at':now()}); atomic_json(STATE,st)
         append_log('Steel OSS browser stopped; persistent profile preserved')
     return {'ok':True,'steel':steel}
