@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-09-03T17:16:37Z",
+  "recordedAt": "2026-09-03T19:25:54Z",
   "scope": "local capability-boundary acceptance; no Cvent navigation or mutation",
   "pi": {
     "version": "0.84.4",
@@ -16,6 +16,7 @@
     "cvent_job_update",
     "cvent_record_domain",
     "cvent_browser",
+    "cvent_login_handoff",
     "cvent_snapshot_chunk",
     "cvent_finish"
   ],
@@ -27,6 +28,7 @@
     "cvent_job_update",
     "cvent_record_domain",
     "cvent_browser",
+    "cvent_login_handoff",
     "cvent_snapshot_chunk",
     "cvent_finish"
   ],
@@ -38,6 +40,7 @@
   "notes": [
     "Pi loaded the explicit TypeScript extension with --no-builtin-tools and completed a live Anthropic no-tool startup call.",
     "A direct extension harness verified the exact registered/active tool set and executed the fixed RR preparation capability.",
+    "A login-handoff harness verified USER ownership plus login_required state while blocked, followed by clean AGENT ownership resumption.",
     "No credentials, lease token values, browser profiles, screenshots, or runtime data are contained in this evidence."
   ]
 }

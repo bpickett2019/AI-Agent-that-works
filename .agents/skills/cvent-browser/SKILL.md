@@ -37,7 +37,9 @@ Arbitrary JavaScript, raw CDP, tabs, browser creation, process execution, arbitr
 
 On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` for every remaining chunk before reasoning or acting.
 
-Do not default to Advanced Search or direct URL hopping. For event discovery, call `scanEventList` with read intent. The gateway forces the exact authorized event name; require exactly one exact match before opening it. Then verify the visible event name, code, key, and unpublished state before calling `authorizeTarget` with read intent.
+Do not default to Advanced Search or direct URL hopping. If any Cvent/Microsoft login, SSO, MFA, CAPTCHA, or expired-session page appears, immediately call `cvent_login_handoff`; do not explore alternate URLs or authentication workarounds. That capability keeps the same job, Steel browser, profile, worker, and lease alive while the user signs in and returns control. Fresh-read the complete page after return.
+
+For event discovery, call `scanEventList` with read intent. The gateway forces the exact authorized event name; require exactly one exact match before opening it. Then verify the visible event name, code, key, and unpublished state before calling `authorizeTarget` with read intent.
 
 ## Domain workflow
 

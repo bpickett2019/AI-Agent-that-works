@@ -63,7 +63,10 @@ environment, or arbitrary-path access. The explicit
 `cvent_*` capabilities. It invokes approved RR helpers and `browser_tool.py`
 without a shell, passes helper subprocesses an allowlisted environment, and
 never forwards Anthropic, Entra, or session secrets. Arbitrary JavaScript, raw
-CDP, and browser cookie/storage/network access are not exposed to the model.
+CDP, and browser cookie/storage/network access are not exposed to the model. When Cvent requires
+SSO/MFA, the login-handoff capability keeps the same worker and browser alive,
+gives the viewer to the user, and blocks further automation until control is
+returned.
 
 ## Validation
 

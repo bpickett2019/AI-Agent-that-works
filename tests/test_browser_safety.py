@@ -129,6 +129,9 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('params.expression',extension)
         self.assertNotIn('name: "bash"',extension)
         self.assertNotIn('name: "read"',extension)
+        self.assertIn('name: "cvent_login_handoff"',extension)
+        self.assertIn('Immediately call `cvent_login_handoff`',PROMPT)
+        self.assertIn('while the user signs in and returns control',SKILL)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
         self.assertIn('Ego `scanEventList`',PROMPT)

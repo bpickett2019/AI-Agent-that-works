@@ -5,7 +5,7 @@
 | Probe | Result | Evidence |
 |---|---|---|
 | Unit safety/auth/lease/workbook tests | Pass | `npm test` output; 39 tests after V1 additions |
-| Pi capability boundary | Pass: explicit extension loaded, exact nine `cvent_*` tools active, builtin `read`/`bash` absent, fixed RR preparation executed | `pi-capability-extension.json` |
+| Pi capability boundary | Pass: explicit extension loaded, exact ten `cvent_*` tools active, builtin `read`/`bash` absent, fixed RR preparation executed | `pi-capability-extension.json` |
 | 1/2/3 concurrent control-plane acquisitions on different canonical events | Pass | `local-control-plane-acceptance.json` |
 | Three same-event acquisition race | Pass: exactly one holder; successor acquired only after release | `local-control-plane-acceptance.json` |
 | Controller restart recovery | Pass: active job became `failed_uncertain`; all leases cleared | `local-control-plane-acceptance.json` |

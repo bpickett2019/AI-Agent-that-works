@@ -87,7 +87,11 @@ and authorization, strips snapshot path parameters, exposes neither arbitrary
 JavaScript nor raw CDP, and still delegates all writes to the existing
 runtime/event-lease/scope checks. Complete DOM
 captures larger than one tool result are captured once and transported through
-job-scoped opaque chunks; the agent must consume every chunk before acting.
+job-scoped opaque chunks; the agent must consume every chunk before acting. If
+the browser reaches Cvent SSO/MFA, `cvent_login_handoff` transfers the existing
+viewer to the user and blocks the Pi tool turn until control is returned, so the
+worker, profile, process, and lease remain alive without automated credential
+access or URL probing.
 
 ## Prerequisites and RBAC
 

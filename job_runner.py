@@ -371,7 +371,7 @@ class JobRunner:
         sessions = directory / "pi-sessions"
         capability_tools = (
             "cvent_prepare_rr,cvent_expectations,cvent_scope,cvent_job_read,"
-            "cvent_job_update,cvent_record_domain,cvent_browser,"
+            "cvent_job_update,cvent_record_domain,cvent_browser,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
         )
         command_line = [

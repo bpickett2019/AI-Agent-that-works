@@ -31,7 +31,7 @@ const ARTIFACTS: Record<string, string> = {
 const ALLOWED_TOOLS = new Set([
   "cvent_prepare_rr", "cvent_expectations", "cvent_scope", "cvent_job_read",
   "cvent_job_update", "cvent_record_domain", "cvent_browser",
-  "cvent_snapshot_chunk", "cvent_finish",
+  "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
 const SNAPSHOT_CHUNK_BYTES = 36 * 1024;
@@ -483,6 +483,58 @@ export default function cventJobTools(pi: any) {
         document.updatedAt = new Date().toISOString();
         await atomicJson(path, document);
         return toolText({ ok: true, domain: params.domain, status: params.status });
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "cvent_login_handoff",
+    label: "Request Cvent login",
+    description: "Pause browser automation at a login page and hand this job's existing Steel viewer to the user for SSO/MFA. Waits without shell or credential access until the user returns control.",
+    parameters: Type.Object({}),
+    async execute(_id: string, _params: unknown, signal: AbortSignal) {
+      return withQueue("browser", async () => {
+        const gatePath = join(jobDir, "browser-gate.json");
+        const gate = await readJson(gatePath, {});
+        if (gate.ownership !== "AGENT" || gate.desiredOwnership !== "AGENT" || ![undefined, null, "NONE"].includes(gate.activeActor)) {
+          throw new Error("Login handoff requires an idle agent-owned browser gate");
+        }
+        const statePath = join(jobDir, "state.json");
+        const state = await readJson(statePath, {});
+        state.status = "login_required";
+        state.current_stage = "login_required";
+        state.current_action = "Complete Cvent SSO/MFA in the browser, save login info, then return control to the agent";
+        state.updated_at = new Date().toISOString();
+        await atomicJson(statePath, state);
+        gate.ownership = "USER";
+        gate.desiredOwnership = "USER";
+        gate.activeActor = "USER";
+        gate.automationOwner = "USER";
+        gate.agentPaused = true;
+        gate.pausedPids = [process.pid];
+        gate.transition = null;
+        gate.updatedAt = new Date().toISOString();
+        await atomicJson(gatePath, gate);
+        await appendActivity("Cvent login required; browser control handed to user for SSO/MFA");
+
+        const deadline = Date.now() + 30 * 60 * 1000;
+        while (Date.now() < deadline) {
+          if (signal?.aborted) throw new Error("Login handoff cancelled");
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+          const current = await readJson(gatePath, {});
+          if (current.ownership === "AGENT" && current.desiredOwnership === "AGENT") {
+            const resumed = await readJson(statePath, {});
+            resumed.status = "running";
+            resumed.current_stage = "target_discovery";
+            resumed.current_action = "Verifying Cvent login and resuming exact-event discovery";
+            resumed.updated_at = new Date().toISOString();
+            await atomicJson(statePath, resumed);
+            await appendActivity("User returned browser control; verifying Cvent login before resuming");
+            return toolText({ ok: true, resumed: true, instruction: "Fresh-read pageInfo and a complete snapshot before continuing." });
+          }
+          if (current.ownership === "NONE") throw new Error("Browser return was blocked; human review is required");
+        }
+        throw new Error("Cvent login handoff timed out after 30 minutes");
       });
     },
   });
