@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T20:02:42.907933+00:00",
+  "scope": "harmless bounded Pi prompts; no tools, browser, or Cvent access",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "healthyConcurrency": {
+    "wallSeconds": 1.156,
+    "workers": [
+      {
+        "worker": "A",
+        "returncode": 0,
+        "success": true,
+        "latencySeconds": 1.1,
+        "429Count": 0,
+        "retryNotices": 0,
+        "stderrPresent": false,
+        "requests": 1,
+        "usage": {
+          "input": 465,
+          "output": 6,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 471
+        },
+        "providers": [
+          "anthropic"
+        ],
+        "models": [
+          "claude-sonnet-4-6"
+        ],
+        "apis": [
+          "anthropic-messages"
+        ]
+      },
+      {
+        "worker": "B",
+        "returncode": 0,
+        "success": true,
+        "latencySeconds": 1.032,
+        "429Count": 0,
+        "retryNotices": 0,
+        "stderrPresent": false,
+        "requests": 1,
+        "usage": {
+          "input": 465,
+          "output": 6,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 471
+        },
+        "providers": [
+          "anthropic"
+        ],
+        "models": [
+          "claude-sonnet-4-6"
+        ],
+        "apis": [
+          "anthropic-messages"
+        ]
+      },
+      {
+        "worker": "C",
+        "returncode": 0,
+        "success": true,
+        "latencySeconds": 1.153,
+        "429Count": 0,
+        "retryNotices": 0,
+        "stderrPresent": false,
+        "requests": 1,
+        "usage": {
+          "input": 465,
+          "output": 6,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 471
+        },
+        "providers": [
+          "anthropic"
+        ],
+        "models": [
+          "claude-sonnet-4-6"
+        ],
+        "apis": [
+          "anthropic-messages"
+        ]
+      }
+    ]
+  },
+  "providerFailureIsolation": {
+    "wallSeconds": 1.263,
+    "workers": [
+      {
+        "worker": "A",
+        "returncode": 0,
+        "success": true,
+        "latencySeconds": 1.217,
+        "429Count": 0,
+        "retryNotices": 0,
+        "stderrPresent": false,
+        "requests": 1,
+        "usage": {
+          "input": 467,
+          "output": 6,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 473
+        },
+        "providers": [
+          "anthropic"
+        ],
+        "models": [
+          "claude-sonnet-4-6"
+        ],
+        "apis": [
+          "anthropic-messages"
+        ]
+      },
+      {
+        "worker": "B",
+        "returncode": 1,
+        "success": false,
+        "latencySeconds": 0.368,
+        "429Count": 0,
+        "retryNotices": 0,
+        "stderrPresent": true,
+        "requests": 1,
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0
+        },
+        "providers": [
+          "anthropic"
+        ],
+        "models": [
+          "claude-sonnet-4-6"
+        ],
+        "apis": [
+          "anthropic-messages"
+        ]
+      },
+      {
+        "worker": "C",
+        "returncode": 0,
+        "success": true,
+        "latencySeconds": 1.262,
+        "429Count": 0,
+        "retryNotices": 0,
+        "stderrPresent": false,
+        "requests": 1,
+        "usage": {
+          "input": 467,
+          "output": 6,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 473
+        },
+        "providers": [
+          "anthropic"
+        ],
+        "models": [
+          "claude-sonnet-4-6"
+        ],
+        "apis": [
+          "anthropic-messages"
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "healthyRequests": 3,
+    "429Count": 0,
+    "failures": 0,
+    "apiVerified": true,
+    "workerBFailureDidNotBlockAOrC": true,
+    "browserMutationReplayPossibleInProbe": false,
+    "reason": "All probe sessions ran with --no-tools; browser writes additionally record attempted/uncertain timeout and block replay."
+  },
+  "passed": true
+}

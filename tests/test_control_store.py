@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,6 +66,28 @@ class ControlStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.acquire(second["id"]))
         self.store.finish(first["id"], lease["token"], "completed")
         self.assertIsNotNone(self.store.acquire(second["id"]))
+
+    def test_same_event_waiter_acquires_after_crash_only_after_owner_is_uncertain(self):
+        first = self.job(0, 1)
+        waiter = self.job(1, 1)
+        different = self.job(2, 2)
+        first_lease = self.store.acquire(first["id"])
+        self.assertIsNone(self.store.acquire(waiter["id"]))
+        different_lease = self.store.acquire(different["id"])
+        self.assertIsNotNone(different_lease)
+        self.assertTrue(self.store.mark_running(first["id"], first_lease["token"], 11111))
+        self.assertTrue(self.store.mark_running(different["id"], different_lease["token"], 33333))
+        expired = datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat()
+        with self.store.immediate() as conn:
+            conn.execute("UPDATE event_leases SET expires_at=? WHERE holder_job_id=?", (expired, first["id"]))
+            conn.execute("UPDATE worker_leases SET expires_at=? WHERE holder_job_id=?", (expired, first["id"]))
+        successor = self.store.acquire(waiter["id"])
+        self.assertIsNotNone(successor)
+        crashed = self.store.get_job(first["id"])
+        self.assertEqual(crashed["state"], "failed_uncertain")
+        self.assertEqual(crashed["uncertain"], 1)
+        self.assertTrue(self.store.valid_event_lease(waiter["id"], successor["token"], "event-1"))
+        self.assertTrue(self.store.valid_event_lease(different["id"], different_lease["token"], "event-2"))
 
     def test_wrong_token_cannot_heartbeat_or_release_someone_elses_lease(self):
         job = self.job(0, 1)

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T20:30:00Z",
+  "scope": "authorized live Cvent read-only capability evidence for job_05bb846fc7f043f6bc7d86024f20208b; no Cvent writes",
+  "authorizedTarget": {
+    "name": "(C+D) Medtrade Testing Clone 2",
+    "eventId": "e712e34c-6117-4d13-bf4c-8ed54cf2b495",
+    "eventKey": "e712e34c-6117-4d13-bf4c-8ed54cf2b495",
+    "eventCodeObserved": "NLNMYJD28PH"
+  },
+  "authenticatedRead": {
+    "url": "https://app.cvent.com/Subscribers/Events2/EventSelection",
+    "title": "Events",
+    "observedAt": "2026-09-03T20:09:41.499Z",
+    "snapshotBytes": 47098,
+    "snapshotChunks": 2,
+    "allChunksConsumed": true,
+    "eventRowsScanned": 70,
+    "scanPasses": 5,
+    "exactMatches": 1,
+    "exactMatchStatus": "Ongoing"
+  },
+  "functionalGapObserved": {
+    "description": "scanEventList returned exactly one authorized name/code/key/href, but physical bounded clicks did not navigate; direct keyed navigation was blocked because target authorization had not yet been established",
+    "oldAgentDependency": "successful pre-security runs used fixed-page JavaScript element.click() for controls that did not respond to physical Ego click",
+    "boundedFixesAdded": [
+      "openAuthorizedEvent with no model-supplied URL/name/key",
+      "activate against one identified target",
+      "full-page controlInventory for selector recovery"
+    ],
+    "liveFixRerun": false
+  },
+  "anthropic": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "api": "anthropic-messages",
+    "successfulResponseRecords": 90
+  },
+  "outcome": {
+    "cventWriteAuditExists": false,
+    "cventWrites": 0,
+    "jobState": "failed_uncertain",
+    "jobError": "Pi exited with code 143 without a final successful verdict",
+    "safeAutomaticRetry": false
+  }
+}

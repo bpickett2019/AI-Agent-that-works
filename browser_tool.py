@@ -9,8 +9,8 @@ from browser_gate import action
 from browser_runtime import load,local_probe
 from scope_manifest import SCOPE_MANIFEST as DEFAULT_SCOPE_MANIFEST, SCOPE_WORKBOOK as DEFAULT_SCOPE_WORKBOOK, load_manifest as load_scope_manifest
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'));SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
-EGO={'probe','authorizeTarget','snapshotText','pageInfo','scanEventList','scroll','click','fill','type','navigate','js','cdp','wait','tabs','switchTab'}
-INTENT_REQUIRED={'click','fill','type','js','cdp'}
+EGO={'probe','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
+INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
 def event_key(url):
     try:
         q={key.lower():value for key,value in parse_qs(urlparse(url).query).items()}
@@ -24,9 +24,13 @@ def target_lock():
     try:return json.loads((CURRENT/'authorized-target.json').read_text())
     except Exception:return {}
 def emit(data):print('BROWSER_ROUTER_RESULT='+json.dumps(data,ensure_ascii=False))
-def audit_scope_write(operation,params,current,result):
-    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'scopeIds':params.get('scopeIds',[]),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':'succeeded' if result.get('ok') else 'failed'}
+def audit_scope_write(operation,params,current,result,error=None):
+    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'scopeIds':params.get('scopeIds',[]),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':result}
+    if error:record['error']=str(error)[-800:]
     with (CURRENT/'scope-write-audit.jsonl').open('a') as output:output.write(json.dumps(record,ensure_ascii=False)+'\n')
+def mark_mutation_uncertain(operation,params,current,error):
+    marker=CURRENT/'browser-mutation-uncertain.json';tmp=marker.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'scopeIds':params.get('scopeIds',[]),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'error':str(error)[-800:]},indent=2));tmp.replace(marker)
 def child_result(proc):
     marker='BROWSER_TOOL_RESULT=';index=proc.stdout.rfind(marker)
     if index>=0:
@@ -47,11 +51,13 @@ def assert_event_lease(runtime):
 def guard(runtime,operation,params):
     current=local_probe(runtime);lock=target_lock()
     locked=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
-    valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId'])
+    valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId']) and lock.get('browser_runtime_id')==runtime.get('browserRuntimeId')
     intent=params.get('intent')
     if operation in INTENT_REQUIRED and intent not in ('read','write'):
         raise RuntimeError(f'{operation} requires explicit read or write intent')
     if intent=='write':
+        if (CURRENT/'browser-mutation-uncertain.json').exists():
+            raise RuntimeError('Write blocked: a prior browser mutation timed out with uncertain outcome; fresh human review is required')
         if not valid_lock or current_key!=locked:
             raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
         if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
@@ -80,13 +86,25 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             host=(urlparse(info.get('url','')).hostname or '').lower()
             if params.get('eventName')!=runtime['authorizedEventName'] or runtime['authorizedEventName'].lower() not in json.dumps(observed).lower() or not key or not host.endswith('cvent.com'):raise RuntimeError('Exact visible authorized event identity was not proven')
             if runtime.get('authorizedEventKey') and key!=runtime['authorizedEventKey']:raise RuntimeError('Visible event key is not the server-authorized event')
-            lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':key,'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
+            lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':key,'browser_runtime_id':runtime['browserRuntimeId'],'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
             target=CURRENT/'authorized-target.json';tmp=target.with_suffix('.tmp');tmp.write_text(json.dumps(lock,indent=2));tmp.replace(target)
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
-        proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))
+        is_write=params.get('intent')=='write'
+        if is_write:audit_scope_write(operation,params,current,'attempted')
+        try:
+            proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))
+        except subprocess.TimeoutExpired as error:
+            if is_write:
+                audit_scope_write(operation,params,current,'uncertain_timeout',error)
+                mark_mutation_uncertain(operation,params,current,error)
+            raise RuntimeError('Browser mutation outcome is uncertain after helper timeout; automatic replay is blocked') from error
     result=child_result(proc);result['router']=tool
-    if params.get('intent')=='write':audit_scope_write(operation,params,current,result)
+    if params.get('intent')=='write':
+        if proc.returncode or not result.get('ok'):
+            audit_scope_write(operation,params,current,'uncertain_error',result.get('error'))
+            mark_mutation_uncertain(operation,params,current,result.get('error','browser helper failed after write attempt'))
+        else:audit_scope_write(operation,params,current,'succeeded')
     if proc.returncode or not result.get('ok'):raise RuntimeError(result.get('error','browser tool failed'))
     return result
 def main():

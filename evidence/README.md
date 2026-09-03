@@ -14,9 +14,15 @@
 | 1/2/3 simultaneous Pi calls using `anthropic/claude-sonnet-4-6` | Pass; no tools/browser/session | `anthropic-concurrency.json` |
 | Authenticated UI load and full-page semantic review | Pass using ego-browser | Operator identity, allowlisted target, 65/33/18 scope counts, and three-worker wording rendered |
 | Terraform static validation | Pass with Terraform 1.16.0 and pinned provider lock | Local command output |
+| Complete snapshot reconstruction/integrity | Pass on 403,140-byte payload derived from archived real Cvent DOM | `capability-functional.json` |
+| Bounded browser primitives in real isolated Steel/Ego | Pass for snapshot/inventory/fill/select/check/search/activate/modal/key/hover/rich-text selection/scroll/drag/readback | `browser-operations-functional.json` |
+| Capability-only Pi reasoning loop | Pass: complete chunks → reason → recover selector → scoped fill → complete chunks → verify | `browser-reasoning-functional.json` |
+| Authorized live Cvent read-only discovery | Auth/login, 47,098-byte complete snapshot, 70-row scan, one exact event match; exposed bounded event-opening gap; zero writes | `live-cvent-capability-discovery.json` |
+| Live OS process kill isolation | Pass locally with authorized USER-owned slot 1 untouched and synthetic slots 2/3 | `live-process-isolation.json` |
+| Anthropic functional concurrency/failure isolation | Pass: 3 healthy concurrent calls, 0 429; isolated B auth failure did not block A/C | `anthropic-concurrency-functional.json` |
 
 These are real measurements but are not substitutes for Azure/Cvent acceptance.
-No local acceptance probe navigated to or mutated Cvent.
+Synthetic acceptance probes did not navigate to or mutate Cvent. The authorized live job performed read-only Cvent login/event-list discovery and made no Cvent writes. That run exposed an authorized-event opening gap; bounded `openAuthorizedEvent`, `activate`, and full-page `controlInventory` replacements were added but have not yet been rerun live. See `docs/FUNCTIONAL-PROOF.md`.
 
 ## Blocked acceptance
 

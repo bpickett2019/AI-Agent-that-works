@@ -1,0 +1,252 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T20:23:09.007559+00:00",
+  "scope": "real production capability extension and capability-only Pi reasoning loop in isolated Steel/Ego against large synthetic Cvent-like DOM; no live Cvent navigation or mutation",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "api": "anthropic-messages",
+  "returncode": 0,
+  "wallSeconds": 66.746,
+  "runtime": {
+    "slot": 2,
+    "runtimeId": "cvent-runtime-ea88be19218f4a5dbc22994ba852b31d",
+    "targetId": "99B23D7D24C1C88411C6F3B19CE29459",
+    "profilePath": "/Users/bp/cvent-one-shot/data/browser-reasoning-c2kjo8id/workspace-reasoning/job-reasoning/chromium-profile",
+    "sessionPath": "/Users/bp/cvent-one-shot/data/browser-reasoning-c2kjo8id/workspace-reasoning/job-reasoning/pi-sessions"
+  },
+  "directCapabilityExecution": {
+    "toolCount": 10,
+    "operations": [
+      "snapshotText",
+      "snapshotChunk",
+      "fill",
+      "snapshotText",
+      "snapshotChunk",
+      "selectOption",
+      "snapshotText",
+      "snapshotChunk",
+      "setChecked",
+      "snapshotText",
+      "snapshotChunk",
+      "search",
+      "snapshotText",
+      "click",
+      "wait",
+      "press",
+      "hover",
+      "snapshotText",
+      "selectText",
+      "scroll",
+      "scroll",
+      "drag",
+      "snapshotText"
+    ],
+    "timings": [
+      {
+        "operation": "snapshotText",
+        "milliseconds": 871.985,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 8.053,
+        "error": false
+      },
+      {
+        "operation": "fill",
+        "milliseconds": 753.369,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 778.539,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 7.732,
+        "error": false
+      },
+      {
+        "operation": "selectOption",
+        "milliseconds": 671.024,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 776.37,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 7.961,
+        "error": false
+      },
+      {
+        "operation": "setChecked",
+        "milliseconds": 720.221,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 710.635,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 7.556,
+        "error": false
+      },
+      {
+        "operation": "search",
+        "milliseconds": 739.695,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 745.038,
+        "error": false
+      },
+      {
+        "operation": "click",
+        "milliseconds": 769.471,
+        "error": false
+      },
+      {
+        "operation": "wait",
+        "milliseconds": 722.926,
+        "error": false
+      },
+      {
+        "operation": "press",
+        "milliseconds": 761.615,
+        "error": false
+      },
+      {
+        "operation": "hover",
+        "milliseconds": 751.175,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 673.571,
+        "error": false
+      },
+      {
+        "operation": "selectText",
+        "milliseconds": 750.142,
+        "error": false
+      },
+      {
+        "operation": "scroll",
+        "milliseconds": 831.255,
+        "error": false
+      },
+      {
+        "operation": "scroll",
+        "milliseconds": 794.085,
+        "error": false
+      },
+      {
+        "operation": "drag",
+        "milliseconds": 809.68,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 726.308,
+        "error": false
+      }
+    ],
+    "checks": {
+      "initialTail": true,
+      "venue": true,
+      "stateFlorida": true,
+      "browseChecked": true,
+      "searchFound": true,
+      "modalControl": true,
+      "hoverControl": true,
+      "dragged": true
+    },
+    "snapshotBytes": [
+      53410,
+      53421,
+      53421,
+      53419,
+      1962,
+      2039,
+      1975
+    ],
+    "snapshotCount": 7,
+    "chunkCalls": 4,
+    "passed": true
+  },
+  "operations": [
+    "snapshotText",
+    "fill",
+    "fill",
+    "probe",
+    "fill",
+    "snapshotText"
+  ],
+  "requiredOperationsCovered": [
+    "fill",
+    "snapshotText"
+  ],
+  "missingOperations": [],
+  "snapshotChunkCalls": 2,
+  "toolDurations": [
+    {
+      "operation": "snapshotText",
+      "milliseconds": 4197,
+      "error": false
+    },
+    {
+      "operation": "cvent_snapshot_chunk",
+      "milliseconds": 6303,
+      "error": false
+    },
+    {
+      "operation": "fill",
+      "milliseconds": 11041,
+      "error": true
+    },
+    {
+      "operation": "fill",
+      "milliseconds": 8021,
+      "error": true
+    },
+    {
+      "operation": "probe",
+      "milliseconds": 6587,
+      "error": false
+    },
+    {
+      "operation": "fill",
+      "milliseconds": 4267,
+      "error": false
+    },
+    {
+      "operation": "snapshotText",
+      "milliseconds": 4059,
+      "error": false
+    },
+    {
+      "operation": "cvent_snapshot_chunk",
+      "milliseconds": 8399,
+      "error": false
+    }
+  ],
+  "toolLatencyMilliseconds": {
+    "minimum": 4059,
+    "maximum": 8399,
+    "mean": 5635.333
+  },
+  "finalState": {
+    "venue": true,
+    "tail": true
+  },
+  "piFinal": "ue Name textbox with \"Pi Reasoned Venue\"The quoted accessibility selector failed CSS parsing. Retrying with a proper ARIA attribute selector.The target selector format is CSS-based. Let me use `probe` to inspect the field's actual DOM attributes.`fill` succeeded (`ok: true`). Now taking the second `snapshotText` to verify persistence.\n\n---\n\n### Step 4 \u2014 Second `snapshotText` (verification)The key finding is already visible in chunk 0. `totalChunks: 2` \u2014 must consume chunk 1 before reporting.\n\n### Step 5 \u2014 Read final chunk of second snapshotBoth snapshots fully consumed (`complete: true` on both final chunks). Here is the complete capability-loop report:\n\n---\n\n## \u2705 Capability Loop \u2014 Complete Report\n\n### Snapshot 1 (snapshotId `b3431249-\u2026`, 2 chunks, both read in strict order)\n\n| Item | Finding |\n|---|---|\n| **COMPLETE PAGE TAIL SENTINEL** | \u2705 **Confirmed** \u2014 `StaticText \"COMPLETE PAGE TAIL SENTINEL\"` present in chunk 0, preceding the discount table |\n| **Venue Name (before fill)** | `textbox \"Venue Name\"` \u2192 inner `StaticText \"Old Venue\"` \u2192 current value = **\"Old Venue\"** |\n\n---\n\n### Fill Operation (scope-007, target `[aria-label=\"Venue Name\"]`, text `Pi Reasoned Venue`)\n\n- First two attempts using accessibility-tree label syntax (`textbox \"Venue Name\"` and `role=textbox[name=\"Venue Name\"]`) were rejected by the CSS selector engine.\n- Third attempt using the CSS attribute selector `[aria-label=\"Venue Name\"]` **succeeded** (`ok: true`).\n\n---\n\n### Snapshot 2 (snapshotId `d5d658f9-\u2026`, 2 chunks, both read in strict order)\n\n| Item | Finding |\n|---|---|\n| **COMPLETE PAGE TAIL SENTINEL** | \u2705 Still present in chunk 0 |\n| **Venue Name (after fill)** | `textbox \"Venue Name\"` \u2192 inner `StaticText \"Pi Reasoned Venue\"` |\n\n### \ud83d\udfe2 **\"Pi Reasoned Venue\" PERSISTED**\n\nThe second snapshot unambiguously shows the Venue Name textbox now contains **`Pi Reasoned Venue`** \u2014 replacing the prior value of `\"Old Venue\"`. The fill was durable across the full DOM re-snapshot cycle with no reversion.",
+  "stderrPresent": false,
+  "passed": true
+}

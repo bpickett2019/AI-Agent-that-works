@@ -19,14 +19,10 @@ try{
   let result;
   switch(operation){
     case 'probe': {const info=await ego.pageInfo();result={marker,targetId:wanted,url:info.url,title:info.title};break}
-    case 'snapshotText': {
-      const snapshot=await ego.snapshot();
-      if(params.saveTo){
-        const out=new URL(`file://${process.cwd()}/${String(params.saveTo).replace(/^\/+/, '')}`);
-        fs.mkdirSync(new URL('.',out),{recursive:true});fs.writeFileSync(out,snapshot,'utf8');
-        result={snapshotFile:out.pathname,bytes:Buffer.byteLength(snapshot)};
-      }else result={snapshot};
-      break;
+    case 'snapshotText': result={snapshot:await ego.snapshot()};break;
+    case 'controlInventory': {
+      const inventory=await ego.evaluate(`(() => {const controls=[],seen=new Set();const walk=(root,path)=>{for(const element of root.querySelectorAll('*')){if(element.shadowRoot)walk(element.shadowRoot,path+' > '+element.tagName.toLowerCase()+(element.id?'#'+element.id:''));if(!element.matches('a,button,input,select,textarea,[role],[contenteditable=true]')||seen.has(element))continue;seen.add(element);const type=(element.getAttribute('type')||'').toLowerCase();controls.push({path,tag:element.tagName,role:element.getAttribute('role'),text:(element.innerText||element.textContent||'').trim().slice(0,500),id:element.id||null,name:element.getAttribute('name'),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),testId:element.getAttribute('data-cvent-id')||element.getAttribute('data-testid'),href:element instanceof HTMLAnchorElement?element.href:null,type:type||null,value:type==='password'?null:('value' in element?String(element.value).slice(0,500):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null})}};walk(document,'document');return {url:location.href,title:document.title,controls}})()`);
+      result={snapshotKind:'controlInventory',snapshot:JSON.stringify(inventory,null,2)};break;
     }
     case 'pageInfo': result={page:await ego.pageInfo()};break;
     case 'scroll': {
@@ -49,18 +45,47 @@ try{
       const rows=[...seen.values()],exactMatches=rows.filter(row=>row.name===exactName);
       result={exactName,exactMatches,observedRows:rows,passes,finalY:await ego.evaluate('scrollY'),scrollHeight:await ego.evaluate('document.documentElement.scrollHeight')};break;
     }
+    case 'openAuthorizedEvent': {
+      const exactName=String(params.eventName||''),expectedKey=String(params.eventKey||'').toLowerCase();
+      if(!exactName||!expectedKey)throw new Error('Server-authorized event identity is required');
+      const matches=await ego.evaluate(`(() => [...document.querySelectorAll('a')].filter(a=>(a.textContent||'').trim()===${JSON.stringify(exactName)}).map(a=>a.href).filter(Boolean))()`);
+      const authorized=[...new Set(matches)].filter(href=>{try{const url=new URL(href);const query=new URLSearchParams(url.search);const key=(query.get('evtstub')||query.get('eventid')||query.get('event')||'').toLowerCase();return key===expectedKey&&url.hostname.toLowerCase().endsWith('cvent.com')}catch{return false}});
+      if(authorized.length!==1)throw new Error(`Exact authorized event link count was ${authorized.length}, expected 1`);
+      result={openedEventKey:expectedKey,result:await ego.goto(authorized[0],{waitUntil:'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??60),180)*1000)})};break;
+    }
     case 'click': result={result:await ego.click(params.target)};break;
+    case 'activate': result={result:await ego.evaluateLocator(params.target,(element)=>{if(!(element instanceof HTMLElement))throw new Error('activate target must be an HTML element');element.click();return true})};break;
     case 'fill': result={result:await ego.fill(params.target,params.text??'')};break;
     case 'type': await ego.focus(params.target);result={result:await ego.insertText(params.text??'')};break;
-    case 'navigate': result={result:await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:params.timeout||30000})};break;
-    case 'js': result={value:await ego.evaluate(params.expression)};break;
-    case 'cdp': result={value:await ego.cdp(params.method,params.params||{})};break;
-    case 'wait': await ego.waitForTimeout(params.ms??params.timeout??1000);result={waitedMs:params.ms??params.timeout??1000};break;
-    case 'tabs': result={tabs:await ego.listTabs()};break;
-    case 'switchTab': if(params.targetId!==wanted)throw new Error('Cannot switch away from canonical runtime target');result={tab:await ego.switchTab(wanted)};break;
+    case 'hover': result={result:await ego.hover(params.target)};break;
+    case 'selectOption': result={selected:await ego.selectOption(params.target,{[params.optionBy==='value'?'value':'label']:params.option})};break;
+    case 'setChecked': result={result:await ego.setChecked(params.target,Boolean(params.checked)),checked:Boolean(params.checked)};break;
+    case 'press': await ego.focus(params.target);await ego.press(params.key);result={pressed:params.key};break;
+    case 'search': {
+      const descriptor=await ego.evaluateLocator(params.target,(element)=>({
+        tag:element.tagName,type:element.getAttribute('type')||'',role:element.getAttribute('role')||'',
+        name:element.getAttribute('name')||'',placeholder:element.getAttribute('placeholder')||'',
+        aria:element.getAttribute('aria-label')||'',
+      }));
+      const searchable=descriptor.tag==='INPUT'&&(/search/i.test(`${descriptor.type} ${descriptor.role} ${descriptor.name} ${descriptor.placeholder} ${descriptor.aria}`));
+      if(!searchable)throw new Error('search target is not an identified search/filter input');
+      await ego.fill(params.target,params.text??'');if(params.submit!==false)await ego.press('Enter');
+      result={query:params.text??'',submitted:params.submit!==false};break;
+    }
+    case 'selectText': result={selected:await ego.evaluateLocator(params.target,(element)=>{const range=document.createRange();range.selectNodeContents(element);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);element.closest('[contenteditable=true]')?.focus();return selection.toString()})};break;
+    case 'drag': result={result:await ego.drag([params.target,params.destination],{delay:75})};break;
+    case 'navigate': result={result:await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??30),180)*1000)})};break;
+    case 'wait': {
+      let ready=true;
+      if(params.target)ready=await ego.waitForSelector(params.target,{timeout:params.ms??30000});
+      else if(params.loadState)ready=await ego.waitForLoadState(params.loadState,{timeout:params.ms??30000});
+      else await ego.waitForTimeout(params.ms??params.timeout??1000);
+      result={waitedMs:params.ms??params.timeout??1000,ready};break;
+    }
     default:throw new Error('Unsupported Ego operation: '+operation);
   }
   const after=await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || (window.name.startsWith('cvent-runtime-') ? window.name : null)");
   if(after!==runtime.browserRuntimeId)throw new Error('Runtime marker changed after Ego action');
-  output({marker:after,targetId:wanted,...result});process.exit(0);
+  const page=await ego.pageInfo();
+  output({marker:after,targetId:wanted,observedAt:new Date().toISOString(),page,...result});process.exit(0);
 }catch(e){output(e?.stack||e?.message||String(e),false);process.exit(1)}

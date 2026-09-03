@@ -4,13 +4,17 @@ import { open, readFile, realpath, rename, mkdir, appendFile, lstat } from "node
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
-const BROWSER_OPERATIONS = new Set([
-  "probe", "authorizeTarget", "snapshotText", "pageInfo", "scanEventList",
-  "scroll", "click", "fill", "type", "navigate", "wait",
-]);
+const BROWSER_OPERATION_NAMES = [
+  "probe", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover",  "selectOption", "setChecked", "press", "search", "selectText", "drag",
+];
+const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
-  "probe", "authorizeTarget", "snapshotText", "pageInfo", "scanEventList",
-  "scroll", "navigate", "wait",
+  "probe", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "scroll", "navigate", "wait", "hover", "search", "selectText",]);
+const ALLOWED_KEYS = new Set([
+  "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+  "Backspace", "Delete", "Home", "End", "PageUp", "PageDown", "Space",
 ]);
 const DOMAINS = new Set([
   "event_basics", "theme_branding", "header_footer_body", "registration_paths",
@@ -37,6 +41,7 @@ const MAX_TEXT_BYTES = 48 * 1024;
 const SNAPSHOT_CHUNK_BYTES = 36 * 1024;
 const MAX_CHILD_OUTPUT = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
+const SNAPSHOT_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-snapshot-pending.json");
 const queues = new Map<string, Promise<unknown>>();
 
 function requiredEnvironment(name: string): string {
@@ -215,28 +220,45 @@ function parseMarker(stdout: string, marker: string): any {
 async function invokeBrowser(operation: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutSeconds = 90): Promise<any> {
   await readJobFile(runtimePath, 1024 * 1024);
   const timeout = Math.max(1, Math.min(timeoutSeconds, 180));
+  const boundedParams = { ...params, timeoutSeconds: timeout };
   const output = await runFixed(python, [
     join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
-    "--operation", operation, "--params", JSON.stringify(params),
+    "--operation", operation, "--params", JSON.stringify(boundedParams),
   ], "browser", signal, (timeout + 10) * 1000);
   return parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
 }
 
 function browserParams(operation: string, input: any): Record<string, unknown> {
   const params: Record<string, unknown> = {};
-  if (operation === "authorizeTarget") params.eventName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
+  if (["authorizeTarget", "openAuthorizedEvent"].includes(operation)) {
+    params.eventName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
+    params.eventKey = requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY");
+  }
   if (operation === "scanEventList") {
     params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
     params.maxScrolls = Math.max(1, Math.min(Number(input.maxScrolls ?? 30), 60));
   }
-  if (["click", "fill", "type"].includes(operation)) params.target = cleanText(input.target, 4000);
-  if (["fill", "type"].includes(operation)) params.text = cleanText(input.text, 20000);
+  if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait"].includes(operation) && input.target) {
+    params.target = cleanText(input.target, 4000);
+  }
+  if (["fill", "type", "search"].includes(operation)) params.text = cleanText(input.text, 20000);
+  if (operation === "selectOption") {
+    params.option = cleanText(input.option, 2000);
+    params.optionBy = input.optionBy === "value" ? "value" : "label";
+  }
+  if (operation === "setChecked") params.checked = Boolean(input.checked);
+  if (operation === "press") params.key = cleanText(input.key, 40);
+  if (operation === "search") params.submit = input.submit !== false;
+  if (operation === "drag") params.destination = cleanText(input.destination, 4000);
   if (operation === "navigate") params.url = cleanText(input.url, 8000);
   if (operation === "scroll") {
     params.deltaY = Math.max(-10000, Math.min(Number(input.deltaY ?? 700), 10000));
     params.settleMs = Math.max(100, Math.min(Number(input.settleMs ?? 500), 5000));
   }
-  if (operation === "wait") params.ms = Math.max(50, Math.min(Number(input.ms ?? 1000), 30000));
+  if (operation === "wait") {
+    params.ms = Math.max(50, Math.min(Number(input.ms ?? 1000), 30000));
+    if (["load", "domcontentloaded", "networkidle"].includes(input.loadState)) params.loadState = input.loadState;
+  }
   params.intent = input.intent;
   if (input.intent === "write") params.scopeIds = input.scopeIds;
   return params;
@@ -260,11 +282,30 @@ function utf8Chunks(text: string, maxBytes: number): string[] {
   return chunks;
 }
 
+async function pendingSnapshot(): Promise<any> {
+  return readJson(SNAPSHOT_PENDING, null);
+}
+
+async function assertSnapshotConsumed(): Promise<void> {
+  const pending = await pendingSnapshot();
+  if (pending && pending.complete !== true) {
+    throw new Error(`Complete snapshot ${pending.snapshotId} is not fully consumed; request chunk ${pending.nextChunk} before another browser action`);
+  }
+}
+
 async function saveLargeSnapshot(result: any): Promise<any> {
   const snapshot = result?.snapshot;
-  if (typeof snapshot !== "string" || Buffer.byteLength(snapshot, "utf8") <= SNAPSHOT_CHUNK_BYTES) return result;
+  if (typeof snapshot !== "string") return result;
   const bytes = Buffer.byteLength(snapshot, "utf8");
   if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("Complete DOM snapshot exceeds the 2MB fail-closed transport limit");
+  const digest = hash(Buffer.from(snapshot, "utf8"));
+  result.snapshotMetadata = {
+    bytes, sha256: digest, capturedAt: result.observedAt, browserRuntimeId: result.browserRuntimeId,
+    workerSlot: Number(requiredEnvironment("CVENT_WORKER_SLOT")), targetId: result.targetId,
+    jobId: requiredEnvironment("CVENT_JOB_ID"), workspaceId: requiredEnvironment("CVENT_WORKSPACE_ID"),
+    url: result.page?.url, title: result.page?.title,
+  };
+  if (bytes <= SNAPSHOT_CHUNK_BYTES) return result;
   const id = randomUUID();
   const directory = assertFixedJobPath(join(jobDir, "browser-snapshots"));
   await assertPrivateJobRoot();
@@ -279,17 +320,21 @@ async function saveLargeSnapshot(result: any): Promise<any> {
   const handle = await open(path, "wx", 0o600);
   try { await handle.writeFile(snapshot, "utf8"); } finally { await handle.close(); }
   const chunks = utf8Chunks(snapshot, SNAPSHOT_CHUNK_BYTES);
+  const transport = {
+    ...result.snapshotMetadata, snapshotId: id, totalChunks: chunks.length,
+    nextChunk: 1, complete: false,
+  };
+  await atomicJson(SNAPSHOT_PENDING, transport);
   delete result.snapshot;
   result.completeSnapshot = {
-    snapshotId: id,
-    bytes,
-    totalChunks: chunks.length,
-    chunkIndex: 0,
-    chunkText: chunks[0],
-    instruction: "Read every remaining chunk with cvent_snapshot_chunk before acting; this is one complete full-page capture split only for transport.",
+    ...result.snapshotMetadata, snapshotId: id, totalChunks: chunks.length,
+    chunkIndex: 0, complete: false, chunkText: chunks[0],
+    instruction: "Read every remaining chunk with cvent_snapshot_chunk in strict order before another browser action.",
   };
   return result;
 }
+
+export const __capabilityTest = { utf8Chunks, saveLargeSnapshot, pendingSnapshot, assertSnapshotConsumed };
 
 function pageArrays(value: any, offset: number, limit: number): any {
   if (Array.isArray(value)) return value.slice(offset, offset + limit).map((item) => pageArrays(item, 0, limit));
@@ -570,14 +615,21 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_browser",
     label: "Cvent browser",
-    description: "Perform one validated Ego operation in this job's canonical Steel browser. Server-forced target identity, current event lease, write scope IDs, browser ownership, and Cvent-only navigation are enforced. There is no command or path capability.",
+    description: "Perform one validated, structurally bounded Ego operation in this job's canonical Steel browser: complete reads, navigation/waits, click/fill/type, select/check/key/search, hover/text-selection, or source-to-destination drag. Server-forced target identity, current event lease, write scope IDs, browser ownership, and Cvent-only navigation are enforced. There is no command, script, CDP payload, or path capability.",
     parameters: Type.Object({
-      operation: Type.String(),
-      intent: Type.String({ description: "read or write" }),
+      operation: Type.Union(BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
+      intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
       scopeIds: Type.Optional(Type.Array(Type.String({ pattern: "^scope-[0-9]{3}$" }), { maxItems: 100 })),
       target: Type.Optional(Type.String({ maxLength: 4000 })),
       text: Type.Optional(Type.String({ maxLength: 20000 })),
       url: Type.Optional(Type.String({ maxLength: 8000 })),
+      option: Type.Optional(Type.String({ maxLength: 2000 })),
+      optionBy: Type.Optional(Type.Union([Type.Literal("label"), Type.Literal("value")])),
+      checked: Type.Optional(Type.Boolean()),
+      key: Type.Optional(Type.String({ maxLength: 40 })),
+      submit: Type.Optional(Type.Boolean()),
+      destination: Type.Optional(Type.String({ maxLength: 4000 })),
+      loadState: Type.Optional(Type.Union([Type.Literal("load"), Type.Literal("domcontentloaded"), Type.Literal("networkidle")])),
       deltaY: Type.Optional(Type.Number()),
       settleMs: Type.Optional(Type.Integer()),
       maxScrolls: Type.Optional(Type.Integer()),
@@ -589,11 +641,16 @@ export default function cventJobTools(pi: any) {
       if (!BROWSER_OPERATIONS.has(operation)) throw new Error("Capability denied: browser operation is not approved");
       if (!new Set(["read", "write"]).has(params.intent)) throw new Error("Capability denied: explicit read or write intent is required");
       if (READ_ONLY_OPERATIONS.has(operation) && params.intent !== "read") throw new Error(`${operation} is a read-only capability`);
-      if (["fill", "type"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
+      if (["fill", "type", "selectOption", "setChecked", "drag"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
+      if (operation === "press" && !ALLOWED_KEYS.has(String(params.key))) throw new Error("Capability denied: keyboard key is not approved");
+      if (operation === "press" && ["Backspace", "Delete"].includes(String(params.key)) && params.intent !== "write") throw new Error(`${params.key} requires write intent`);
+      if (operation === "selectOption" && !["label", "value", undefined].includes(params.optionBy)) throw new Error("Capability denied: optionBy must be label or value");
+      if (operation === "drag" && !params.destination) throw new Error("Capability denied: drag destination is required");
       if (params.intent === "write" && (!Array.isArray(params.scopeIds) || params.scopeIds.length === 0)) {
         throw new Error("Write blocked: confirmed Forge Intake scope IDs are required");
       }
       return withQueue("browser", async () => {
+        await assertSnapshotConsumed();
         const input = browserParams(operation, params);
         const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? 90), 180));
         const result = await invokeBrowser(operation, input, signal, timeout);
@@ -611,19 +668,35 @@ export default function cventJobTools(pi: any) {
       chunkIndex: Type.Integer({ minimum: 0, maximum: 1000 }),
     }),
     async execute(_id: string, params: any) {
-      const id = String(params.snapshotId);
-      if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("Capability denied: invalid snapshot ID");
-      const path = assertFixedJobPath(join(jobDir, "browser-snapshots", `${id}.txt`));
-      const buffer = await readJobFile(path, MAX_SNAPSHOT_BYTES);
-      const chunks = utf8Chunks(buffer.toString("utf8"), SNAPSHOT_CHUNK_BYTES);
-      const index = Number(params.chunkIndex);
-      if (index >= chunks.length) throw new Error("Snapshot chunk is out of range");
-      return toolText({
-        snapshotId: id,
-        chunkIndex: index,
-        totalChunks: chunks.length,
-        complete: index === chunks.length - 1,
-        chunkText: chunks[index],
+      return withQueue("browser", async () => {
+        const id = String(params.snapshotId);
+        if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("Capability denied: invalid snapshot ID");
+        const pending = await pendingSnapshot();
+        if (!pending || pending.complete === true || pending.snapshotId !== id) throw new Error("Snapshot is not the active job-scoped transport");
+        const runtime = await readJson(runtimePath, null);
+        if (!runtime || pending.browserRuntimeId !== runtime.browserRuntimeId || pending.targetId !== runtime.targetBrowserIdentity?.targetId ||
+            pending.workerSlot !== Number(requiredEnvironment("CVENT_WORKER_SLOT")) || pending.jobId !== requiredEnvironment("CVENT_JOB_ID") ||
+            pending.workspaceId !== requiredEnvironment("CVENT_WORKSPACE_ID")) {
+          throw new Error("Snapshot worker/browser/job identity mismatch");
+        }
+        const path = assertFixedJobPath(join(jobDir, "browser-snapshots", `${id}.txt`));
+        const buffer = await readJobFile(path, MAX_SNAPSHOT_BYTES);
+        if (buffer.length !== pending.bytes || hash(buffer) !== pending.sha256) throw new Error("Snapshot transport integrity check failed");
+        const chunks = utf8Chunks(buffer.toString("utf8"), SNAPSHOT_CHUNK_BYTES);
+        if (chunks.length !== pending.totalChunks) throw new Error("Snapshot chunk count changed");
+        const index = Number(params.chunkIndex);
+        if (index !== pending.nextChunk) throw new Error(`Snapshot chunks must be read exactly once in order; expected ${pending.nextChunk}`);
+        const complete = index === chunks.length - 1;
+        pending.nextChunk = index + 1;
+        pending.complete = complete;
+        await atomicJson(SNAPSHOT_PENDING, pending);
+        return toolText({
+          snapshotId: id, chunkIndex: index, totalChunks: chunks.length, complete,
+          bytes: pending.bytes, sha256: pending.sha256, capturedAt: pending.capturedAt,
+          browserRuntimeId: pending.browserRuntimeId, workerSlot: pending.workerSlot,
+          targetId: pending.targetId, jobId: pending.jobId, workspaceId: pending.workspaceId,
+          url: pending.url, title: pending.title, chunkText: chunks[index],
+        });
       });
     },
   });

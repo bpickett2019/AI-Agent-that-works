@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T19:59:35.737Z",
+  "scope": "capability and complete-snapshot transport; archived real Cvent DOM, no live Cvent navigation or mutation",
+  "toolCount": 10,
+  "tools": [
+    "cvent_prepare_rr",
+    "cvent_expectations",
+    "cvent_scope",
+    "cvent_job_read",
+    "cvent_job_update",
+    "cvent_record_domain",
+    "cvent_login_handoff",
+    "cvent_browser",
+    "cvent_snapshot_chunk",
+    "cvent_finish"
+  ],
+  "source": {
+    "path": "data/runs/20260903-062426/snapshots/discount-filter-PPCTESTFREE-3.txt",
+    "archivedBytes": 134367,
+    "largeBytes": 403140
+  },
+  "transport": {
+    "chunks": 11,
+    "chunkBytesMaximum": 36864,
+    "declaredBytes": 403140,
+    "declaredSha256": "dcb9f3628bd0c2f667e5c0ffe4dcd83001b6c475501e8f8da9e4dd05c86c7690",
+    "expectedSha256": "dcb9f3628bd0c2f667e5c0ffe4dcd83001b6c475501e8f8da9e4dd05c86c7690",
+    "reconstructedSha256": "dcb9f3628bd0c2f667e5c0ffe4dcd83001b6c475501e8f8da9e4dd05c86c7690",
+    "exactReconstruction": true,
+    "orderingRejected": true,
+    "duplicateRejected": true,
+    "missingTailBlocksBrowser": true,
+    "crossBrowserRejected": true,
+    "workerSlot": 2,
+    "browserRuntimeId": "runtime-worker-2",
+    "targetId": "target-worker-2",
+    "jobId": "job-a",
+    "workspaceId": "workspace-a"
+  },
+  "performance": {
+    "creationMilliseconds": 32.556,
+    "chunkReadMilliseconds": [
+      21.051,
+      18.821,
+      16.446,
+      14.973,
+      15.811,
+      14.952,
+      13.954,
+      13.931,
+      14.953,
+      14.997
+    ],
+    "totalChunkReadMilliseconds": 159.889
+  },
+  "passed": true
+}

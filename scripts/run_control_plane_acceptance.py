@@ -8,11 +8,13 @@ import platform
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from control_store import ControlStore
+import browser_tool
 
 
 def timed_acquire(store, job_id):
@@ -61,6 +63,40 @@ def main():
         successor = timed_acquire(store, same_jobs[next_index]["id"])
         store.finish(same_jobs[next_index]["id"], successor["lease"]["token"], "completed")
 
+        crash_users = [store.ensure_user(f"crash-{i}", f"crash{i}@example.test", f"Crash {i}", False) for i in range(3)]
+        crash_a = create(store, crash_users[0], "crash-event-x")
+        crash_b = create(store, crash_users[1], "crash-event-x")
+        crash_c = create(store, crash_users[2], "crash-event-y")
+        crash_a_lease = store.acquire(crash_a["id"])
+        crash_b_waiting = store.acquire(crash_b["id"]) is None
+        crash_c_lease = store.acquire(crash_c["id"])
+        store.mark_running(crash_a["id"], crash_a_lease["token"], 11111)
+        store.mark_running(crash_c["id"], crash_c_lease["token"], 33333)
+        expired = datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat()
+        with store.immediate() as conn:
+            conn.execute("UPDATE event_leases SET expires_at=? WHERE holder_job_id=?", (expired, crash_a["id"]))
+            conn.execute("UPDATE worker_leases SET expires_at=? WHERE holder_job_id=?", (expired, crash_a["id"]))
+        crash_b_lease = store.acquire(crash_b["id"])
+        crash_a_state = store.get_job(crash_a["id"])
+        crash_c_unaffected = store.valid_event_lease(crash_c["id"], crash_c_lease["token"], "crash-event-y")
+        # A lock from an earlier browser runtime cannot authorize B's first write.
+        preflight_dir = Path(temp) / "preflight"
+        preflight_dir.mkdir()
+        original_current, original_probe = browser_tool.CURRENT, browser_tool.local_probe
+        browser_tool.CURRENT = preflight_dir
+        browser_tool.local_probe = lambda runtime: {"url": "https://app.cvent.com/event?evtstub=crash-event-x"}
+        runtime = {"browserRuntimeId": "runtime-new", "authorizedEventName": "Authorized crash-event-x", "authorizedEventId": "crash-event-x", "authorizedEventKey": "crash-event-x"}
+        (preflight_dir / "authorized-target.json").write_text(json.dumps({"name": "Authorized crash-event-x", "event_id": "crash-event-x", "event_key": "crash-event-x", "url": "https://app.cvent.com/event?evtstub=crash-event-x", "browser_runtime_id": "runtime-stale"}))
+        stale_preflight_blocked = False
+        try:
+            browser_tool.guard(runtime, "click", {"intent": "write", "scopeIds": ["scope-004"]})
+        except RuntimeError as exc:
+            stale_preflight_blocked = "Write blocked" in str(exc)
+        finally:
+            browser_tool.CURRENT, browser_tool.local_probe = original_current, original_probe
+        store.finish(crash_b["id"], crash_b_lease["token"], "failed", "Synthetic preflight complete", False)
+        store.finish(crash_c["id"], crash_c_lease["token"], "completed")
+
         recovery_user = store.ensure_user("recovery", "recovery@example.test", "Recovery", False)
         recovery_job = create(store, recovery_user, "recovery-event")
         recovery_lease = store.acquire(recovery_job["id"])
@@ -76,6 +112,13 @@ def main():
                 "contenders": 3, "simultaneous_acquisitions": sum(item["acquired"] for item in same),
                 "successor_acquired_after_release": successor["acquired"],
             },
+            "same_event_crash": {
+                "a_event_x_acquired": bool(crash_a_lease), "b_event_x_waiting": crash_b_waiting,
+                "c_event_y_concurrent": bool(crash_c_lease), "a_after_expiry": crash_a_state["state"],
+                "a_uncertain": bool(crash_a_state["uncertain"]), "b_acquired_after_expiry": bool(crash_b_lease),
+                "c_unaffected": crash_c_unaffected, "stale_runtime_target_lock_blocked_first_write": stale_preflight_blocked,
+                "required_next_step": "fresh complete Cvent observation plus authorizeTarget before any write",
+            },
             "recovery": {
                 "recovered_job_ids": recovered, "state": recovered_job["state"],
                 "uncertain": bool(recovered_job["uncertain"]), "leases_after_recovery": store.active_leases(),
@@ -84,6 +127,8 @@ def main():
                 all(item["all_acquired"] and len(item["unique_slots"]) == item["workers"] for item in scaling)
                 and sum(item["acquired"] for item in same) == 1
                 and successor["acquired"]
+                and crash_b_waiting and bool(crash_c_lease) and crash_a_state["state"] == "failed_uncertain"
+                and bool(crash_b_lease) and crash_c_unaffected and stale_preflight_blocked
                 and recovered_job["state"] == "failed_uncertain"
                 and store.active_leases() == {"events": [], "workers": []}
             ),

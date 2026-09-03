@@ -7,31 +7,31 @@
   "scaling": [
     {
       "workers": 1,
-      "wall_milliseconds": 4.077,
+      "wall_milliseconds": 11.058,
       "all_acquired": true,
       "unique_slots": [
         1
       ],
       "acquire_milliseconds": [
-        1.681
+        6.802
       ]
     },
     {
       "workers": 2,
-      "wall_milliseconds": 2.873,
+      "wall_milliseconds": 4.856,
       "all_acquired": true,
       "unique_slots": [
         1,
         2
       ],
       "acquire_milliseconds": [
-        0.868,
-        2.725
+        1.406,
+        4.6
       ]
     },
     {
       "workers": 3,
-      "wall_milliseconds": 2.933,
+      "wall_milliseconds": 8.73,
       "all_acquired": true,
       "unique_slots": [
         1,
@@ -39,9 +39,9 @@
         3
       ],
       "acquire_milliseconds": [
-        0.905,
-        2.792,
-        1.712
+        8.52,
+        1.605,
+        1.865
       ]
     }
   ],
@@ -50,9 +50,20 @@
     "simultaneous_acquisitions": 1,
     "successor_acquired_after_release": true
   },
+  "same_event_crash": {
+    "a_event_x_acquired": true,
+    "b_event_x_waiting": true,
+    "c_event_y_concurrent": true,
+    "a_after_expiry": "failed_uncertain",
+    "a_uncertain": true,
+    "b_acquired_after_expiry": true,
+    "c_unaffected": true,
+    "stale_runtime_target_lock_blocked_first_write": true,
+    "required_next_step": "fresh complete Cvent observation plus authorizeTarget before any write"
+  },
   "recovery": {
     "recovered_job_ids": [
-      "job_386113a74719442385cc975ab68b9d71"
+      "job_00eb7f923e08432694409d794b4b9b90"
     ],
     "state": "failed_uncertain",
     "uncertain": true,

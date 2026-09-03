@@ -27,19 +27,20 @@ Stricter event-identity, publish, communication, attendee/contact, deletion, and
 
 Call `cvent_browser` with one approved operation and explicit `intent`:
 
-- Complete reads: `snapshotText`, `pageInfo`, `probe`
-- Natural movement/search: `scroll`, `scanEventList`, `wait`
-- Interaction: `click`, `fill`, `type`
+- Complete reads: `snapshotText`, `pageInfo`, `probe`; full-page `controlInventory` is a supplemental selector-recovery index, never a replacement snapshot
+- Natural movement/search: `scroll`, `scanEventList`, bounded `search`, `wait`
+- Interaction: `click`, bounded DOM `activate`, `fill`, `type`, `selectOption`, `setChecked`, bounded `press`
+- Observed UI affordances: `hover`, `selectText`, source-to-destination `drag`
 - Cvent-only navigation: `navigate`
 - Exact target authorization: `authorizeTarget`
 
 Arbitrary JavaScript, raw CDP, tabs, browser creation, process execution, arbitrary network requests, credential/browser-storage access, and snapshot path writes are not capabilities.
 
-On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` for every remaining chunk before reasoning or acting.
+On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` exactly once for every remaining chunk in strict order before reasoning or another browser action. The transport verifies its hash, size, chunk count, job, workspace, worker, runtime, and target.
 
 Do not default to Advanced Search or direct URL hopping. If any Cvent/Microsoft login, SSO, MFA, CAPTCHA, or expired-session page appears, immediately call `cvent_login_handoff`; do not explore alternate URLs or authentication workarounds. That capability keeps the same job, Steel browser, profile, worker, and lease alive while the user signs in and returns control. Fresh-read the complete page after return.
 
-For event discovery, call `scanEventList` with read intent. The gateway forces the exact authorized event name; require exactly one exact match before opening it. Then verify the visible event name, code, key, and unpublished state before calling `authorizeTarget` with read intent.
+For event discovery, call `scanEventList` with read intent. The gateway forces the exact authorized event name; require exactly one exact match, then call `openAuthorizedEvent` with read intent. It accepts no model-supplied URL/name/key and opens only the server-authorized exact-name/canonical-key Cvent link. Verify visible name, code, key, and unpublished state before calling `authorizeTarget` with read intent.
 
 ## Domain workflow
 
@@ -54,7 +55,7 @@ For each confirmed Forge Intake domain:
 7. Record facts with `cvent_record_domain`; update state with `cvent_job_update`.
 8. Continue through remaining domains without routine user pauses.
 
-Use `intent: write` plus exact confirmed `scopeIds` for every potentially mutating operation, including field entry and Save. The gateway rejects missing, unknown, unconfirmed, and deferred IDs and validates the current canonical event lease. Use `intent: read` only for strictly in-scope inspection.
+Use `intent: write` plus exact confirmed `scopeIds` for every potentially mutating operation, including selection, checking, deletion, drag/drop, field entry, and Save. The gateway rejects missing, unknown, unconfirmed, and deferred IDs and validates the current canonical event lease. Use `intent: read` only for strictly in-scope inspection.
 
 ## Ownership and safety
 

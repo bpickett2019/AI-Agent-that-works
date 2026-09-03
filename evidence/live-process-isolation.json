@@ -1,0 +1,80 @@
+{
+  "recordedAt": "2026-09-03T20:01:09.061005+00:00",
+  "status": "PASS",
+  "scope": "local real-process evidence; authorized USER-owned worker A remained untouched while synthetic workers B/C used slots 2/3",
+  "conditions": {
+    "threePiProcessesAlive": true,
+    "threeBrowserProcessesAlive": true,
+    "threeHelperProcessesAlive": true,
+    "threeCdpEndpointsAlive": true,
+    "uniqueProcessIds": true,
+    "uniqueJobIds": true,
+    "uniqueWorkspaceIds": true,
+    "uniqueProfilePaths": true,
+    "uniqueBrowserSessionPaths": true,
+    "uniqueCdpEndpoints": true,
+    "uniqueRuntimeIds": true,
+    "uniqueTargetIds": true,
+    "uniqueGateFiles": true,
+    "uniqueViewerPaths": true,
+    "killBLeftAAndC": true
+  },
+  "ports": [3005, 3015, 3025],
+  "cdpPorts": [9334, 9344, 9354],
+  "jobs": [
+    {
+      "name": "A",
+      "jobId": "job_05bb846fc7f043f6bc7d86024f20208b",
+      "workspaceId": "ws_6c6efefc57835f688f8a354580cd2785",
+      "piPid": 75146,
+      "browserPid": 75095,
+      "helperPids": [75284],
+      "browserRuntimeId": "cvent-runtime-e3eec1ba272c468b9683d2c6045cf7d3",
+      "targetId": "262CCB5DDDE93147E6E7782C2BF79BE6",
+      "profilePath": "/Users/bp/cvent-one-shot/data/workspaces/ws_6c6efefc57835f688f8a354580cd2785/jobs/job_05bb846fc7f043f6bc7d86024f20208b/profile",
+      "browserSessionPath": "/Users/bp/cvent-one-shot/data/workspaces/ws_6c6efefc57835f688f8a354580cd2785/jobs/job_05bb846fc7f043f6bc7d86024f20208b/browser-session",
+      "gatePath": "/Users/bp/cvent-one-shot/data/workspaces/ws_6c6efefc57835f688f8a354580cd2785/jobs/job_05bb846fc7f043f6bc7d86024f20208b/browser-gate.json",
+      "viewerPath": "/Users/bp/cvent-one-shot/data/workspaces/ws_6c6efefc57835f688f8a354580cd2785/jobs/job_05bb846fc7f043f6bc7d86024f20208b/viewer.html"
+    },
+    {
+      "name": "B",
+      "jobId": "job-process-b",
+      "workspaceId": "ws-process-b",
+      "piPid": 75252,
+      "browserPid": 75243,
+      "helperPids": [],
+      "browserRuntimeId": "cvent-runtime-process-b",
+      "targetId": "0312743077521A8A3C4C5F01E6F91729",
+      "profilePath": "/tmp/process-isolation-rf66hben/worker-b/profile",
+      "browserSessionPath": "/tmp/process-isolation-rf66hben/worker-b/browser-session",
+      "gatePath": "/tmp/process-isolation-rf66hben/worker-b/gate.json",
+      "viewerPath": "/tmp/process-isolation-rf66hben/worker-b/viewer.html"
+    },
+    {
+      "name": "C",
+      "jobId": "job-process-c",
+      "workspaceId": "ws-process-c",
+      "piPid": 75273,
+      "browserPid": 75263,
+      "helperPids": [75288],
+      "browserRuntimeId": "cvent-runtime-process-c",
+      "targetId": "D03B1B83A167BE03C8A038BCB734DE16",
+      "profilePath": "/tmp/process-isolation-rf66hben/worker-c/profile",
+      "browserSessionPath": "/tmp/process-isolation-rf66hben/worker-c/browser-session",
+      "gatePath": "/tmp/process-isolation-rf66hben/worker-c/gate.json",
+      "viewerPath": "/tmp/process-isolation-rf66hben/worker-c/viewer.html"
+    }
+  ],
+  "killTest": {
+    "victim": "B",
+    "victimPiPid": 75252,
+    "survivors": {
+      "A": {"pi": true, "browser": true},
+      "C": {"pi": true, "browser": true}
+    }
+  },
+  "limitations": [
+    "Synthetic workers B/C did not authenticate to Cvent.",
+    "Worker B helperPids is empty because process-tree capture in the retained record occurred after its kill; pre-kill helper liveness is represented by the conditions block."
+  ]
+}
