@@ -38,6 +38,14 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn("FastAPI(title='CVENT Agent')",APP)
         self.assertIn("st['agent_session_saved']",APP)
         self.assertNotIn("st['agent_session']",APP)
+    def test_sidebar_navigation_is_clickable(self):
+        for target in ('workspace-top','scope-panel','intake-panel','monitor-panel','workbook-panel'):
+            self.assertIn(f'data-target="{target}"',HTML)
+            self.assertIn(f'id="{target}"',HTML)
+        self.assertIn("target.scrollIntoView({behavior:'smooth',block:'start'})",HTML)
+        self.assertIn("x.setAttribute('aria-current','page')",HTML)
+        self.assertIn('Intake Emerald is authoritative',HTML)
+        self.assertIn('scope-confirmed',HTML)
     def test_live_data_is_never_cached(self):
         self.assertIn("opts.cache='no-store'",HTML)
         self.assertIn('state.rr_version!==loadedRRVersion',HTML)
@@ -47,11 +55,12 @@ class ViewerSafetyTests(unittest.TestCase):
 class BrowserTargetSafetyTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.base=Path(self.tmp.name)
-        self.old=(browser_tool.CURRENT,browser_tool.local_probe)
+        self.old=(browser_tool.CURRENT,browser_tool.local_probe,browser_tool.load_scope_manifest)
         browser_tool.CURRENT=self.base
+        browser_tool.load_scope_manifest=lambda workbook,manifest:{'entries':[{'id':'scope-004','status':'confirmed'},{'id':'scope-070','status':'unconfirmed'}]}
         self.runtime={'authorizedEventName':'(C+D) Medtrade Testing Clone 2','targetBrowserIdentity':{'url':'https://app.cvent.com/event?evtstub=locked'}}
     def tearDown(self):
-        browser_tool.CURRENT,browser_tool.local_probe=self.old;self.tmp.cleanup()
+        browser_tool.CURRENT,browser_tool.local_probe,browser_tool.load_scope_manifest=self.old;self.tmp.cleanup()
     def write_lock(self):
         (self.base/'authorized-target.json').write_text(json.dumps({'name':'(C+D) Medtrade Testing Clone 2','url':'https://app.cvent.com/event?evtstub=locked','event_key':'locked'}))
     def test_write_requires_lock_matching_live_page(self):
@@ -59,11 +68,16 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertEqual(browser_tool.event_key('https://app.cvent.com/event?evtStub=locked'),'locked')
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
-        self.write_lock();browser_tool.guard(self.runtime,'click',{'intent':'write'})
+        self.write_lock()
+        with self.assertRaisesRegex(RuntimeError,'scopeId'):
+            browser_tool.guard(self.runtime,'click',{'intent':'write'})
+        browser_tool.guard(self.runtime,'click',{'intent':'write','scopeIds':['scope-004']})
+        with self.assertRaisesRegex(RuntimeError,'scope-070'):
+            browser_tool.guard(self.runtime,'fill',{'intent':'write','scopeIds':['scope-070']})
         with self.assertRaisesRegex(RuntimeError,'explicit read or write intent'):
             browser_tool.guard(self.runtime,'js',{'expression':'document.title'})
         browser_tool.guard(self.runtime,'js',{'expression':'document.title','intent':'read'})
-        browser_tool.guard(self.runtime,'cdp',{'method':'Runtime.evaluate','intent':'write'})
+        browser_tool.guard(self.runtime,'cdp',{'method':'Runtime.evaluate','intent':'write','scopeIds':['scope-004']})
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=other'}
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
@@ -81,6 +95,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn("choices=['auto','ego']",ROUTER)
         self.assertIn("tool='ego'",ROUTER)
         self.assertIn("st['browser_strategy']='EGO DIRECT · SAME STEEL RUNTIME'",APP)
+        self.assertIn('AUTHORITATIVE SCOPE — FAIL CLOSED',PROMPT)
+        self.assertIn("params.get('scopeIds',[])",ROUTER)
+        self.assertIn('Intake Emerald scopeId is required',ROUTER)
+        self.assertIn('Never request viewport-only, element-only, truncated, targeted, or smaller DOM reads',PROMPT)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
         self.assertIn('Ego `scanEventList`',PROMPT)

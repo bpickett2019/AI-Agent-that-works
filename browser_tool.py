@@ -2,11 +2,13 @@
 """Ego router pinned to the canonical Steel Chromium."""
 from __future__ import annotations
 import argparse,json,re,subprocess,sys
+from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
 from browser_gate import action
 from browser_runtime import load,local_probe
-ROOT=Path(__file__).resolve().parent;CURRENT=ROOT/'data'/'current'
+from scope_manifest import SCOPE_MANIFEST as DEFAULT_SCOPE_MANIFEST, SCOPE_WORKBOOK as DEFAULT_SCOPE_WORKBOOK, load_manifest as load_scope_manifest
+ROOT=Path(__file__).resolve().parent;CURRENT=ROOT/'data'/'current';SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
 EGO={'probe','authorizeTarget','snapshotText','pageInfo','scanEventList','scroll','click','fill','type','navigate','js','cdp','wait','tabs','switchTab'}
 INTENT_REQUIRED={'click','fill','type','js','cdp'}
 def event_key(url):
@@ -22,6 +24,9 @@ def target_lock():
     try:return json.loads((CURRENT/'authorized-target.json').read_text())
     except Exception:return {}
 def emit(data):print('BROWSER_ROUTER_RESULT='+json.dumps(data,ensure_ascii=False))
+def audit_scope_write(operation,params,current,result):
+    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'scopeIds':params.get('scopeIds',[]),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':'succeeded' if result.get('ok') else 'failed'}
+    with (CURRENT/'scope-write-audit.jsonl').open('a') as output:output.write(json.dumps(record,ensure_ascii=False)+'\n')
 def child_result(proc):
     marker='BROWSER_TOOL_RESULT=';index=proc.stdout.rfind(marker)
     if index>=0:
@@ -35,17 +40,26 @@ def guard(runtime,operation,params):
     intent=params.get('intent')
     if operation in INTENT_REQUIRED and intent not in ('read','write'):
         raise RuntimeError(f'{operation} requires explicit read or write intent')
-    if intent=='write' and (not valid_lock or current_key!=locked):
-        raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
+    if intent=='write':
+        if not valid_lock or current_key!=locked:
+            raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
+        refs=params.get('scopeIds',[])
+        if isinstance(refs,str):refs=[refs]
+        if not isinstance(refs,list) or not refs or any(not isinstance(ref,str) for ref in refs):
+            raise RuntimeError('Write blocked: at least one confirmed Intake Emerald scopeId is required')
+        manifest=load_scope_manifest(SCOPE_WORKBOOK,SCOPE_MANIFEST);entries={entry['id']:entry for entry in manifest['entries']}
+        blocked=[ref for ref in refs if ref not in entries or entries[ref].get('status')!='confirmed']
+        if blocked:raise RuntimeError('Write blocked by Intake Emerald scope: '+', '.join(blocked))
     if operation in ('navigate','browser_navigate'):
         url=params.get('url','');parsed=urlparse(url);host=(parsed.hostname or '').lower();key=event_key(url)
         if host and not (host=='cvent.com' or host.endswith('.cvent.com')):raise RuntimeError('Navigation outside Cvent is blocked')
         if re.search(r'/(account|organization|admin|global)(/|$)',parsed.path,re.I):raise RuntimeError('Navigation to account-global Cvent settings is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
+    return current
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
     with action(runtime['browserRuntimeId'],'PI_EGO'):
-        guard(runtime,operation,params)
+        current=guard(runtime,operation,params)
         if operation=='authorizeTarget':
             probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','snapshotText','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=90);observed=child_result(probe)
             info=local_probe(runtime);key=event_key(info.get('url',''))
@@ -57,6 +71,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))
     result=child_result(proc);result['router']=tool
+    if params.get('intent')=='write':audit_scope_write(operation,params,current,result)
     if proc.returncode or not result.get('ok'):raise RuntimeError(result.get('error','browser tool failed'))
     return result
 def main():

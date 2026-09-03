@@ -1,12 +1,13 @@
 from __future__ import annotations
 import asyncio, json, os, re, shutil, signal, subprocess, threading, time
-from datetime import datetime, timezone
+from datetime import date, datetime, time as datetime_time, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from browser_gate import initialize as initialize_gate, read as read_gate, write as write_gate, request_user, shield_agent, lock_file
 from browser_runtime import RUNTIME as BROWSER_RUNTIME_PATH, initialize as initialize_browser_runtime, probe as probe_browser_runtime, local_probe as local_runtime_probe, load as load_browser_runtime, tool_probe
+from scope_manifest import SCOPE_MANIFEST, SCOPE_WORKBOOK, load_manifest as load_scope_manifest
 
 ROOT=Path(__file__).resolve().parent
 DATA=ROOT/'data'; CURRENT=DATA/'current'; RUNS=DATA/'runs'
@@ -17,6 +18,7 @@ RUN_MODE='mock'
 app=FastAPI(title='CVENT Agent')
 _proc: subprocess.Popen|None=None
 _lock=threading.Lock()
+_workbook_lock=threading.Lock()
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def read_json(path,default):
@@ -34,7 +36,7 @@ def product_facing(value):
     if isinstance(value,dict): return {key:product_facing(item) for key,item in value.items()}
     return value
 def fresh_state(filename=None):
-    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME}' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_details','registration_types','admission_items','optional_items','questions','discounts','agenda','speakers','registration_paths','site','email_configuration','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'process_started_at':None,'last_run_seconds':0,'updated_at':t,'pi_pid':None,'pi_session':None}
+    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME} within Intake Emerald scope' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_basics','theme_branding','header_footer_body','registration_paths','registration_types','admission_items','pricing_fees','discounts','registration_questions','terms_policies','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'process_started_at':None,'last_run_seconds':0,'updated_at':t,'pi_pid':None,'pi_session':None}
 def auth_settings():
     saved=read_json(AUTH_SETTINGS,{})
     cookie_store=DATA/'steel-profile-local'/'Default'/'Cookies'
@@ -119,7 +121,7 @@ def stop_process_tree(root):
         time.sleep(.7)
 
 def render_prompt():
-    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'BROWSER_RUNTIME_PATH':str(BROWSER_RUNTIME_PATH.resolve()),'BROWSER_TOOL_PATH':str((ROOT/'browser_tool.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
+    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'SCOPE_WORKBOOK_PATH':str(SCOPE_WORKBOOK.resolve()),'SCOPE_MANIFEST_PATH':str(SCOPE_MANIFEST.resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'BROWSER_RUNTIME_PATH':str(BROWSER_RUNTIME_PATH.resolve()),'BROWSER_TOOL_PATH':str((ROOT/'browser_tool.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
     text=(ROOT/'PI_PROMPT.md').read_text()
     for k,v in vals.items(): text=text.replace('{{'+k+'}}',v)
     (CURRENT/'job-prompt.md').write_text(text); return text
@@ -185,8 +187,11 @@ def status():
     try:
         runtime=load_browser_runtime(BROWSER_RUNTIME_PATH); st['browser_runtime']={k:runtime.get(k) for k in ('browserRuntimeId','apiOrigin','cdpEndpoint','viewerUrl','targetBrowserIdentity','verifiedAt')}
     except Exception: st['browser_runtime']=None
+    try:
+        scope=load_scope_manifest();st['automation_scope']={'valid':True,'authority':scope['authority'],'counts':scope['counts'],'sha256':scope['sourceSha256']}
+    except Exception as e:st['automation_scope']={'valid':False,'error':str(e)}
     st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['browser'].pop('id',None); st['auth_settings']=auth_settings(); st['auth_settings'].pop('cookie_store',None); st['agent_process_running']=running(); st['agent_pid']=st.get('pi_pid'); st['agent_session_saved']=bool(st.get('pi_session'))
-    path=CURRENT/'input.xlsx';st['rr_version']=path.stat().st_mtime_ns if path.exists() else None
+    path=CURRENT/'input.xlsx';st['rr_version']=str(path.stat().st_mtime_ns) if path.exists() else None
     if st['agent_process_running'] and st.get('process_started_at'):
         try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['process_started_at'])).total_seconds()))
         except Exception: st['elapsed_seconds']=0
@@ -194,6 +199,11 @@ def status():
         st['elapsed_seconds']=0;st['agent_pid']=None
     st.pop('pi_pid',None);st.pop('pi_session',None)
     return JSONResponse(product_facing(st),headers={'Cache-Control':'no-store'})
+
+@app.get('/api/scope')
+def automation_scope():
+    try:return JSONResponse(load_scope_manifest(),headers={'Cache-Control':'no-store'})
+    except Exception as e:raise HTTPException(500,f'Automation scope is invalid: {e}')
 
 @app.get('/api/workbook')
 def workbook_info():
@@ -203,15 +213,16 @@ def workbook_info():
     wb=load_workbook(path,read_only=True,data_only=False)
     try: sheets=[{'name':ws.title,'rows':ws.max_row,'columns':ws.max_column} for ws in wb.worksheets]
     finally: wb.close()
-    return JSONResponse({'file':read_json(STATE,{}).get('rr_file') or path.name,'version':path.stat().st_mtime_ns,'sheets':sheets},headers={'Cache-Control':'no-store'})
+    return JSONResponse({'file':read_json(STATE,{}).get('rr_file') or path.name,'version':str(path.stat().st_mtime_ns),'sheets':sheets},headers={'Cache-Control':'no-store'})
 
 @app.get('/api/workbook/sheet')
 def workbook_sheet(name:str,start:int=1,limit:int=80):
     path=CURRENT/'input.xlsx'
     if not path.exists(): raise HTTPException(404,'No RR workbook uploaded')
     from openpyxl import load_workbook
+    from openpyxl.cell.cell import MergedCell
     from openpyxl.utils import get_column_letter
-    wb=load_workbook(path,read_only=True,data_only=False)
+    wb=load_workbook(path,read_only=False,data_only=False)
     try:
         if name not in wb.sheetnames: raise HTTPException(404,'Worksheet not found')
         ws=wb[name]; start=max(1,start); limit=max(10,min(limit,150)); end=min(ws.max_row,start+limit-1); width=min(ws.max_column,60)
@@ -220,8 +231,73 @@ def workbook_sheet(name:str,start:int=1,limit:int=80):
             if hasattr(v,'isoformat'):return v.isoformat()
             return str(v)
         rows=[[value(ws.cell(r,c).value) for c in range(1,width+1)] for r in range(start,end+1)]
-        return JSONResponse({'name':name,'version':path.stat().st_mtime_ns,'start':start,'end':end,'total_rows':ws.max_row,'total_columns':ws.max_column,'columns':[get_column_letter(c) for c in range(1,width+1)],'rows':rows},headers={'Cache-Control':'no-store'})
+        editable=[[not ws.protection.sheet and not isinstance(ws.cell(r,c),MergedCell) for c in range(1,width+1)] for r in range(start,end+1)]
+        return JSONResponse({'name':name,'version':str(path.stat().st_mtime_ns),'start':start,'end':end,'total_rows':ws.max_row,'total_columns':ws.max_column,'columns':[get_column_letter(c) for c in range(1,width+1)],'rows':rows,'editable':editable,'protected':bool(ws.protection.sheet)},headers={'Cache-Control':'no-store'})
     finally: wb.close()
+
+def edited_cell_value(cell,text):
+    if text=='':return None
+    if text.startswith('='):return text
+    current=cell.value
+    try:
+        if isinstance(current,bool):
+            lowered=text.strip().lower()
+            if lowered not in ('true','false'):raise ValueError
+            return lowered=='true'
+        if isinstance(current,int) and not isinstance(current,bool):return int(text)
+        if isinstance(current,float):return float(text)
+        if isinstance(current,datetime):return datetime.fromisoformat(text)
+        if isinstance(current,date):return date.fromisoformat(text)
+        if isinstance(current,datetime_time):return datetime_time.fromisoformat(text)
+    except ValueError:raise HTTPException(400,f'Value {text!r} is invalid for {cell.coordinate}')
+    return text
+
+def reset_after_workbook_edit(filename):
+    for name in ('benchmark-results.json','build-checklist.json','domain-results.json','expected-domains.json','input.inspection.json','input.inspection-summary.json','review-required.json','rr-checklist.json','rr-execution-checklist.json','rr-focus.json','rr-focused.txt','rr-inspection.json','rr-inspection-summary.json','rr-question-checklist.json'):
+        try:(CURRENT/name).unlink()
+        except FileNotFoundError:pass
+    st=fresh_state(filename);locked=authorized_target_url()
+    if locked:st.update({'target_url':locked,'target_identity':AUTHORIZED_EVENT_NAME})
+    st['current_action']='RR workbook edited — ready to reread requirements';atomic_json(STATE,st)
+    atomic_json(REPORT,{'status':'INCOMPLETE','unresolved_items':['Workbook changed; build must reread requirements'],'real_reads':[],'real_writes':[],'guardrails':{'published':0,'emails_sent':0,'deletes':0,'global_mutations':0},'updated_at':now()})
+
+@app.patch('/api/workbook')
+def update_workbook(payload:dict):
+    path=CURRENT/'input.xlsx'
+    if not path.exists():raise HTTPException(404,'No RR workbook uploaded')
+    if running():raise HTTPException(409,'Stop CVENT Agent before editing the RR workbook')
+    changes=payload.get('changes');version=payload.get('version')
+    if not isinstance(changes,list) or not changes or len(changes)>2000:raise HTTPException(400,'Submit between 1 and 2000 cell changes')
+    with _workbook_lock:
+        if running():raise HTTPException(409,'Stop CVENT Agent before editing the RR workbook')
+        if str(version)!=str(path.stat().st_mtime_ns):raise HTTPException(409,'The workbook changed; reload it before saving')
+        from openpyxl import load_workbook
+        from openpyxl.cell.cell import MergedCell
+        wb=load_workbook(path,data_only=False)
+        try:
+            normalized=[];seen=set()
+            for change in changes:
+                if not isinstance(change,dict):raise HTTPException(400,'Each cell change must be an object')
+                sheet=change.get('sheet');row=change.get('row');column=change.get('column');value=change.get('value')
+                if not isinstance(sheet,str) or sheet not in wb.sheetnames:raise HTTPException(400,'Unknown worksheet')
+                if not isinstance(row,int) or not 1<=row<=1048576 or not isinstance(column,int) or not 1<=column<=16384:raise HTTPException(400,'Invalid cell coordinates')
+                if not isinstance(value,str) or len(value)>32767:raise HTTPException(400,'Cell values must be text no longer than 32,767 characters')
+                key=(sheet,row,column)
+                if key in seen:raise HTTPException(400,'Duplicate cell change')
+                seen.add(key);ws=wb[sheet];cell=ws.cell(row,column)
+                if ws.protection.sheet:raise HTTPException(409,f'Worksheet {sheet} is protected')
+                if isinstance(cell,MergedCell):raise HTTPException(409,f'{sheet}!{cell.coordinate} is a non-editable merged cell')
+                normalized.append((cell,edited_cell_value(cell,value)))
+            backups=CURRENT/'workbook-backups';backups.mkdir(parents=True,exist_ok=True)
+            stamp=datetime.now().strftime('%Y%m%d-%H%M%S-%f');backup=backups/f'input-{stamp}.xlsx';shutil.copy2(path,backup)
+            for cell,value in normalized:cell.value=value
+            temp=path.with_name('input.editing.xlsx');wb.save(temp);os.replace(temp,path)
+        finally:
+            wb.close()
+            try:temp.unlink()
+            except (NameError,FileNotFoundError):pass
+        filename=read_json(STATE,{}).get('rr_file') or 'input.xlsx';reset_after_workbook_edit(filename);append_log(f'Saved {len(normalized)} RR workbook cell edit(s); requirements must be reread before build')
+        return {'ok':True,'saved':len(normalized),'version':str(path.stat().st_mtime_ns),'backup':backup.name}
 
 @app.post('/api/upload')
 def upload(rr:UploadFile=File(...)):
@@ -269,6 +345,8 @@ def start():
         if running(): raise HTTPException(409,'A job is already running')
         if read_gate().get('ownership')!='AGENT': raise HTTPException(409,'Return browser control to the agent before starting')
         if not (CURRENT/'input.xlsx').exists(): raise HTTPException(400,'Upload the RR workbook first')
+        try:load_scope_manifest()
+        except Exception as e:raise HTTPException(500,f'Automation scope is invalid: {e}')
         locked_url=authorized_target_url();browser=chrome_status()
         if not browser.get('running'):browser=launch_chrome(locked_url or 'https://app.cvent.com/')
         if not browser.get('running'): raise HTTPException(500,browser.get('error','Chrome failed'))
@@ -283,6 +361,8 @@ def continue_job():
     with _lock:
         if running(): raise HTTPException(409,'CVENT Agent is already running')
         if read_gate().get('ownership')!='AGENT': raise HTTPException(409,'Return browser control to the agent before continuing')
+        try:load_scope_manifest()
+        except Exception as e:raise HTTPException(500,f'Automation scope is invalid: {e}')
         st=read_json(STATE,{})
         locked_url=authorized_target_url()
         launch_chrome(locked_url or 'https://app.cvent.com/')
@@ -293,7 +373,7 @@ def continue_job():
             st.update({'status':'login_required','current_stage':'login','current_action':f'Finish {where} in OPEN BROWSER, including Stay signed in, before CONTINUE','updated_at':now()}); atomic_json(STATE,st)
             append_log(f'CONTINUE ignored: authentication incomplete at {where}')
             raise HTTPException(409,f'Authentication is still at {where}. Click OPEN BROWSER, finish Microsoft SSO/MFA and Stay signed in, then press CONTINUE.')
-        msg=f'Manual Cvent/Microsoft login and MFA are complete in the SAME persistent Steel browser session. Continue through Ego in the canonical Steel runtime and resume the MOCK mission idempotently. The one and only authorized event is exactly {AUTHORIZED_EVENT_NAME}; the uploaded RR must never select or authorize another event. Re-read state and actual Cvent state and continue through final QA. Do not return a plan.'
+        msg='POLICY REPLACEMENT: discard any prior domain list or scope assumptions. The following complete prompt is now controlling and Intake Emerald is a fail-closed boundary.\n\n'+render_prompt()
         pid=spawn_pi(msg,resume=True)
     return {'ok':True,'pid':pid}
 
