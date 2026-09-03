@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Tiny atomic state/log updater for the one active job."""
+"""Tiny atomic state/log updater scoped to one job."""
 import argparse, json, os, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CURRENT = ROOT / "data" / "current"
+CURRENT = Path(os.environ.get("CVENT_JOB_DIR", ROOT / "data" / "current"))
 STATE = CURRENT / "state.json"
 LOG = CURRENT / "activity.log"
 

@@ -1,5 +1,9 @@
-fastapi
-uvicorn
-python-multipart
-openpyxl
-websockets
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+openpyxl==3.1.5
+websockets==15.0.1
+msal==1.32.3
+itsdangerous==2.2.0
+azure-identity==1.21.0
+azure-keyvault-secrets==4.9.0

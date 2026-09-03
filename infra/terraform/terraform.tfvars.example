@@ -1,0 +1,25 @@
+subscription_id      = "00000000-0000-0000-0000-000000000000"
+tenant_id            = "00000000-0000-0000-0000-000000000000"
+dns_label            = "forge-cvent-agent-pilot-unique"
+repository_ref        = "0000000000000000000000000000000000000000"
+admin_ssh_public_key  = "ssh-ed25519 AAAA... operator@example"
+alert_email           = "cvent-operations@example.com"
+
+# Object IDs may identify users or groups. Admin role includes application use.
+entra_user_principal_object_ids = [
+  "00000000-0000-0000-0000-000000000001",
+]
+entra_admin_principal_object_ids = [
+  "00000000-0000-0000-0000-000000000002",
+]
+
+# Add only explicitly approved, unpublished test events. Never source this list
+# from an RR upload. Same-event jobs are serialized by canonical event_id.
+authorized_events = [
+  {
+    event_id   = "e712e34c-6117-4d13-bf4c-8ed54cf2b495"
+    name       = "(C+D) Medtrade Testing Clone 2"
+    event_key  = "e712e34c-6117-4d13-bf4c-8ed54cf2b495"
+    event_code = ""
+  }
+]

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T17:16:37Z",
+  "scope": "local capability-boundary acceptance; no Cvent navigation or mutation",
+  "pi": {
+    "version": "0.84.4",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "liveStartupResponse": "CAPABILITY_EXTENSION_OK"
+  },
+  "registeredTools": [
+    "cvent_prepare_rr",
+    "cvent_expectations",
+    "cvent_scope",
+    "cvent_job_read",
+    "cvent_job_update",
+    "cvent_record_domain",
+    "cvent_browser",
+    "cvent_snapshot_chunk",
+    "cvent_finish"
+  ],
+  "activeTools": [
+    "cvent_prepare_rr",
+    "cvent_expectations",
+    "cvent_scope",
+    "cvent_job_read",
+    "cvent_job_update",
+    "cvent_record_domain",
+    "cvent_browser",
+    "cvent_snapshot_chunk",
+    "cvent_finish"
+  ],
+  "builtinReadActive": false,
+  "builtinBashActive": false,
+  "approvedRrPreparationExecuted": true,
+  "cventOpened": false,
+  "cventMutated": false,
+  "notes": [
+    "Pi loaded the explicit TypeScript extension with --no-builtin-tools and completed a live Anthropic no-tool startup call.",
+    "A direct extension harness verified the exact registered/active tool set and executed the fixed RR preparation capability.",
+    "No credentials, lease token values, browser profiles, screenshots, or runtime data are contained in this evidence."
+  ]
+}

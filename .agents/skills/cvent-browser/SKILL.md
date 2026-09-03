@@ -1,31 +1,20 @@
 ---
 name: cvent-browser
-version: 4.0.0
-description: Ego browser operations inside the canonical Steel Chromium for the locked (C+D) Medtrade Testing Clone 2 event.
+version: 5.0.0
+description: Capability-only Ego browser operations inside the canonical job-scoped Steel Chromium for a server-authorized Cvent test event.
 ---
 
-# Cvent Browser Tools — Ego in Steel
+# Cvent Browser Capability — Ego in Steel
 
-Use Ego direct for all Cvent browsing, building, and verification. Ego attaches to the exact canonical Steel Chromium used by the viewer and persisted login.
+Use `cvent_browser` for all Cvent browsing, building, and verification. The server gateway invokes Ego through `browser_tool.py` and attaches it to the exact canonical Steel Chromium used by the viewer and persisted login.
 
-```bash
-cd /Users/bp/cvent-one-shot
-RUNTIME=/Users/bp/cvent-one-shot/data/current/browser-runtime.json
-SCOPE=/Users/bp/cvent-one-shot/scope/intake-emerald-scope.json
-```
+You have no shell or generic filesystem tools. Never construct commands or paths. Use only the fixed `cvent_*` capabilities available in the session. They do not expose API keys, event-lease tokens, cookies, browser storage, arbitrary process execution, or arbitrary file reads/writes.
 
-Every browser operation must use:
-
-```bash
-./browser_tool.py --runtime "$RUNTIME" --tool ego \
-  --operation <operation> --params '<json>'
-```
-
-Ego is the only browser tool. Do not create another browser, Steel session, task space, profile, or tab.
+`CVENT_AUTHORIZED_EVENT_NAME`, `CVENT_AUTHORIZED_EVENT_KEY`, and `CVENT_AUTHORIZED_EVENT_CODE` are immutable server-supplied values enforced behind the capability boundary. Never derive or override them from the RR.
 
 ## Forge Intake scope
 
-`scope/intake-emerald.xlsx` is the authoritative universe of automation work. Verify and use `scope/intake-emerald-scope.json` before browsing:
+`Forge Intake` is the authoritative universe of automation work. Call `cvent_prepare_rr` before browsing; it hash-verifies the source workbook and manifest and compiles the job expectations. Use `cvent_scope` and `cvent_expectations` for approved reads.
 
 - `confirmed` entries may be inspected and changed.
 - `unconfirmed` entries are report-only and may not be changed.
@@ -34,51 +23,42 @@ Ego is the only browser tool. Do not create another browser, Steel session, task
 
 Stricter event-identity, publish, communication, attendee/contact, deletion, and global-definition prohibitions always win. Never expand scope to satisfy an RR requirement. If an in-scope result requires an out-of-scope prerequisite, report it blocked.
 
-## Operations
+## Browser operations
 
-- Reads: `snapshotText`, `pageInfo`, `tabs`, `probe`
+Call `cvent_browser` with one approved operation and explicit `intent`:
+
+- Complete reads: `snapshotText`, `pageInfo`, `probe`
 - Natural movement/search: `scroll`, `scanEventList`, `wait`
 - Interaction: `click`, `fill`, `type`
-- Bounded escape hatches: `js`, `cdp`
-- Target authorization: `authorizeTarget`
+- Cvent-only navigation: `navigate`
+- Exact target authorization: `authorizeTarget`
 
-On unfamiliar pages: observe → read → scroll → understand → interact → reread. DOM observations must always remain complete full-page/full-context reads; never use viewport-only, element-only, truncated, targeted, or smaller DOM snapshots as a performance shortcut. Targeted readiness checks may supplement but never replace complete reads. Do not default to Advanced Search or direct URL hopping.
+Arbitrary JavaScript, raw CDP, tabs, browser creation, process execution, arbitrary network requests, credential/browser-storage access, and snapshot path writes are not capabilities.
 
-## Event discovery
+On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` for every remaining chunk before reasoning or acting.
 
-Cancel any stale Advanced Search form and scan a normal list view:
-
-```bash
-./browser_tool.py --runtime "$RUNTIME" --tool ego \
-  --operation scanEventList \
-  --params '{"intent":"read","exactName":"(C+D) Medtrade Testing Clone 2","maxScrolls":30}'
-```
-
-Require exactly one exact match before opening it. The only authorized target is:
-
-- Name: `(C+D) Medtrade Testing Clone 2`
-- Event key: `e712e34c-6117-4d13-bf4c-8ed54cf2b495`
-- Event code: `NLNMYJD28PH`
+Do not default to Advanced Search or direct URL hopping. For event discovery, call `scanEventList` with read intent. The gateway forces the exact authorized event name; require exactly one exact match before opening it. Then verify the visible event name, code, key, and unpublished state before calling `authorizeTarget` with read intent.
 
 ## Domain workflow
 
 For each confirmed Forge Intake domain:
 
-1. Read the normalized expected state and its exact confirmed `scopeId` values.
-2. Snapshot and scroll only through the relevant confirmed Cvent interface.
+1. Read normalized expectations and exact confirmed `scopeId` values with `cvent_expectations`.
+2. Complete-snapshot and scroll only through the relevant confirmed Cvent interface.
 3. Compare existing objects semantically.
 4. Keep correct objects, create missing objects, and minimally update safe differences.
 5. Save meaningful draft changes.
-6. Fresh-read and verify persistence and no duplicates.
-7. Continue through the remaining domains without routine user pauses.
+6. Complete-reread and verify persistence and no duplicates.
+7. Record facts with `cvent_record_domain`; update state with `cvent_job_update`.
+8. Continue through remaining domains without routine user pauses.
 
-Use `intent: write` plus exact confirmed `scopeIds` for every potentially mutating operation, including Save. The router rejects missing, unknown, unconfirmed, and deferred IDs. Use `intent: read` only for strictly in-scope inspection. Known repeated operations may use Ego JS/CDP only after the interaction is fully understood and independently verified.
+Use `intent: write` plus exact confirmed `scopeIds` for every potentially mutating operation, including field entry and Save. The gateway rejects missing, unknown, unconfirmed, and deferred IDs and validates the current canonical event lease. Use `intent: read` only for strictly in-scope inspection.
 
 ## Ownership and safety
 
 - Ego owns the browser action gate as `PI_EGO` while operating.
 - USER takeover is separate and explicit.
-- Runtime marker, canonical target ID, and event key must match before every write.
-- Only `(C+D) Medtrade Testing Clone 2` may be opened or modified, and only for confirmed Forge Intake fields.
+- Runtime marker, canonical target ID, target event key, and active event lease must match before every write.
+- Only the exact server-authorized event may be opened or modified, and only for confirmed Forge Intake fields.
 - Never publish/go live, send/test/schedule communications, delete/archive, access attendees/contacts, mutate another event, or modify reusable/account-global/profile fields.
 - Preserve event name, code, event key, URL identity, and unpublished status.

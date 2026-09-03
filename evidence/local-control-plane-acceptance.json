@@ -1,0 +1,65 @@
+{
+  "scope": "local control-plane only; no Cvent navigation or mutation and no Anthropic call",
+  "platform": {
+    "python": "3.9.6",
+    "system": "macOS-26.5.1-arm64-arm-64bit"
+  },
+  "scaling": [
+    {
+      "workers": 1,
+      "wall_milliseconds": 4.077,
+      "all_acquired": true,
+      "unique_slots": [
+        1
+      ],
+      "acquire_milliseconds": [
+        1.681
+      ]
+    },
+    {
+      "workers": 2,
+      "wall_milliseconds": 2.873,
+      "all_acquired": true,
+      "unique_slots": [
+        1,
+        2
+      ],
+      "acquire_milliseconds": [
+        0.868,
+        2.725
+      ]
+    },
+    {
+      "workers": 3,
+      "wall_milliseconds": 2.933,
+      "all_acquired": true,
+      "unique_slots": [
+        1,
+        2,
+        3
+      ],
+      "acquire_milliseconds": [
+        0.905,
+        2.792,
+        1.712
+      ]
+    }
+  ],
+  "same_event": {
+    "contenders": 3,
+    "simultaneous_acquisitions": 1,
+    "successor_acquired_after_release": true
+  },
+  "recovery": {
+    "recovered_job_ids": [
+      "job_386113a74719442385cc975ab68b9d71"
+    ],
+    "state": "failed_uncertain",
+    "uncertain": true,
+    "leases_after_recovery": {
+      "events": [],
+      "workers": []
+    }
+  },
+  "passed": true
+}

@@ -1,0 +1,38 @@
+{
+  "scope": "local Steel isolation probe only; no Cvent navigation/mutation and no Anthropic call",
+  "platform": "macOS-26.5.1-arm64 with Docker Desktop",
+  "simultaneous_workers": 3,
+  "wall_seconds": 2.086,
+  "workers": [
+    {
+      "slot": 1,
+      "container": "cvent-agent-steel-1",
+      "api": "127.0.0.1:3005",
+      "cdp": "127.0.0.1:9334",
+      "job_profile_isolated": true,
+      "startup_seconds": 2.078,
+      "running": true
+    },
+    {
+      "slot": 2,
+      "container": "cvent-agent-steel-2",
+      "api": "127.0.0.1:3006",
+      "cdp": "127.0.0.1:9335",
+      "job_profile_isolated": true,
+      "startup_seconds": 2.083,
+      "running": true
+    },
+    {
+      "slot": 3,
+      "container": "cvent-agent-steel-3",
+      "api": "127.0.0.1:3007",
+      "cdp": "127.0.0.1:9336",
+      "job_profile_isolated": true,
+      "startup_seconds": 2.076,
+      "running": true
+    }
+  ],
+  "loopback_only_ports_verified": true,
+  "all_containers_removed_after_probe": true,
+  "passed": true
+}

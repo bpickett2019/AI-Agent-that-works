@@ -29,20 +29,22 @@ class ViewerSafetyTests(unittest.TestCase):
             self.assertNotIn(event,lowered)
     def test_raw_viewer_tab_hidden_until_user_control(self):
         self.assertIn('id="browser-tab" class="secondary" type="button" hidden',HTML)
-        self.assertIn("if(state.browser_gate?.ownership==='USER')",HTML)
+        self.assertIn("if(state.browser_gate?.ownership==='USER'&&state.browser?.viewer_url)",HTML)
     def test_viewer_document_blocks_all_input_while_agent_owned(self):
         self.assertIn("'pointermove'",APP);self.assertIn("'mousemove'",APP)
         self.assertIn("'wheel'",APP);self.assertIn("'focusin'",APP)
         self.assertIn("document.body.style.pointerEvents=user?'auto':'none'",APP)
         self.assertIn("d.ownership==='USER'&&d.desiredOwnership==='USER'",APP)
+        self.assertIn("if not user_owned:",APP)
+        self.assertIn('ownership.get("ownership") == "USER"',APP)
     def test_product_uses_cvent_agent_branding(self):
         self.assertNotRegex(HTML,r'(?i)\bpi\b')
         self.assertIn('<title>Forge · CVENT Agent</title>',HTML)
         self.assertIn('Current CVENT Agent execution',HTML)
         self.assertIn('<dt>CVENT Agent</dt>',HTML)
-        self.assertIn("FastAPI(title='CVENT Agent')",APP)
-        self.assertIn("st['agent_session_saved']",APP)
-        self.assertNotIn("st['agent_session']",APP)
+        self.assertIn('FastAPI(title="CVENT Agent"',APP)
+        self.assertIn('state["agent_session_saved"]',APP)
+        self.assertNotIn('state["agent_session"]',APP)
     def test_forge_brand_palette(self):
         for color in ('#152c44','#5994f6','#255ab2','#4581e5','#99bfff','#cae5ff','#6ff0dd','#eefffc'):
             self.assertIn(color,HTML)
@@ -67,8 +69,8 @@ class ViewerSafetyTests(unittest.TestCase):
     def test_live_data_is_never_cached(self):
         self.assertIn("opts.cache='no-store'",HTML)
         self.assertIn('state.rr_version!==loadedRRVersion',HTML)
-        self.assertIn("'Cache-Control':'no-store, no-cache, must-revalidate'",APP)
-        self.assertIn("JSONResponse(product_facing(st),headers={'Cache-Control':'no-store'})",APP)
+        self.assertIn('"Cache-Control": "no-store, no-cache, must-revalidate"',APP)
+        self.assertIn('JSONResponse(product_facing(state), headers={"Cache-Control": "no-store"})',APP)
 
 class BrowserTargetSafetyTests(unittest.TestCase):
     def setUp(self):
@@ -106,17 +108,27 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'account-global'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/account/settings','intent':'read'})
     def test_ego_inside_steel_is_the_only_active_router(self):
-        self.assertIn('Use Ego direct for all Cvent browsing and building',PROMPT)
-        self.assertIn('Ego is the only browser tool',SKILL)
+        self.assertIn('Use the `cvent_browser` capability for all Cvent browsing and building',PROMPT)
+        self.assertIn('Use `cvent_browser` for all Cvent browsing, building, and verification',SKILL)
         self.assertFalse((ROOT/'browser_use_operator.py').exists())
         self.assertFalse((ROOT/'browser_use_direct.py').exists())
         self.assertIn("choices=['auto','ego']",ROUTER)
         self.assertIn("tool='ego'",ROUTER)
-        self.assertIn("st['browser_strategy']='EGO DIRECT · SAME STEEL RUNTIME'",APP)
+        self.assertIn('"browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"',APP)
         self.assertIn('AUTHORITATIVE SCOPE — FAIL CLOSED',PROMPT)
         self.assertIn("params.get('scopeIds',[])",ROUTER)
         self.assertIn('Forge Intake scopeId is required',ROUTER)
         self.assertIn('Never request viewport-only, element-only, truncated, targeted, or smaller DOM reads',PROMPT)
+        self.assertIn('no shell, generic read, generic write',PROMPT)
+        extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
+        self.assertIn('this production agent has no shell or general filesystem tools',extension)
+        self.assertNotIn('"read", "bash"',extension)
+        self.assertIn('safeChildEnvironment',extension)
+        self.assertNotIn('environment.ANTHROPIC_API_KEY',extension)
+        self.assertIn('Arbitrary JavaScript and raw CDP are not exposed',PROMPT)
+        self.assertNotIn('params.expression',extension)
+        self.assertNotIn('name: "bash"',extension)
+        self.assertNotIn('name: "read"',extension)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
         self.assertIn('Ego `scanEventList`',PROMPT)

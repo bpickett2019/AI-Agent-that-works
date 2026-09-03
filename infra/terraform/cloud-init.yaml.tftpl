@@ -1,0 +1,163 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - docker.io
+  - python3
+  - python3-venv
+  - python3-pip
+  - unattended-upgrades
+
+users:
+  - default
+  - name: cvent
+    system: true
+    shell: /usr/sbin/nologin
+    groups: [docker]
+
+write_files:
+  - path: /usr/local/sbin/bootstrap-cvent-agent
+    permissions: "0750"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      device=/dev/disk/azure/scsi1/lun0
+      for attempt in $$(seq 1 120); do
+        [ -b "$device" ] && break
+        sleep 2
+      done
+      [ -b "$device" ] || { echo "data disk did not attach" >&2; exit 1; }
+      if ! blkid "$device" >/dev/null 2>&1; then
+        mkfs.ext4 -F "$device"
+      fi
+      uuid=$$(blkid -s UUID -o value "$device")
+      mkdir -p /var/lib/cvent-agent
+      grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /var/lib/cvent-agent ext4 defaults,nofail,nodev,nosuid 0 2" >> /etc/fstab
+      mountpoint -q /var/lib/cvent-agent || mount /var/lib/cvent-agent
+      chown cvent:cvent /var/lib/cvent-agent
+      chmod 0700 /var/lib/cvent-agent
+
+      systemctl enable --now docker
+      install -d -o cvent -g cvent -m 0750 /opt/cvent-agent
+      if [ ! -d /opt/cvent-agent/.git ]; then
+        git clone ${repository_url} /opt/cvent-agent
+      fi
+      git -C /opt/cvent-agent fetch --prune origin
+      git -C /opt/cvent-agent checkout --detach ${repository_ref}
+      python3 -m venv /opt/cvent-agent/.venv
+      /opt/cvent-agent/.venv/bin/pip install --disable-pip-version-check --no-cache-dir -r /opt/cvent-agent/requirements.txt
+
+      if ! command -v node >/dev/null || [ "$$(node --version | cut -d. -f1 | tr -d v)" -lt 20 ]; then
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt-get install -y nodejs
+      fi
+      npm install -g @earendil-works/pi-coding-agent@0.84.4
+      npm --prefix /opt/cvent-agent ci --omit=dev --ignore-scripts
+      chown -R cvent:cvent /opt/cvent-agent
+
+      if ! command -v caddy >/dev/null; then
+        apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update
+        apt-get install -y caddy
+      fi
+
+      cat > /etc/cvent-agent.env <<'ENVIRONMENT'
+      CVENT_ENV=production
+      CVENT_DATA_ROOT=/var/lib/cvent-agent
+      CVENT_KEY_VAULT_URL=${key_vault_url}
+      AZURE_CLIENT_ID=${managed_identity_id}
+      ENTRA_TENANT_ID=${tenant_id}
+      ENTRA_CLIENT_ID=${entra_client_id}
+      ENTRA_REDIRECT_URI=https://${fqdn}/auth/callback
+      CVENT_AUTHORIZED_EVENTS_B64=${authorized_events_b64}
+      CVENT_PI_PROVIDER=anthropic
+      CVENT_PI_MODEL=claude-sonnet-4-6
+      CVENT_PI_THINKING=high
+      CVENT_LEASE_SECONDS=30
+      PYTHONUNBUFFERED=1
+      ENVIRONMENT
+      chown root:cvent /etc/cvent-agent.env
+      chmod 0640 /etc/cvent-agent.env
+
+      cat > /etc/systemd/system/cvent-agent.service <<'UNIT'
+      [Unit]
+      Description=Forge CVENT Agent production V1
+      Wants=network-online.target docker.service
+      After=network-online.target docker.service var-lib-cvent\x2dagent.mount
+
+      [Service]
+      Type=simple
+      User=cvent
+      Group=cvent
+      SupplementaryGroups=docker
+      WorkingDirectory=/opt/cvent-agent
+      EnvironmentFile=/etc/cvent-agent.env
+      ExecStart=/opt/cvent-agent/.venv/bin/python /opt/cvent-agent/run_with_keyvault.py /opt/cvent-agent/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8877 --proxy-headers --forwarded-allow-ips 127.0.0.1
+      Restart=always
+      RestartSec=15
+      TimeoutStopSec=150
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectHome=true
+      ProtectSystem=strict
+      ReadWritePaths=/var/lib/cvent-agent
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+
+      cat > /etc/caddy/Caddyfile <<'CADDY'
+      ${fqdn} {
+        encode zstd gzip
+        reverse_proxy 127.0.0.1:8877
+        header {
+          -Server
+          Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        }
+        log {
+          output journald
+          format json
+        }
+      }
+      CADDY
+
+      systemctl daemon-reload
+      systemctl enable cvent-agent
+      systemctl restart caddy
+      systemctl restart cvent-agent
+
+  - path: /etc/systemd/system/cvent-agent-health.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Periodic CVENT Agent health check
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=1min
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/cvent-agent-health.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=CVENT Agent health check
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8877/healthz
+
+runcmd:
+  - [bash, -lc, "/usr/local/sbin/bootstrap-cvent-agent"]
+  - [systemctl, enable, --now, cvent-agent-health.timer]
+
+final_message: "CVENT Agent bootstrap finished after $UPTIME seconds"

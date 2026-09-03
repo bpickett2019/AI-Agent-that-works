@@ -1,28 +1,91 @@
 # CVENT Agent
 
-One user, one mock RR workbook, one CVENT Agent session, one persistent **open-source Steel Browser**, and one authorized unpublished test event: **`(C+D) Medtrade Testing Clone 2`**.
+Forge CVENT Agent production V1 supports Microsoft Entra authentication and up
+to three simultaneous, isolated jobs on one Azure VM. Users can access only
+their own workspaces/jobs; administrators receive all-job and lease visibility.
+
+Each active job has its own Pi process/session/config, pinned Steel container,
+Chromium profile/cache, API/CDP endpoints, BrowserRuntime, Ego process calls,
+BrowserActionGate, authenticated viewer, files, logs, evidence, and report.
+SQLite/WAL provides crash-safe host-wide worker and canonical Cvent event leases.
+Jobs for different approved events can use all three workers; jobs for the same
+event serialize.
+
+Pi is explicitly configured as `anthropic/claude-sonnet-4-6`. The Anthropic key
+is read only from `ANTHROPIC_API_KEY`; Azure production loads it from Key Vault
+with a VM managed identity. No API key is accepted in the UI, source, Terraform
+variables, or process command line.
+
+## Local development
 
 ```bash
 cd /Users/bp/cvent-one-shot
+python3 -m pip install -r requirements.txt
+npm ci
+export CVENT_ENV=development
+export CVENT_DEV_AUTH_SUBJECT=local-operator
+export CVENT_DEV_AUTH_NAME='Local operator'
+export CVENT_DEV_AUTH_ADMIN=1
+export ANTHROPIC_API_KEY='<load from your secret manager>'
 python3 -m uvicorn app:app --host 127.0.0.1 --port 8877
 ```
 
-Open <http://127.0.0.1:8877>. The Forge-branded workspace includes drag-and-drop intake, workflow/status cards, an embedded Steel browser, and an in-UI Excel editor with worksheet selection and row paging. Uploaded RR cells can be edited before a build; **SAVE CHANGES** writes them atomically to the local `.xlsx`, creates a local backup, and resets derived requirements so the next build rereads the workbook. Editing is locked while CVENT Agent is running. Upload the RR and click **START BUILD**. This starts the one local Steel browser and CVENT Agent job. **STOP BUILD** immediately stops CVENT Agent and Steel while preserving the local Steel login profile and keeping the control UI online. The uploaded RR supplies mock requirements only—it never selects the target. CVENT Agent uses Ego to physically scroll normal event-list views for the exact literal name `(C+D) Medtrade Testing Clone 2` without defaulting to Advanced Search, creates a run-local event-key lock only after one exact match, and blocks every write outside that locked clone.
+Open <http://127.0.0.1:8877>. Docker must be running. Local development auth is
+explicit and cannot activate when `CVENT_ENV=production`.
 
-CVENT Agent interprets the RR and uses **Ego inside the canonical Steel Chromium** for event discovery, domain building, and verification. The Forge Intake scope in `scope/intake-emerald.xlsx` is the authoritative automation boundary: only its 65 confirmed mapped fields can be changed; 33 unconfirmed fields are report-only, 18 deferred fields are excluded from current execution, and anything absent from the workbook is out of scope. Every automated browser write must provide confirmed scope IDs that the router validates against the hash-verified compiled manifest. Ego observes and scrolls unfamiliar pages before interacting, then uses semantic controls or bounded DOM/JS/CDP escape hatches and fresh readback. Every call receives `data/current/browser-runtime.json`, passes through one cross-process BrowserActionGate, and proves the same marker, target ID, and locked event key before writes proceed.
+The default server allowlist contains only the unpublished protected event
+`(C+D) Medtrade Testing Clone 2`, event key
+`e712e34c-6117-4d13-bf4c-8ed54cf2b495`. Additional test events must be supplied
+through the deployment's server-side allowlist and explicitly authorized; RR
+uploads never choose or authorize arbitrary Cvent targets.
 
-Ego direct uses the MIT-licensed CDP build from `fango19961106-dotcom/ego-browser-linux` pinned in `vendor/ego-browser-linux/` (upstream commit recorded in `UPSTREAM.json`) so it can attach to Steel rather than creating Ego's separate Chromium.
+## Safety model
 
-Steel OSS runs locally in Docker only:
+The Forge Intake scope in `scope/intake-emerald.xlsx` is authoritative: only 65
+confirmed mapped fields can be changed; unconfirmed fields are report-only;
+deferred and absent fields are out of scope. Every potentially mutating Ego call
+must pass exact confirmed scope IDs. Immediately before every write,
+`browser_tool.py` verifies:
 
-- API/UI: `127.0.0.1:3005`
-- localhost-only CDP: `127.0.0.1:9334`
-- persistent browser profile: `data/steel-profile-local/`
-- 2 GB shared memory with Chrome's slower `/tmp` shared-memory fallback disabled
-- no Steel Cloud API or API key
+1. the per-job BrowserActionGate is agent-owned;
+2. the canonical event lease exists, is unexpired, and belongs to this job/token;
+3. runtime, authorized-target, and live-page event identities match;
+4. all supplied Forge Intake scope IDs are confirmed.
 
-Ego connects directly to that local Steel CDP and operates the same page displayed by the embedded viewer. The embedded Steel viewer is display-only by default: a hard overlay captures pointer, wheel, touch, and click input while the iframe has pointer events and keyboard focus disabled. Only **TAKE CONTROL** pauses CVENT Agent at the action gate before enabling input. **RETURN TO AGENT** shields the iframe first, performs fresh Ego identity/state reads, verifies the event lock, and only then resumes CVENT Agent. Raw new-tab viewer access is hidden unless USER owns the gate.
+Only Ego direct in the job's canonical Steel Chromium may automate Cvent. The
+viewer is display-only until explicit takeover. Return to agent performs fresh
+Ego/runtime/event readback before resuming. Never publish, communicate,
+delete/archive, access attendees/contacts, or mutate reusable/global definitions.
 
-If the UI shows **LOGIN REQUIRED**, click **OPEN BROWSER**, choose Cvent Microsoft Single Sign-On, complete MFA, and accept **Stay signed in** manually. Cvent and Microsoft authentication cookies/local storage are retained in `data/steel-profile-local/` across container restarts. Passwords are never automated or copied. Then click **CONTINUE**. Never publish the event.
+Pi runs with `--no-builtin-tools`: it has no shell, generic read/write, process,
+environment, or arbitrary-path access. The explicit
+`extensions/cvent-job-tools.ts` extension exposes only fixed job-scoped
+`cvent_*` capabilities. It invokes approved RR helpers and `browser_tool.py`
+without a shell, passes helper subprocesses an allowlisted environment, and
+never forwards Anthropic, Entra, or session secrets. Arbitrary JavaScript, raw
+CDP, and browser cookie/storage/network access are not exposed to the model.
 
-Post-demo performance findings and the optimization backlog are recorded in [`docs/PERFORMANCE-NOTES.md`](docs/PERFORMANCE-NOTES.md). Full DOM reads are a permanent requirement and must never be reduced as a performance shortcut.
+## Validation
+
+```bash
+npm test
+python3 -m compileall -q .
+docker compose --profile manual config
+```
+
+The manual Compose profile exposes the same three localhost-only diagnostic slot
+pairs used by the app: `3005/9334`, `3006/9335`, and `3007/9336`. Normally the
+application creates/removes the pinned Steel containers dynamically so each
+container mounts only its active job's private profile.
+
+## Azure deployment
+
+See [`docs/PRODUCTION-V1.md`](docs/PRODUCTION-V1.md) and
+[`infra/terraform`](infra/terraform). The design intentionally does not use AKS,
+Service Bus, or a distributed database until measured pilot demand justifies a
+scale-out architecture.
+
+The audited pre-refactor map is in
+[`docs/CURRENT-STATE-AUDIT.md`](docs/CURRENT-STATE-AUDIT.md). Performance notes
+are in [`docs/PERFORMANCE-NOTES.md`](docs/PERFORMANCE-NOTES.md). Full-page,
+full-context DOM reads and fresh post-write readback remain mandatory.

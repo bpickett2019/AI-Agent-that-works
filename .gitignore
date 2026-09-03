@@ -10,5 +10,17 @@ node_modules/
 *.jsonl
 *.xlsx
 !scope/*.xlsx
-build_expected_scoped.py
 data/
+
+# Terraform runtime/state can contain generated credentials.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Browser evidence and screenshots are runtime artifacts only.
+screenshots/
+*.screenshot.png
+*.screenshot.jpg

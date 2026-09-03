@@ -1,0 +1,9 @@
+{
+  "scope": "minimal provider/model smoke test; no tools, browser, Cvent access, or persistent session",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "thinking": "off",
+  "expected_output": "ANTHROPIC_OK",
+  "actual_output": "ANTHROPIC_OK",
+  "passed": true
+}

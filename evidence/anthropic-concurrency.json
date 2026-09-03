@@ -1,0 +1,66 @@
+{
+  "scope": "Anthropic/Pi concurrency smoke only; no tools, browser, Cvent access, or sessions",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "results": [
+    {
+      "simultaneous_calls": 1,
+      "wall_seconds": 1.761,
+      "calls": [
+        {
+          "returncode": 0,
+          "output": "OK",
+          "seconds": 1.759,
+          "stderr_present": false
+        }
+      ],
+      "passed": true
+    },
+    {
+      "simultaneous_calls": 2,
+      "wall_seconds": 2.836,
+      "calls": [
+        {
+          "returncode": 0,
+          "output": "OK",
+          "seconds": 2.081,
+          "stderr_present": false
+        },
+        {
+          "returncode": 0,
+          "output": "OK",
+          "seconds": 2.835,
+          "stderr_present": false
+        }
+      ],
+      "passed": true
+    },
+    {
+      "simultaneous_calls": 3,
+      "wall_seconds": 1.797,
+      "calls": [
+        {
+          "returncode": 0,
+          "output": "OK",
+          "seconds": 1.699,
+          "stderr_present": false
+        },
+        {
+          "returncode": 0,
+          "output": "OK",
+          "seconds": 1.797,
+          "stderr_present": false
+        },
+        {
+          "returncode": 0,
+          "output": "OK",
+          "seconds": 1.722,
+          "stderr_present": false
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "passed": true
+}

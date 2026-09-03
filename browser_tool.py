@@ -1,14 +1,14 @@
 #!/opt/homebrew/opt/python@3.11/bin/python3.11
 """Ego router pinned to the canonical Steel Chromium."""
 from __future__ import annotations
-import argparse,json,re,subprocess,sys
+import argparse,json,os,re,subprocess,sys,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
 from browser_gate import action
 from browser_runtime import load,local_probe
 from scope_manifest import SCOPE_MANIFEST as DEFAULT_SCOPE_MANIFEST, SCOPE_WORKBOOK as DEFAULT_SCOPE_WORKBOOK, load_manifest as load_scope_manifest
-ROOT=Path(__file__).resolve().parent;CURRENT=ROOT/'data'/'current';SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
+ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'));SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
 EGO={'probe','authorizeTarget','snapshotText','pageInfo','scanEventList','scroll','click','fill','type','navigate','js','cdp','wait','tabs','switchTab'}
 INTENT_REQUIRED={'click','fill','type','js','cdp'}
 def event_key(url):
@@ -33,16 +33,30 @@ def child_result(proc):
         try:return json.loads(proc.stdout[index+len(marker):].strip())
         except json.JSONDecodeError:pass
     return {'ok':False,'error':(proc.stderr or proc.stdout)[-1200:]}
+def lease_is_valid(url,job_id,token,event_id):
+    query=urllib.parse.urlencode({'job_id':job_id,'event_id':event_id})
+    request=urllib.request.Request(url+'?'+query,headers={'X-CVENT-Lease-Token':token})
+    try:
+        with urllib.request.urlopen(request,timeout=5) as response:return response.status==204
+    except (urllib.error.HTTPError,urllib.error.URLError,TimeoutError):return False
+def assert_event_lease(runtime):
+    job_id=os.environ.get('CVENT_JOB_ID');token=os.environ.get('CVENT_LEASE_TOKEN');url=os.environ.get('CVENT_LEASE_VALIDATE_URL');event_id=runtime.get('authorizedEventId')
+    if not job_id and os.environ.get('CVENT_ENV','development')!='production':return
+    if not job_id or not token or not url or not event_id:raise RuntimeError('Write blocked: job event-lease context is absent')
+    if not lease_is_valid(url,job_id,token,event_id):raise RuntimeError('Write blocked: canonical event lease is absent, stale, mismatched, or owned by another job')
 def guard(runtime,operation,params):
     current=local_probe(runtime);lock=target_lock()
     locked=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
-    valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked
+    valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId'])
     intent=params.get('intent')
     if operation in INTENT_REQUIRED and intent not in ('read','write'):
         raise RuntimeError(f'{operation} requires explicit read or write intent')
     if intent=='write':
         if not valid_lock or current_key!=locked:
             raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
+        if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
+            raise RuntimeError('Write blocked: visible event key does not match the server-authorized event')
+        assert_event_lease(runtime)
         refs=params.get('scopeIds',[])
         if isinstance(refs,str):refs=[refs]
         if not isinstance(refs,list) or not refs or any(not isinstance(ref,str) for ref in refs):
@@ -65,7 +79,8 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             info=local_probe(runtime);key=event_key(info.get('url',''))
             host=(urlparse(info.get('url','')).hostname or '').lower()
             if params.get('eventName')!=runtime['authorizedEventName'] or runtime['authorizedEventName'].lower() not in json.dumps(observed).lower() or not key or not host.endswith('cvent.com'):raise RuntimeError('Exact visible authorized event identity was not proven')
-            lock={'name':runtime['authorizedEventName'],'url':info['url'],'event_key':key,'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
+            if runtime.get('authorizedEventKey') and key!=runtime['authorizedEventKey']:raise RuntimeError('Visible event key is not the server-authorized event')
+            lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':key,'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
             target=CURRENT/'authorized-target.json';tmp=target.with_suffix('.tmp');tmp.write_text(json.dumps(lock,indent=2));tmp.replace(target)
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
