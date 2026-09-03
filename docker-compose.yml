@@ -1,0 +1,16 @@
+services:
+  steel:
+    image: ghcr.io/steel-dev/steel-browser:latest
+    container_name: cvent-one-shot-steel
+    restart: unless-stopped
+    init: true
+    shm_size: "2gb"
+    environment:
+      # Use the 2 GB /dev/shm mount instead of Chrome's slower /tmp fallback.
+      FILTER_CHROME_ARGS: "--disable-dev-shm-usage"
+    ports:
+      - "127.0.0.1:3005:3000"
+      - "127.0.0.1:9334:9223"
+    volumes:
+      - ./data/steel-cache:/app/.cache
+      - ./data/steel-profile-local:/tmp/steel-chrome

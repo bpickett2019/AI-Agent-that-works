@@ -1,0 +1,277 @@
+from __future__ import annotations
+import asyncio, json, os, shutil, signal, subprocess, threading, time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
+
+ROOT=Path(__file__).resolve().parent
+DATA=ROOT/'data'; CURRENT=DATA/'current'; RUNS=DATA/'runs'
+STATE=CURRENT/'state.json'; LOG=CURRENT/'activity.log'; REPORT=CURRENT/'final-report.json'
+AUTH_SETTINGS=DATA/'auth-settings.json'
+AUTHORIZED_EVENT_NAME='(C+D) Medtrade Clone 2'
+RUN_MODE='mock'
+app=FastAPI(title='Cvent One Shot')
+_proc: subprocess.Popen|None=None
+_lock=threading.Lock()
+
+def now(): return datetime.now(timezone.utc).isoformat()
+def read_json(path,default):
+    try: return json.loads(path.read_text())
+    except Exception: return default
+def atomic_json(path,data):
+    path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_suffix('.tmp'); tmp.write_text(json.dumps(data,indent=2)); tmp.replace(path)
+def append_log(msg):
+    CURRENT.mkdir(parents=True,exist_ok=True)
+    with LOG.open('a') as f: f.write(f'{now()}  {msg}\n')
+def fresh_state(filename=None):
+    t=now(); return {'status':'ready' if filename else 'waiting_for_rr','current_stage':'upload','current_action':f'Ready — mock RR can modify only {AUTHORIZED_EVENT_NAME}' if filename else 'Upload mock RR workbook','completed':[],'pending':['target_discovery','event_details','registration_types','admission_items','optional_items','questions','discounts','agenda','speakers','registration_paths','site','email_configuration','final_qa'],'review_required':[],'rr_file':filename,'run_mode':RUN_MODE,'authorized_event_name':AUTHORIZED_EVENT_NAME,'target_url':'','target_identity':AUTHORIZED_EVENT_NAME,'started_at':None,'updated_at':t,'pi_pid':None,'pi_session':None}
+def auth_settings():
+    saved=read_json(AUTH_SETTINGS,{})
+    cookie_store=DATA/'steel-profile-local'/'Default'/'Cookies'
+    return {'organization_id':saved.get('organization_id',''),'authenticated_at':saved.get('authenticated_at'),'cookies_saved':bool(saved.get('authenticated_at') and cookie_store.exists()),'microsoft_sso_persistent':bool(saved.get('microsoft_sso_persistent')),'cvent_cookie_count':saved.get('cvent_cookie_count',0),'microsoft_cookie_count':saved.get('microsoft_cookie_count',0),'cookie_store':str(cookie_store)}
+def ensure():
+    CURRENT.mkdir(parents=True,exist_ok=True); RUNS.mkdir(parents=True,exist_ok=True); (DATA/'chrome-profile').mkdir(parents=True,exist_ok=True)
+    if not STATE.exists(): atomic_json(STATE,fresh_state('input.xlsx' if (CURRENT/'input.xlsx').exists() else None))
+    LOG.touch(exist_ok=True)
+    if (CURRENT/'input.xlsx').exists() and not REPORT.exists(): atomic_json(REPORT,{'status':'INCOMPLETE','unresolved_items':['Build not started'],'real_reads':[],'real_writes':[],'guardrails':{'published':0,'emails_sent':0,'deletes':0,'global_mutations':0},'updated_at':now()})
+def steel_command(command,url=None,timeout=75):
+    cmd=[str(ROOT/'steel_session.py'),command]
+    if url: cmd += ['--url',url]
+    result=subprocess.run(cmd,cwd=ROOT,text=True,capture_output=True,timeout=timeout)
+    for line in reversed(result.stdout.splitlines()):
+        if line.startswith('STEEL_RESULT='):
+            data=json.loads(line.split('=',1)[1]); break
+    else: data={'provider':'steel','running':False,'error':(result.stderr or result.stdout or 'Steel command failed')[-1000:]}
+    if result.returncode and not data.get('error'): data['error']=f'Steel command exited {result.returncode}'
+    return data
+def chrome_status():
+    data=steel_command('status',timeout=20)
+    return {k:data.get(k) for k in ('provider','running','status','id','profile_id','viewer_url','error','login_required')}
+def chrome_auth(): return steel_command('page',timeout=60)
+def chrome_login_required(): return chrome_auth().get('auth_status')!='authenticated'
+def launch_chrome(url='https://app.cvent.com/'):
+    data=steel_command('ensure',timeout=60)
+    if not data.get('running'): return data
+    page=steel_command('page',url=url,timeout=75)
+    data['login_required']=page.get('login_required'); data['url']=page.get('url'); data['title']=page.get('title')
+    return data
+def valid_target(url):
+    try:
+        u=urlparse(url); host=(u.hostname or '').lower()
+        return u.scheme=='https' and (host=='cvent.com' or host.endswith('.cvent.com')) and len(u.path+u.query)>1
+    except Exception: return False
+def authorized_target_url():
+    lock=read_json(CURRENT/'authorized-target.json',{})
+    url=lock.get('url','')
+    return url if lock.get('name')==AUTHORIZED_EVENT_NAME and valid_target(url) else ''
+def archive_current():
+    if not CURRENT.exists() or not any(CURRENT.iterdir()): return
+    stamp=datetime.now().strftime('%Y%m%d-%H%M%S')
+    dest=RUNS/stamp; n=1
+    while dest.exists(): n+=1; dest=RUNS/f'{stamp}-{n}'
+    shutil.move(str(CURRENT),str(dest))
+
+def job_pid():
+    if _proc is not None and _proc.poll() is None:return _proc.pid
+    pid=read_json(STATE,{}).get('pi_pid')
+    if not isinstance(pid,int):return None
+    try:
+        command=subprocess.check_output(['ps','-p',str(pid),'-o','command='],text=True).strip()
+        return pid if command and Path(command.split()[0]).name=='pi' else None
+    except Exception:return None
+def running(): return job_pid() is not None
+def stop_process_tree(root):
+    rows=[]
+    try:
+        for line in subprocess.check_output(['ps','-axo','pid=,ppid='],text=True).splitlines():
+            pid,ppid=map(int,line.split()); rows.append((pid,ppid))
+    except Exception: rows=[]
+    children=[]
+    def walk(parent):
+        for pid,ppid in rows:
+            if ppid==parent: walk(pid); children.append(pid)
+    walk(root); pids=children+[root]
+    for sig in (signal.SIGTERM,signal.SIGKILL):
+        for pid in pids:
+            try: os.kill(pid,sig)
+            except ProcessLookupError: pass
+            except PermissionError: pass
+        time.sleep(.7)
+
+def render_prompt():
+    vals={'RR_PATH':str((CURRENT/'input.xlsx').resolve()),'TARGET_URL':f'DISCOVER EXACTLY {AUTHORIZED_EVENT_NAME} — THE RR IS MOCK INPUT AND MUST NOT SELECT THE TARGET','STATE_PATH':str(STATE.resolve()),'LOG_PATH':str(LOG.resolve()),'REPORT_PATH':str(REPORT.resolve()),'AUTH_SETTINGS_PATH':str(AUTH_SETTINGS.resolve()),'OPERATOR_PATH':str((ROOT/'browser_use_operator.py').resolve()),'STATUS_HELPER':str((ROOT/'status_update.py').resolve())}
+    text=(ROOT/'PI_PROMPT.md').read_text()
+    for k,v in vals.items(): text=text.replace('{{'+k+'}}',v)
+    (CURRENT/'job-prompt.md').write_text(text); return text
+
+def spawn_pi(message,target=None,resume=False):
+    global _proc
+    sessions=CURRENT/'pi-sessions'; sessions.mkdir(parents=True,exist_ok=True)
+    cmd=['pi','-p','--approve','--no-extensions','--no-skills','--skill',str(ROOT/'.agents/skills/cvent-browser/SKILL.md'),'--no-prompt-templates','--no-context-files','--session-dir',str(sessions),'--name','cvent-one-shot']
+    if resume:
+        files=sorted(sessions.glob('*.jsonl'),key=lambda p:p.stat().st_mtime,reverse=True)
+        if not files: raise HTTPException(409,'No Pi session to continue')
+        cmd += ['--session',str(files[0]),message]
+    else: cmd += [message]
+    out=open(CURRENT/'pi-output.log','a',buffering=1)
+    _proc=subprocess.Popen(cmd,cwd=ROOT,stdout=out,stderr=subprocess.STDOUT,text=True,start_new_session=True)
+    st=read_json(STATE,fresh_state('input.xlsx')); st.update({'status':'running','current_stage':'starting','current_action':'Pi is starting','target_url':target or st.get('target_url',''),'pi_pid':_proc.pid,'started_at':st.get('started_at') or now(),'updated_at':now()}); atomic_json(STATE,st)
+    append_log(('Resuming' if resume else 'Started')+f' Pi process PID {_proc.pid}')
+    threading.Thread(target=monitor_pi,args=(_proc,out),daemon=True).start()
+    return _proc.pid
+
+def monitor_pi(proc,out):
+    global _proc
+    code=proc.wait(); out.close(); time.sleep(.2)
+    st=read_json(STATE,{})
+    sessions=sorted((CURRENT/'pi-sessions').glob('*.jsonl'),key=lambda p:p.stat().st_mtime,reverse=True) if (CURRENT/'pi-sessions').exists() else []
+    if sessions: st['pi_session']=str(sessions[0])
+    if st.get('status')=='running':
+        st['status']='agent_stopped' if code==0 else 'failed'; st['current_action']='Pi stopped before a final verdict' if code==0 else f'Pi exited with code {code}'
+        append_log(st['current_action'])
+    st['updated_at']=now(); atomic_json(STATE,st)
+    with _lock:
+        if _proc is proc: _proc=None
+
+@app.on_event('startup')
+def startup():
+    # Keep the control UI available while Steel and Pi are stopped.
+    ensure()
+
+@app.get('/',response_class=HTMLResponse)
+def home(): return (ROOT/'templates/index.html').read_text()
+
+@app.get('/steel-viewer',response_class=HTMLResponse)
+def steel_viewer():
+    try:
+        import urllib.request
+        with urllib.request.urlopen('http://127.0.0.1:3005/v1/sessions/debug',timeout=10) as r: html=r.read().decode('utf-8')
+        html=html.replace('ws://0.0.0.0:3000','ws://127.0.0.1:3005').replace('http://0.0.0.0:3000','http://127.0.0.1:3005')
+        return HTMLResponse(html,headers={'Cache-Control':'no-store'})
+    except Exception as e: raise HTTPException(503,f'Local Steel viewer unavailable: {e}')
+
+@app.get('/api/status')
+def status():
+    ensure(); st=read_json(STATE,fresh_state()); st['run_mode']=RUN_MODE; st['authorized_event_name']=AUTHORIZED_EVENT_NAME; st['browser_use_mode']='FAST · CLAUDE HAIKU 4.5'; st['activity_log']=LOG.read_text(errors='replace').splitlines()[-200:]; st['final_report']=read_json(REPORT,None); st['browser']=chrome_status(); st['auth_settings']=auth_settings(); st['pi_process_running']=running()
+    if st.get('started_at'):
+        try: st['elapsed_seconds']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(st['started_at'])).total_seconds()))
+        except Exception: st['elapsed_seconds']=0
+    else: st['elapsed_seconds']=0
+    return JSONResponse(st,headers={'Cache-Control':'no-store'})
+
+@app.get('/api/workbook')
+def workbook_info():
+    path=CURRENT/'input.xlsx'
+    if not path.exists(): raise HTTPException(404,'No RR workbook uploaded')
+    from openpyxl import load_workbook
+    wb=load_workbook(path,read_only=True,data_only=False)
+    try: sheets=[{'name':ws.title,'rows':ws.max_row,'columns':ws.max_column} for ws in wb.worksheets]
+    finally: wb.close()
+    return {'file':read_json(STATE,{}).get('rr_file') or path.name,'sheets':sheets}
+
+@app.get('/api/workbook/sheet')
+def workbook_sheet(name:str,start:int=1,limit:int=80):
+    path=CURRENT/'input.xlsx'
+    if not path.exists(): raise HTTPException(404,'No RR workbook uploaded')
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+    wb=load_workbook(path,read_only=True,data_only=False)
+    try:
+        if name not in wb.sheetnames: raise HTTPException(404,'Worksheet not found')
+        ws=wb[name]; start=max(1,start); limit=max(10,min(limit,150)); end=min(ws.max_row,start+limit-1); width=min(ws.max_column,60)
+        def value(v):
+            if v is None:return ''
+            if hasattr(v,'isoformat'):return v.isoformat()
+            return str(v)
+        rows=[[value(ws.cell(r,c).value) for c in range(1,width+1)] for r in range(start,end+1)]
+        return {'name':name,'start':start,'end':end,'total_rows':ws.max_row,'total_columns':ws.max_column,'columns':[get_column_letter(c) for c in range(1,width+1)],'rows':rows}
+    finally: wb.close()
+
+@app.post('/api/upload')
+def upload(rr:UploadFile=File(...)):
+    ensure()
+    if running(): raise HTTPException(409,'Pi is running')
+    name=rr.filename or ''
+    if not name.lower().endswith('.xlsx'): raise HTTPException(400,'Upload an .xlsx file')
+    archive_current(); CURRENT.mkdir(parents=True,exist_ok=True)
+    with (CURRENT/'input.xlsx').open('wb') as f: shutil.copyfileobj(rr.file,f)
+    atomic_json(STATE,fresh_state(name)); LOG.write_text('')
+    atomic_json(REPORT,{'status':'INCOMPLETE','unresolved_items':['Build not started'],'real_reads':[],'real_writes':[],'guardrails':{'published':0,'emails_sent':0,'deletes':0,'global_mutations':0},'updated_at':now()})
+    append_log(f'Uploaded RR workbook: {name}')
+    return {'ok':True,'file':name}
+
+async def capture_login_facts():
+    import urllib.request, websockets
+    pages=json.load(urllib.request.urlopen('http://127.0.0.1:9334/json/list',timeout=5))
+    page=next((x for x in pages if x.get('type')=='page' and 'cvent.com' in (x.get('url') or '')),None)
+    if not page: raise RuntimeError('No Cvent page is open in Steel')
+    ws=page['webSocketDebuggerUrl'].replace('ws://127.0.0.1/','ws://127.0.0.1:9334/').replace('ws://localhost/','ws://127.0.0.1:9334/')
+    async with websockets.connect(ws,origin='http://127.0.0.1:9334',open_timeout=10) as socket:
+        await socket.send(json.dumps({'id':1,'method':'Network.getAllCookies'}))
+        while True:
+            reply=json.loads(await asyncio.wait_for(socket.recv(),10))
+            if reply.get('id')==1: break
+    cookies=reply.get('result',{}).get('cookies',[])
+    org=next((c.get('value','') for c in cookies if c.get('name')=='org-id' and c.get('domain','').endswith('cvent.com')), '')
+    return {'organization_id':org,'microsoft_sso_persistent':any(c.get('name')=='ESTSAUTHPERSISTENT' for c in cookies),'cvent_cookie_count':sum(c.get('domain','').endswith('cvent.com') for c in cookies),'microsoft_cookie_count':sum('microsoftonline.com' in c.get('domain','') for c in cookies)}
+
+@app.post('/api/auth-settings')
+def save_auth_settings():
+    ensure(); auth=chrome_auth()
+    if auth.get('auth_status')!='authenticated': raise HTTPException(409,'Finish Cvent Microsoft SSO and reach an authenticated Cvent page before saving login')
+    try: facts=asyncio.run(capture_login_facts())
+    except Exception as e: raise HTTPException(500,f'Could not confirm Steel login cookies: {e}')
+    if not facts.get('organization_id'): raise HTTPException(409,'Authenticated Cvent organization cookie was not found')
+    data={**facts,'authenticated_at':now(),'cookie_store':str(DATA/'steel-profile-local'/'Default'/'Cookies')}
+    atomic_json(AUTH_SETTINGS,data); os.chmod(AUTH_SETTINGS,0o600); append_log(f'Saved Cvent organization ID {facts["organization_id"]} and confirmed persistent Cvent/Microsoft SSO cookies')
+    return {'ok':True,**auth_settings()}
+
+@app.post('/api/start')
+def start():
+    ensure()
+    with _lock:
+        if running(): raise HTTPException(409,'A job is already running')
+        if not (CURRENT/'input.xlsx').exists(): raise HTTPException(400,'Upload the RR workbook first')
+        browser=launch_chrome('https://app.cvent.com/')
+        if not browser.get('running'): raise HTTPException(500,browser.get('error','Chrome failed'))
+        prompt=render_prompt(); pid=spawn_pi(prompt)
+    return {'ok':True,'pid':pid,'browser':browser}
+
+@app.post('/api/continue')
+def continue_job():
+    ensure()
+    with _lock:
+        if running(): raise HTTPException(409,'Pi is already running')
+        st=read_json(STATE,{})
+        locked_url=authorized_target_url()
+        launch_chrome(locked_url or 'https://app.cvent.com/')
+        auth=chrome_auth()
+        if auth.get('auth_status')!='authenticated':
+            where='Microsoft SSO/MFA' if auth.get('auth_status')=='microsoft_sso' else 'Cvent login'
+            st.update({'status':'login_required','current_stage':'login','current_action':f'Finish {where} in OPEN BROWSER, including Stay signed in, before CONTINUE','updated_at':now()}); atomic_json(STATE,st)
+            append_log(f'CONTINUE ignored: authentication incomplete at {where}')
+            raise HTTPException(409,f'Authentication is still at {where}. Click OPEN BROWSER, finish Microsoft SSO/MFA and Stay signed in, then press CONTINUE.')
+        msg=f'Manual Cvent/Microsoft login and MFA are complete in the SAME persistent Steel browser session. Reconnect through browser_use_operator.py and continue the MOCK mission idempotently. The one and only authorized event is exactly {AUTHORIZED_EVENT_NAME}; the uploaded RR must never select or authorize another event. Re-read state and actual Cvent state and continue through final QA. Do not return a plan.'
+        pid=spawn_pi(msg,resume=True)
+    return {'ok':True,'pid':pid}
+
+@app.post('/api/open-browser')
+def open_browser():
+    ensure(); result=launch_chrome(authorized_target_url() or 'https://app.cvent.com/')
+    return result
+
+@app.post('/api/stop-agent')
+def stop_agent():
+    global _proc
+    with _lock:
+        pid=job_pid()
+        if pid:
+            stop_process_tree(pid); _proc=None
+            append_log(f'Pi build process tree {pid} stopped by operator')
+        steel=steel_command('release',timeout=60)
+        st=read_json(STATE,{})
+        st.update({'status':'stopped','current_stage':'stopped','current_action':'Build and Steel browser stopped','pi_pid':None,'updated_at':now()}); atomic_json(STATE,st)
+        append_log('Steel OSS browser stopped; persistent profile preserved')
+    return {'ok':True,'steel':steel}
