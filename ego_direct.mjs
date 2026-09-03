@@ -18,6 +18,7 @@ try{
   if(marker!==runtime.browserRuntimeId)throw new Error('Ego marker mismatch — cross-browser routing blocked');
   let result;
   switch(operation){
+    case '__preflightTarget': result={resolved:await ego.evaluateLocator(params.target,(element)=>({tag:element.tagName,role:element.getAttribute('role'),disabled:'disabled' in element?Boolean(element.disabled):false,connected:element.isConnected}))};break;
     case 'probe': {const info=await ego.pageInfo();result={marker,targetId:wanted,url:info.url,title:info.title};break}
     case 'snapshotText': result={snapshot:await ego.snapshot()};break;
     case 'controlInventory': {

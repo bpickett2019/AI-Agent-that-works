@@ -16,6 +16,7 @@
 | Terraform static validation | Pass with Terraform 1.16.0 and pinned provider lock | Local command output |
 | Complete snapshot reconstruction/integrity | Pass on 403,140-byte payload derived from archived real Cvent DOM | `capability-functional.json` |
 | Bounded browser primitives in real isolated Steel/Ego | Pass for snapshot/inventory/fill/select/check/search/activate/modal/key/hover/rich-text selection/scroll/drag/readback | `browser-operations-functional.json` |
+| Browser target preflight and bounded renderer recovery | Pass in real isolated Steel/Ego: exact role locator, pre-dispatch target resolution, one bounded recovery call, and all readbacks | `browser-recovery-functional.json` |
 | Capability-only Pi reasoning loop | Pass: complete chunks → reason → recover selector → scoped fill → complete chunks → verify | `browser-reasoning-functional.json` |
 | Authorized live Cvent read-only discovery | Auth/login, 47,098-byte complete snapshot, 70-row scan, one exact event match; exposed bounded event-opening gap; zero writes | `live-cvent-capability-discovery.json` |
 | Live OS process kill isolation | Pass locally with authorized USER-owned slot 1 untouched and synthetic slots 2/3 | `live-process-isolation.json` |

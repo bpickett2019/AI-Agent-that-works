@@ -136,9 +136,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
     def test_write_timeout_is_audited_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
         params={'intent':'write','scopeIds':['scope-004'],'target':'#Save','timeoutSeconds':1}
+        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON"}}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
-             patch.object(browser_tool.subprocess,'run',side_effect=subprocess.TimeoutExpired(['node'],1)):
+             patch.object(browser_tool.subprocess,'run',side_effect=[resolved,subprocess.TimeoutExpired(['node'],1)]):
             with self.assertRaisesRegex(RuntimeError,'automatic replay is blocked'):
                 browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
         records=[json.loads(line) for line in (self.base/'scope-write-audit.jsonl').read_text().splitlines()]
@@ -147,15 +148,36 @@ class BrowserTargetSafetyTests(unittest.TestCase):
     def test_write_helper_error_is_uncertain_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
         params={'intent':'write','scopeIds':['scope-004'],'target':'#Save','timeoutSeconds':1}
+        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON"}}\n','')
         failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"post-action marker failed"}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
-             patch.object(browser_tool.subprocess,'run',return_value=failed):
+             patch.object(browser_tool.subprocess,'run',side_effect=[resolved,failed]):
             with self.assertRaisesRegex(RuntimeError,'post-action marker failed'):
                 browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
         records=[json.loads(line) for line in (self.base/'scope-write-audit.jsonl').read_text().splitlines()]
         self.assertEqual([record['result'] for record in records],['attempted','uncertain_error'])
         self.assertTrue((self.base/'browser-mutation-uncertain.json').exists())
+    def test_invalid_selector_is_rejected_before_write_audit(self):
+        browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
+        self.write_lock()
+        with self.assertRaisesRegex(RuntimeError,'Unsupported selector syntax'):
+            browser_tool.guard(self.runtime,'click',{
+                'intent':'write','scopeIds':['scope-004'],'target':'button:has-text("Edit")',
+            })
+        self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
+        self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
+    def test_unresolved_write_target_is_rejected_before_dispatch(self):
+        current={'url':'https://app.cvent.com/event?evtstub=locked'}
+        params={'intent':'write','scopeIds':['scope-004'],'target':'role:button[name="Missing"]'}
+        failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"could not locate target"}\n','')
+        with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
+             patch.object(browser_tool,'guard',return_value=current), \
+             patch.object(browser_tool.subprocess,'run',return_value=failed):
+            with self.assertRaisesRegex(RuntimeError,'before browser dispatch'):
+                browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
+        self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
+        self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
     def test_open_authorized_event_requires_live_lease_inventory_and_runtime_identity(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/Subscribers/Events2/EventSelection'}
         with patch.object(browser_tool, 'assert_event_lease') as lease:
@@ -207,7 +229,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('cvent_execute',extension)
         self.assertNotIn('cvent_run_js',extension)
         self.assertNotIn('cvent_raw_cdp',extension)
-        for operation in ('openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag'):
+        for operation in ('recover','openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag'):
             self.assertIn(f'"{operation}"',extension)
         self.assertIn('Snapshot chunks must be read exactly once in order',extension)
         self.assertIn('Snapshot worker/browser/job identity mismatch',extension)

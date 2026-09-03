@@ -310,6 +310,7 @@ class JobRunner:
         report_status = str(report.get("status", "")).upper()
         reported_state = str(state.get("status", "")).lower()
         writes_exist = self._mutation_attempted(directory)
+        provider_failure = self._provider_failure(directory)
         if code == 0 and report_status == "DRAFT_COMPLETE":
             finish_state, uncertain, error = "completed", False, None
         elif code == 0 and (report_status == "REVIEW_REQUIRED" or reported_state == "review_required"):
@@ -319,10 +320,11 @@ class JobRunner:
         else:
             uncertain = writes_exist
             finish_state = "failed_uncertain" if uncertain else "failed_prewrite"
-            error = (
-                f"Pi exited with code {code} after a Cvent write attempt; mutation outcome requires review"
-                if uncertain else f"Pi exited with code {code} before any Cvent write attempt; fresh preflight required"
+            outcome = (
+                "job also has an unresolved Cvent write attempt; mutation outcome requires review"
+                if uncertain else "no Cvent write was attempted; a fresh preflight is required"
             )
+            error = f"{provider_failure}; {outcome}" if provider_failure else f"CVENT Agent exited with code {code}; {outcome}"
         try:
             self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
         finally:
@@ -476,6 +478,22 @@ class JobRunner:
         active.stop_heartbeat.set()
         with self._lock:
             self._active.pop(active.job_id, None)
+
+    @staticmethod
+    def _provider_failure(directory: Path) -> str | None:
+        output = directory / "pi-output.log"
+        if not output.exists():
+            return None
+        with output.open("rb") as handle:
+            handle.seek(max(0, output.stat().st_size - 128 * 1024))
+            text = handle.read().decode(errors="replace").lower()
+        if "credit balance is too low" in text:
+            return "Anthropic API credit balance is too low"
+        if "rate_limit_error" in text or "rate limit" in text or "status 429" in text:
+            return "Anthropic API rate limit prevented the agent from continuing"
+        if "authentication_error" in text or "invalid x-api-key" in text:
+            return "Anthropic API authentication failed"
+        return None
 
     @staticmethod
     def _mutation_attempted(directory: Path) -> bool:

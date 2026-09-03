@@ -1,7 +1,7 @@
 #!/opt/homebrew/opt/python@3.11/bin/python3.11
 """Ego router pinned to the canonical Steel Chromium."""
 from __future__ import annotations
-import argparse,json,os,re,subprocess,sys,urllib.error,urllib.parse,urllib.request
+import argparse,json,os,re,subprocess,sys,time,urllib.error,urllib.parse,urllib.request
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
@@ -9,7 +9,7 @@ from browser_gate import action
 from browser_runtime import load,local_probe
 from scope_manifest import SCOPE_MANIFEST as DEFAULT_SCOPE_MANIFEST, SCOPE_WORKBOOK as DEFAULT_SCOPE_WORKBOOK, load_manifest as load_scope_manifest
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'));SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
-EGO={'probe','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
+EGO={'probe','recover','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
 INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
 def event_key(url):
     try:
@@ -62,6 +62,9 @@ def guard(runtime,operation,params):
             raise RuntimeError('Authorized event opening identity does not match BrowserRuntime')
     if operation in INTENT_REQUIRED and intent not in ('read','write'):
         raise RuntimeError(f'{operation} requires explicit read or write intent')
+    target=str(params.get('target',''))
+    if target and re.search(r':(?:contains|has-text)\s*\(',target,re.I):
+        raise RuntimeError('Unsupported selector syntax rejected before browser action; use an exact Ego role locator such as role:button[name="Edit"] or a selector from controlInventory')
     if intent=='write':
         if (CURRENT/'browser-mutation-uncertain.json').exists():
             raise RuntimeError('Write blocked: a prior browser mutation timed out with uncertain outcome; fresh human review is required')
@@ -83,8 +86,31 @@ def guard(runtime,operation,params):
         if re.search(r'/(account|organization|admin|global)(/|$)',parsed.path,re.I):raise RuntimeError('Navigation to account-global Cvent settings is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
     return current
+def recover_browser(runtime_path,runtime,tool,params):
+    deadline=time.monotonic()+max(10,min(int(params.get('timeoutSeconds',240)),300));last='renderer did not respond'
+    while time.monotonic()<deadline:
+        try:
+            with action(runtime['browserRuntimeId'],'PI_EGO'):
+                current=local_probe(runtime)
+                proc=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','probe','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=25)
+                result=child_result(proc)
+                if not proc.returncode and result.get('ok'):
+                    return {'ok':True,'tool':tool,'operation':'recover','recovered':True,'page':result.get('page'),'url':current.get('url'),'title':current.get('title'),'router':tool}
+                last=result.get('error',last)
+        except Exception as error:last=str(error)
+        time.sleep(3)
+    raise RuntimeError(f'Browser renderer did not recover within the bounded wait: {last[-500:]}')
+def preflight_write_target(runtime_path,operation,params):
+    targets=[params.get('target')]
+    if operation=='drag':targets.append(params.get('destination'))
+    for target in filter(None,targets):
+        probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','__preflightTarget','--params',json.dumps({'target':target})],cwd=ROOT,text=True,capture_output=True,timeout=30)
+        result=child_result(probe)
+        if probe.returncode or not result.get('ok'):
+            raise RuntimeError('Write rejected before browser dispatch: '+result.get('error','target could not be resolved')[-800:])
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
+    if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
     with action(runtime['browserRuntimeId'],'PI_EGO'):
         current=guard(runtime,operation,params)
         if operation=='authorizeTarget':
@@ -98,7 +124,9 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
-        if is_write:audit_scope_write(operation,params,current,'attempted')
+        if is_write:
+            preflight_write_target(runtime_path,operation,params)
+            audit_scope_write(operation,params,current,'attempted')
         try:
             proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))
         except subprocess.TimeoutExpired as error:

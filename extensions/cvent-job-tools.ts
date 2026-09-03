@@ -5,12 +5,12 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
 const BROWSER_OPERATION_NAMES = [
-  "probe", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover",  "selectOption", "setChecked", "press", "search", "selectText", "drag",
 ];
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
-  "probe", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "navigate", "wait", "hover", "search", "selectText",]);
 const ALLOWED_KEYS = new Set([
   "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -219,12 +219,12 @@ function parseMarker(stdout: string, marker: string): any {
 
 async function invokeBrowser(operation: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutSeconds = 90): Promise<any> {
   await readJobFile(runtimePath, 1024 * 1024);
-  const timeout = Math.max(1, Math.min(timeoutSeconds, 180));
+  const timeout = Math.max(1, Math.min(timeoutSeconds, operation === "recover" ? 300 : 180));
   const boundedParams = { ...params, timeoutSeconds: timeout };
   const output = await runFixed(python, [
     join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
     "--operation", operation, "--params", JSON.stringify(boundedParams),
-  ], "browser", signal, (timeout + 10) * 1000);
+  ], "browser", signal, (timeout + (operation === "recover" ? 45 : 10)) * 1000);
   return parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
 }
 
@@ -634,7 +634,7 @@ export default function cventJobTools(pi: any) {
       settleMs: Type.Optional(Type.Integer()),
       maxScrolls: Type.Optional(Type.Integer()),
       ms: Type.Optional(Type.Integer()),
-      timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 180 })),
+      timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
     }),
     async execute(_id: string, params: any, signal: AbortSignal) {
       const operation = String(params.operation);
@@ -652,7 +652,7 @@ export default function cventJobTools(pi: any) {
       return withQueue("browser", async () => {
         await assertSnapshotConsumed();
         const input = browserParams(operation, params);
-        const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? 90), 180));
+        const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
         const result = await invokeBrowser(operation, input, signal, timeout);
         return toolText(await saveLargeSnapshot(result));
       });

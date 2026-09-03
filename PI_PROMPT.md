@@ -46,13 +46,13 @@ Use Ego naturally:
 - `snapshotText` and `pageInfo` to understand each page; use complete `controlInventory` only as a supplemental selector-recovery index when the semantic snapshot does not expose a usable control target;
 - `scroll` to move through unfamiliar or long interfaces;
 - `scanEventList` and bounded `search` for Cvent tables/lists;
-- `click`, bounded DOM `activate`, `fill`, `type`, `selectOption`, `setChecked`, and bounded `press` for ordinary controls; use `activate` only when an observed exact control does not respond to physical `click`;
+- `click`, bounded DOM `activate`, `fill`, `type`, `selectOption`, `setChecked`, and bounded `press` for ordinary controls; prefer exact Ego role locators such as `role:button[name="Edit"]`, never Playwright-only `:has-text()` or `:contains()` selectors, and use `activate` only when an observed exact control does not respond to physical `click`;
 - `hover`, `selectText`, and source-to-destination `drag` only when the observed Cvent UI requires them;
 - `wait` with a target or load state for rendering/navigation stabilization;
 - fresh reads after every save or meaningful write.
 Arbitrary JavaScript and raw CDP are not exposed. Use the semantic Ego operations and complete snapshots rather than trying to script the page.
 Every DOM observation must remain a complete full-page/full-context read. Never request viewport-only, element-only, truncated, targeted, or smaller DOM reads as a performance optimization. If one complete capture is split into transport chunks, read every chunk exactly once in strict index order with `cvent_snapshot_chunk` before reasoning or taking another browser action. The gateway verifies snapshot hash, byte/chunk counts, job, workspace, worker, runtime, and target identity and blocks browser actions until the tail is consumed. Targeted readiness checks may supplement but never replace the subsequent complete DOM read.
-Do not default to Advanced Search, direct URL hopping, or brittle selectors. On unfamiliar pages, observe, scroll, understand structure, interact, reread, and continue. Group reasoning around domain outcomes rather than stopping for user reports after each click.
+Do not default to Advanced Search, direct URL hopping, or brittle selectors. On unfamiliar pages, observe, scroll, understand structure, interact, reread, and continue. If navigation makes the Cvent renderer temporarily unresponsive, call the read-only `recover` operation once with up to 300 seconds; do not repeatedly navigate or spam probes while Cvent is loading. After recovery, take one fresh complete snapshot and continue from the observed page. Group reasoning around domain outcomes rather than stopping for user reports after each click.
 
 FIRST ACTIONS
 1. Use `cvent_job_update` to set status running and log `Reading RR workbook`.

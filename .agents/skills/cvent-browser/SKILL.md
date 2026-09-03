@@ -27,7 +27,7 @@ Stricter event-identity, publish, communication, attendee/contact, deletion, and
 
 Call `cvent_browser` with one approved operation and explicit `intent`:
 
-- Complete reads: `snapshotText`, `pageInfo`, `probe`; full-page `controlInventory` is a supplemental selector-recovery index, never a replacement snapshot
+- Complete reads: `snapshotText`, `pageInfo`, `probe`; read-only `recover` performs one bounded wait for a temporarily busy Cvent renderer; full-page `controlInventory` is a supplemental selector-recovery index, never a replacement snapshot
 - Natural movement/search: `scroll`, `scanEventList`, bounded `search`, `wait`
 - Interaction: `click`, bounded DOM `activate`, `fill`, `type`, `selectOption`, `setChecked`, bounded `press`
 - Observed UI affordances: `hover`, `selectText`, source-to-destination `drag`
@@ -36,7 +36,7 @@ Call `cvent_browser` with one approved operation and explicit `intent`:
 
 Arbitrary JavaScript, raw CDP, tabs, browser creation, process execution, arbitrary network requests, credential/browser-storage access, and snapshot path writes are not capabilities.
 
-On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` exactly once for every remaining chunk in strict order before reasoning or another browser action. The transport verifies its hash, size, chunk count, job, workspace, worker, runtime, and target.
+On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. Prefer exact Ego locators such as `role:button[name="Edit"]`; Playwright-only `:has-text()` and `:contains()` syntax is invalid and must never be used. If navigation temporarily blocks the Cvent renderer, call `recover` once (up to 300 seconds), then complete-snapshot the recovered page; do not repeatedly navigate or spam probes. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` exactly once for every remaining chunk in strict order before reasoning or another browser action. The transport verifies its hash, size, chunk count, job, workspace, worker, runtime, and target.
 
 Do not default to Advanced Search or direct URL hopping. If any Cvent/Microsoft login, SSO, MFA, CAPTCHA, or expired-session page appears, immediately call `cvent_login_handoff`; do not explore alternate URLs or authentication workarounds. That capability keeps the same job, Steel browser, profile, worker, and lease alive while the user signs in and returns control. Fresh-read the complete page after return.
 

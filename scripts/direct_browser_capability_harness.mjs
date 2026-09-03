@@ -13,14 +13,14 @@ try{
  const byName=Object.fromEntries(tools.map(tool=>[tool.name,tool])),timings=[],snapshots=[];
  async function browser(params){const start=performance.now();try{const reply=await byName.cvent_browser.execute(crypto.randomUUID(),params,new AbortController().signal);timings.push({operation:params.operation,milliseconds:+(performance.now()-start).toFixed(3),error:false});return JSON.parse(reply.content[0].text)}catch(error){timings.push({operation:params.operation,milliseconds:+(performance.now()-start).toFixed(3),error:true,errorText:String(error).slice(-500)});throw error}}
  async function snapshot(operation='snapshotText'){const result=await browser({operation,intent:'read',timeoutSeconds:90});let text=result.snapshot||'';if(result.completeSnapshot){text=result.completeSnapshot.chunkText;for(let index=1;index<result.completeSnapshot.totalChunks;index++){const start=performance.now();const reply=await byName.cvent_snapshot_chunk.execute(crypto.randomUUID(),{snapshotId:result.completeSnapshot.snapshotId,chunkIndex:index});timings.push({operation:'snapshotChunk',milliseconds:+(performance.now()-start).toFixed(3),error:false});text+=JSON.parse(reply.content[0].text).chunkText}}snapshots.push(text);return text}
- const initial=await snapshot();const inventory=await snapshot('controlInventory');
- await browser({operation:'fill',intent:'write',scopeIds:['scope-007'],target:'#venue',text:'New Capability Venue'});await snapshot();
+ const initial=await snapshot();await browser({operation:'recover',intent:'read',timeoutSeconds:30});const inventory=await snapshot('controlInventory');
+ await browser({operation:'fill',intent:'write',scopeIds:['scope-007'],target:'role:textbox[name="Venue Name"]',text:'New Capability Venue'});await snapshot();
  await browser({operation:'selectOption',intent:'write',scopeIds:['scope-009'],target:'#state',option:'Florida',optionBy:'label'});await snapshot();
  await browser({operation:'setChecked',intent:'write',scopeIds:['scope-027'],target:'#browse',checked:true});await snapshot();
  await browser({operation:'search',intent:'read',target:'#search',text:'ROW-0077',submit:true});await snapshot();
  await browser({operation:'activate',intent:'read',target:'#open-modal'});
  await browser({operation:'wait',intent:'read',target:'#dynamic',ms:5000});
- await browser({operation:'click',intent:'read',target:'#dynamic'});
+ await browser({operation:'click',intent:'read',target:'role:button[name="Dynamic modal control"]'});
  await browser({operation:'press',intent:'read',target:'#close-modal',key:'Escape'});
  await browser({operation:'hover',intent:'read',target:'#hover-zone'});await snapshot();
  await browser({operation:'selectText',intent:'read',target:'#rich-link'});

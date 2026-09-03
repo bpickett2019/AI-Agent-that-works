@@ -1,0 +1,198 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-03T21:57:29.663744+00:00",
+  "scope": "deterministic production capability extension in real isolated Steel/Ego against large synthetic Cvent-like DOM; no live Cvent navigation or mutation",
+  "runtime": {
+    "slot": 2,
+    "runtimeId": "cvent-runtime-8ebdf55ca6f74b1eb199fe9a4ff6b158",
+    "targetId": "4D7319A106E7EAD35CC49192380803C5"
+  },
+  "directCapabilityExecution": {
+    "toolCount": 10,
+    "operations": [
+      "snapshotText",
+      "snapshotChunk",
+      "recover",
+      "controlInventory",
+      "fill",
+      "snapshotText",
+      "snapshotChunk",
+      "selectOption",
+      "snapshotText",
+      "snapshotChunk",
+      "setChecked",
+      "snapshotText",
+      "snapshotChunk",
+      "search",
+      "snapshotText",
+      "activate",
+      "wait",
+      "click",
+      "press",
+      "hover",
+      "snapshotText",
+      "selectText",
+      "scroll",
+      "scroll",
+      "drag",
+      "snapshotText"
+    ],
+    "timings": [
+      {
+        "operation": "snapshotText",
+        "milliseconds": 701.177,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 7.4,
+        "error": false
+      },
+      {
+        "operation": "recover",
+        "milliseconds": 654.169,
+        "error": false
+      },
+      {
+        "operation": "controlInventory",
+        "milliseconds": 667.385,
+        "error": false
+      },
+      {
+        "operation": "fill",
+        "milliseconds": 824.544,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 696.088,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 6.574,
+        "error": false
+      },
+      {
+        "operation": "selectOption",
+        "milliseconds": 736.94,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 703.642,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 7.924,
+        "error": false
+      },
+      {
+        "operation": "setChecked",
+        "milliseconds": 752.038,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 666.436,
+        "error": false
+      },
+      {
+        "operation": "snapshotChunk",
+        "milliseconds": 6.369,
+        "error": false
+      },
+      {
+        "operation": "search",
+        "milliseconds": 699.297,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 703.191,
+        "error": false
+      },
+      {
+        "operation": "activate",
+        "milliseconds": 679.561,
+        "error": false
+      },
+      {
+        "operation": "wait",
+        "milliseconds": 656.655,
+        "error": false
+      },
+      {
+        "operation": "click",
+        "milliseconds": 712.205,
+        "error": false
+      },
+      {
+        "operation": "press",
+        "milliseconds": 684.408,
+        "error": false
+      },
+      {
+        "operation": "hover",
+        "milliseconds": 691.405,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 655.994,
+        "error": false
+      },
+      {
+        "operation": "selectText",
+        "milliseconds": 661.865,
+        "error": false
+      },
+      {
+        "operation": "scroll",
+        "milliseconds": 760.159,
+        "error": false
+      },
+      {
+        "operation": "scroll",
+        "milliseconds": 775.471,
+        "error": false
+      },
+      {
+        "operation": "drag",
+        "milliseconds": 965.327,
+        "error": false
+      },
+      {
+        "operation": "snapshotText",
+        "milliseconds": 662.545,
+        "error": false
+      }
+    ],
+    "checks": {
+      "initialTail": true,
+      "inventoryComplete": true,
+      "venue": true,
+      "stateFlorida": true,
+      "browseChecked": true,
+      "searchFound": true,
+      "modalControl": true,
+      "hoverControl": true,
+      "dragged": true
+    },
+    "snapshotBytes": [
+      53410,
+      29219,
+      53421,
+      53421,
+      53419,
+      1962,
+      2039,
+      1975
+    ],
+    "snapshotCount": 8,
+    "chunkCalls": 4,
+    "passed": true
+  },
+  "passed": true
+}

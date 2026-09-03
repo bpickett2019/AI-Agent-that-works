@@ -74,6 +74,15 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertEqual(settings["retry"]["provider"]["maxRetries"], 0)
         self.assertEqual(settings["retry"]["provider"]["maxRetryDelayMs"], 60000)
 
+    def test_provider_credit_failure_is_reported_without_exposing_secrets(self):
+        (self.directory / "pi-output.log").write_text(
+            'invalid_request_error: Your credit balance is too low to access the Anthropic API\n'
+        )
+        self.assertEqual(
+            self.runner._provider_failure(self.directory),
+            "Anthropic API credit balance is too low",
+        )
+
     def test_prompt_has_job_paths_and_no_unresolved_placeholders(self):
         prompt = self.runner.render_prompt(self.job, self.directory, {})
         self.assertIn(str(self.directory.resolve()), prompt)
