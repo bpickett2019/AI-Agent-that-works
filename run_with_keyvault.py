@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 from azure.identity import ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
@@ -44,6 +45,29 @@ def load(secret_map: dict[str, str]) -> None:
         os.environ[environment_name] = value
 
 
+def validate_staging_command(command: list[str]) -> None:
+    if os.environ.get("CVENT_STAGING_TUNNEL_FALLBACK") != "1":
+        return
+    try:
+        is_bounded_probe = (
+            Path(command[0]).name == "pi"
+            and "--no-tools" in command
+            and "--no-session" in command
+            and command[command.index("--provider") + 1] == "anthropic"
+            and command[command.index("--model") + 1] == "claude-sonnet-4-6"
+        )
+    except (ValueError, IndexError):
+        is_bounded_probe = False
+    if is_bounded_probe:
+        return
+    try:
+        host = command[command.index("--host") + 1]
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError("Staging tunnel fallback must declare a loopback --host") from exc
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("Staging tunnel fallback may only bind to loopback")
+
+
 def main() -> None:
     secret_map = selected_secrets()
     load(secret_map)
@@ -51,13 +75,7 @@ def main() -> None:
         sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8877",
         "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1",
     ]
-    if os.environ.get("CVENT_STAGING_TUNNEL_FALLBACK") == "1":
-        try:
-            host = command[command.index("--host") + 1]
-        except (ValueError, IndexError) as exc:
-            raise RuntimeError("Staging tunnel fallback must declare a loopback --host") from exc
-        if host not in {"127.0.0.1", "localhost", "::1"}:
-            raise RuntimeError("Staging tunnel fallback may only bind to loopback")
+    validate_staging_command(command)
     os.execvpe(command[0], command, os.environ)
 
 

@@ -26,6 +26,20 @@ class KeyVaultRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "explicit staging tunnel fallback"):
                 run_with_keyvault.selected_secrets()
 
+    def test_staging_fallback_allows_only_loopback_app_or_bounded_probe(self):
+        environment = {"CVENT_STAGING_TUNNEL_FALLBACK": "1"}
+        probe = [
+            "/usr/local/bin/pi", "--no-tools", "--no-session",
+            "--provider", "anthropic", "--model", "claude-sonnet-4-6", "-p", "health",
+        ]
+        with patch.dict(os.environ, environment, clear=True):
+            run_with_keyvault.validate_staging_command(probe)
+            run_with_keyvault.validate_staging_command(["uvicorn", "--host", "127.0.0.1"])
+            with self.assertRaisesRegex(RuntimeError, "only bind to loopback"):
+                run_with_keyvault.validate_staging_command(["uvicorn", "--host", "0.0.0.0"])
+            with self.assertRaisesRegex(RuntimeError, "must declare a loopback"):
+                run_with_keyvault.validate_staging_command(["/bin/true"])
+
 
 if __name__ == "__main__":
     unittest.main()
