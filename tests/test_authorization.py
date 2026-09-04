@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,7 +13,7 @@ import app as cvent_app
 from browser_gate import BrowserGate
 from control_store import ControlStore
 from runtime_config import AuthorizedEvent
-from auth import EntraAuth
+from auth import EntraAuth, RESTRICTED_STAGING_HOST, RESTRICTED_STAGING_SCOPE, RESTRICTED_STAGING_VAULT
 
 
 class EntraAuthorizationTests(unittest.TestCase):
@@ -28,6 +29,25 @@ class EntraAuthorizationTests(unittest.TestCase):
         }
         with patch.dict(os.environ, environment, clear=True):
             return EntraAuth()
+
+    def test_restricted_staging_identity_is_always_non_admin(self):
+        environment = {
+            "CVENT_ENV": "development",
+            "CVENT_STAGING_TUNNEL_FALLBACK": "1",
+            "CVENT_STAGING_RESTRICTED_ACCESS": "1",
+            "CVENT_STAGING_PUBLIC_HOST": RESTRICTED_STAGING_HOST,
+            "CVENT_KEY_VAULT_URL": RESTRICTED_STAGING_VAULT,
+            "CVENT_DEPLOYMENT_SCOPE": RESTRICTED_STAGING_SCOPE,
+            "CVENT_DEV_AUTH_SUBJECT": "temporary-tester",
+            "CVENT_DEV_AUTH_ADMIN": "0",
+            "CVENT_STAGING_RESTRICTED_ACCESS_EXPIRES": (
+                datetime.now(timezone.utc) + timedelta(days=1)
+            ).isoformat(),
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            auth = EntraAuth()
+            self.assertTrue(auth.restricted_staging)
+            self.assertFalse(auth.admin_users)
 
     def test_verified_tenant_user_needs_no_manual_role_assignment(self):
         identity = self.auth().identity_from_claims({

@@ -18,7 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
-from auth import EntraAuth, Identity
+from auth import EntraAuth, Identity, restricted_staging_access
 from browser_gate import BrowserGate
 from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page
 from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
@@ -52,7 +52,7 @@ app.add_middleware(
     session_cookie="cvent_agent_session",
     max_age=8 * 60 * 60,
     same_site="lax",
-    https_only=os.environ.get("CVENT_ENV") == "production",
+    https_only=os.environ.get("CVENT_ENV") == "production" or restricted_staging_access(),
 )
 auth = EntraAuth()
 app.include_router(auth.router)

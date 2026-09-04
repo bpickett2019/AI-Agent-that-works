@@ -1,8 +1,9 @@
 # Azure staging USER 1 runbook
 
-This is the controlled fallback for one approved tester while staging Entra/DNS
-is unfinished. Forge, Steel, and CDP stay loopback-only. The operator establishes
-the tunnel; the tester does not receive a VM shell.
+This is the controlled fallback for one approved tester while staging Entra is
+unfinished. The temporary public path is protected by an Azure NSG source-IP
+allowlist and Caddy Basic Auth. Forge, Steel, and CDP stay loopback-only. Entra
+remains the required final authentication method.
 
 ## Administrator: add the Anthropic key without exposing it
 
@@ -29,20 +30,16 @@ The operator will perform exactly one provider probe.
 Prerequisites on the tester machine:
 
 - a modern browser;
-- network egress to SSH port 22;
-- the tester's current public IPv4 approved in the staging NSG;
-- an operator-controlled SSH credential for the VM tunnel.
+- the tester's current public IPv4 explicitly approved for TCP 443 in the staging NSG;
+- the temporary Basic Auth username and password delivered through an approved channel.
 
-The operator runs and keeps open:
+The tester opens `https://staging.app-chartsdarts-dashboard.com/?worker=1` and
+enters the temporary Basic Auth credential. The page must visibly say
+**RESTRICTED STAGING ACCESS**. Never browse to the VM public IP on port 8877.
+Ports 3005-3007 and 9334-9336 must remain private.
 
-```bash
-ssh -N -o ExitOnForwardFailure=yes \
-  -L 8877:127.0.0.1:8877 \
-  piadmin@57.154.50.217
-```
-
-The tester opens `http://127.0.0.1:8877/?worker=1`. Never browse to the VM public
-IP on port 8877. Do not forward ports 3005-3007 or 9334-9336.
+The old SSH loopback tunnel is emergency/operator access only; it is not the
+normal tester workflow and SSH remains restricted to the operator source IP.
 
 ## Tester workflow
 

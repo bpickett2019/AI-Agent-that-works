@@ -10,10 +10,21 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from azure.identity import ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
+
+RESTRICTED_STAGING_SETTINGS = {
+    "CVENT_ENV": "development",
+    "CVENT_STAGING_TUNNEL_FALLBACK": "1",
+    "CVENT_STAGING_RESTRICTED_ACCESS": "1",
+    "CVENT_STAGING_PUBLIC_HOST": "staging.app-chartsdarts-dashboard.com",
+    "CVENT_KEY_VAULT_URL": "https://kvcventstg729.vault.azure.net/",
+    "CVENT_DEPLOYMENT_SCOPE": "rg-chartdarts-stg",
+    "CVENT_DEV_AUTH_ADMIN": "0",
+}
 
 SECRET_ENV_MAP = {
     "anthropic-api-key": "ANTHROPIC_API_KEY",
@@ -22,11 +33,28 @@ SECRET_ENV_MAP = {
 }
 
 
+def validate_restricted_staging() -> None:
+    if os.environ.get("CVENT_STAGING_RESTRICTED_ACCESS") != "1":
+        return
+    mismatches = [name for name, value in RESTRICTED_STAGING_SETTINGS.items() if os.environ.get(name) != value]
+    try:
+        expires = datetime.fromisoformat(os.environ["CVENT_STAGING_RESTRICTED_ACCESS_EXPIRES"].replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        time_bounded = now < expires <= now + timedelta(days=14)
+    except (KeyError, ValueError, TypeError):
+        time_bounded = False
+    if mismatches or not time_bounded:
+        raise RuntimeError("Restricted access is valid only for the explicit, time-bounded non-admin staging deployment")
+
+
 def selected_secrets() -> dict[str, str]:
     environment = os.environ.get("CVENT_ENV")
     if environment == "production":
+        if os.environ.get("CVENT_STAGING_RESTRICTED_ACCESS") == "1":
+            raise RuntimeError("Restricted staging access cannot run in production")
         return SECRET_ENV_MAP
     if environment == "development" and os.environ.get("CVENT_STAGING_TUNNEL_FALLBACK") == "1":
+        validate_restricted_staging()
         return {"anthropic-api-key": "ANTHROPIC_API_KEY"}
     raise RuntimeError("Key Vault runtime requires production or the explicit staging tunnel fallback")
 

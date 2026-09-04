@@ -5,11 +5,40 @@ import hmac
 import os
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import msal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
+
+
+RESTRICTED_STAGING_HOST = "staging.app-chartsdarts-dashboard.com"
+RESTRICTED_STAGING_VAULT = "https://kvcventstg729.vault.azure.net/"
+RESTRICTED_STAGING_SCOPE = "rg-chartdarts-stg"
+
+
+def restricted_staging_access() -> bool:
+    requested = os.environ.get("CVENT_STAGING_RESTRICTED_ACCESS") == "1"
+    if not requested:
+        return False
+    valid = (
+        os.environ.get("CVENT_ENV") == "development"
+        and os.environ.get("CVENT_STAGING_TUNNEL_FALLBACK") == "1"
+        and os.environ.get("CVENT_STAGING_PUBLIC_HOST") == RESTRICTED_STAGING_HOST
+        and os.environ.get("CVENT_KEY_VAULT_URL") == RESTRICTED_STAGING_VAULT
+        and os.environ.get("CVENT_DEPLOYMENT_SCOPE") == RESTRICTED_STAGING_SCOPE
+        and os.environ.get("CVENT_DEV_AUTH_ADMIN", "0") == "0"
+    )
+    try:
+        expires = datetime.fromisoformat(os.environ["CVENT_STAGING_RESTRICTED_ACCESS_EXPIRES"].replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        valid = valid and now < expires <= now + timedelta(days=14)
+    except (KeyError, ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise RuntimeError("Restricted access is valid only for the explicit, time-bounded non-admin staging deployment")
+    return True
 
 
 @dataclass(frozen=True)
@@ -33,6 +62,7 @@ class Identity:
 class EntraAuth:
     def __init__(self) -> None:
         self.environment = os.environ.get("CVENT_ENV", "development")
+        self.restricted_staging = restricted_staging_access()
         self.tenant_id = os.environ.get("ENTRA_TENANT_ID", "")
         self.client_id = os.environ.get("ENTRA_CLIENT_ID", "")
         self.client_secret = os.environ.get("ENTRA_CLIENT_SECRET", "")
@@ -126,7 +156,9 @@ class EntraAuth:
                 is_admin=bool(value.get("is_admin")),
             )
         if self.environment == "development" and os.environ.get("CVENT_DEV_AUTH_SUBJECT"):
-            is_admin = os.environ.get("CVENT_DEV_AUTH_ADMIN", "0") == "1"
+            if self.restricted_staging:
+                restricted_staging_access()  # Fail closed after the temporary window expires.
+            is_admin = False if self.restricted_staging else os.environ.get("CVENT_DEV_AUTH_ADMIN", "0") == "1"
             identity = Identity(
                 subject="dev:" + os.environ["CVENT_DEV_AUTH_SUBJECT"],
                 email=os.environ.get("CVENT_DEV_AUTH_EMAIL", "developer@localhost"),
