@@ -107,7 +107,7 @@ class RRCompilerTests(unittest.TestCase):
             questions.cell(5, 1, "Show Questions")
             questions.cell(5, 2, "TESTQ")
             questions.cell(5, 3, "Individual")
-            questions.cell(5, 4, "Test question?")
+            questions.cell(5, 4, 'Test question? Link policy to https://example.com/privacy/')
             questions.cell(5, 7, "Single Select")
             questions.cell(5, 8, "Yes")
             questions.cell(5, 10, "ATT")
@@ -122,6 +122,9 @@ class RRCompilerTests(unittest.TestCase):
             self.assertEqual(expected["counts"]["admissionRecords"], 1)
             self.assertEqual(expected["counts"]["discountRecords"], 1)
             self.assertEqual(expected["domains"]["questions"]["items"][0]["fields"]["internal_name"]["value"], "TESTQ")
+            self.assertEqual(expected["counts"]["siteLinkRecords"], 1)
+            self.assertEqual(expected["domains"]["site_designer"]["inlineContentLinks"][0]["target"]["value"], "https://example.com/privacy/")
+            self.assertEqual(expected["domains"]["site_designer"]["inlineContentLinks"][0]["target"]["source"], "Show Questions!D5")
             self.assertNotIn("scopeId", json.dumps(expected))
             import_file = job_dir / "discount-import.xlsx"
             self.assertTrue(import_file.exists())

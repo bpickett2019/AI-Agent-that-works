@@ -305,7 +305,7 @@ async function rememberSectionRoute(url: string, explicitDomain?: string): Promi
 function desiredSectionRecords(domain: string, expected: any): any[] {
   const section = expected.domains?.[domain] ?? {};
   if (domain === "discounts_vouchers") return section.discounts ?? [];
-  if (domain === "site_designer") return [...(section.footerLinks ?? []), ...(section.socialLinks ?? []), ...(section.countdownMessages ?? [])];
+  if (domain === "site_designer") return [...(section.footerLinks ?? []), ...(section.socialLinks ?? []), ...(section.countdownMessages ?? []), ...(section.inlineContentLinks ?? [])];
   if (domain === "event_settings") return Object.entries(section.fields ?? {}).map(([name, field]: any) => ({ matchReference: name.replace(/_/g, " "), fields: { [name]: field } }));
   return section.items ?? section.requirements ?? section.badgeRequirements ?? [];
 }

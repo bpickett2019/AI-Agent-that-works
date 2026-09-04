@@ -478,6 +478,23 @@ try:
         group_discounts = populated_records(group_ws, "Group_Volume Discounts", 2, 3, group_columns, required=("name",))
 
     questions = question_records(question_ws, question_sheet)
+    inline_content_links = []
+    seen_inline_links = set()
+    for question in questions:
+        for field_name, evidence in question.get("fields", {}).items():
+            value = evidence.get("value") if isinstance(evidence, dict) else None
+            if not isinstance(value, str):
+                continue
+            for match in re.findall(r'https?://[^\s<>"\']+', value, re.IGNORECASE):
+                url = match.rstrip(".,;:)]}")
+                key = (evidence.get("source"), url)
+                if key in seen_inline_links:
+                    continue
+                seen_inline_links.add(key)
+                inline_content_links.append({
+                    "label": f"Inline link in {question.get('matchReference') or field_name}",
+                    "target": field(url, evidence["source"]),
+                })
     policies = []
     if "Policies & Rules" in wb.sheetnames:
         policy_ws = wb["Policies & Rules"]
@@ -500,7 +517,7 @@ try:
 
     domains = {
         "event_settings": {"fields": event_fields, "policies": policies},
-        "site_designer": {"footerLinks": links, "countdownMessages": countdown_messages, "socialLinks": social},
+        "site_designer": {"footerLinks": links, "countdownMessages": countdown_messages, "socialLinks": social, "inlineContentLinks": inline_content_links},
         "registration_paths": {"items": list(paths.values())},
         "registration_types": {"items": list(reg_types_by_key.values())},
         "admission_items": {"items": list(admissions_by_key.values())},
@@ -543,7 +560,7 @@ try:
             "pricingRecords": len(prices), "discountRecords": len(discounts),
             "groupDiscountRecords": len(group_discounts), "questionRecords": len(questions),
             "optionalItemRecords": len(optional_items), "sessionRecords": len(sessions),
-            "siteLinkRecords": len(links) + len(social), "integrationRequirementRows": len(integration_requirements),
+            "siteLinkRecords": len(links) + len(social) + len(inline_content_links), "integrationRequirementRows": len(integration_requirements),
             "communicationRequirementRows": len(communication_requirements), "badgeOnsiteRequirementRows": len(badge_requirements) + len(scan_go_requirements),
         },
     }
