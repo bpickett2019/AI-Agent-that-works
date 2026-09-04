@@ -140,6 +140,7 @@ def main():
     expected = json.loads(EXPECTED.read_text(encoding="utf-8"))
     workbook = load_workbook(RR, data_only=True, read_only=False)
     items = []
+    context_cache = {}
     try:
         for domain in ORDER:
             for path, source, desired in evidence_nodes(expected.get("domains", {}).get(domain, {}), (domain,)):
@@ -148,7 +149,10 @@ def main():
                     ws, bounds, raw_values = source_values(workbook, source)
                     status = "VERIFIED" if independently_supported(desired, raw_values) else "AMBIGUOUS"
                     error = None
-                    context = section_context(ws, bounds)
+                    context_key = (ws.title, bounds[1])
+                    if context_key not in context_cache:
+                        context_cache[context_key] = section_context(ws, bounds)
+                    context = context_cache[context_key]
                 except Exception as exc:
                     raw_values, context, status, error = [], [], "NOT_SUPPORTED_BY_RR", str(exc)
                 items.append({
