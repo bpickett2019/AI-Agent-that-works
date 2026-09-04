@@ -6,7 +6,7 @@ import { Type } from "typebox";
 
 const BROWSER_OPERATION_NAMES = [
   "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
-  "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover",  "selectOption", "setChecked", "press", "search", "selectText", "drag",
+  "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport",
 ];
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
@@ -258,7 +258,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     params.maxScrolls = Math.max(1, Math.min(Number(input.maxScrolls ?? 30), 60));
   }
   if (operation === "scanEventList") params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
-  if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait"].includes(operation) && input.target) {
+  if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait", "uploadDiscountImport"].includes(operation) && input.target) {
     params.target = cleanText(input.target, 4000);
     if (input.targetContext) params.targetContext = cleanText(input.targetContext, 1000);
     if (Number.isInteger(input.targetIndex)) params.targetIndex = Math.max(0, Math.min(Number(input.targetIndex), 20));
@@ -272,6 +272,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
   if (operation === "press") params.key = cleanText(input.key, 40);
   if (operation === "search") params.submit = input.submit !== false;
   if (operation === "drag") params.destination = cleanText(input.destination, 4000);
+  if (operation === "uploadDiscountImport") params.artifact = "discount-import.xlsx";
   if (operation === "navigate") params.url = cleanText(input.url, 8000);
   if (operation === "scroll") {
     params.deltaY = Math.max(-10000, Math.min(Number(input.deltaY ?? 700), 10000));
@@ -668,7 +669,7 @@ export default function cventJobTools(pi: any) {
       if (!BROWSER_OPERATIONS.has(operation)) throw new Error("Capability denied: browser operation is not approved");
       if (!new Set(["read", "write"]).has(params.intent)) throw new Error("Capability denied: explicit read or write intent is required");
       if (READ_ONLY_OPERATIONS.has(operation) && params.intent !== "read") throw new Error(`${operation} is a read-only capability`);
-      if (["fill", "type", "selectOption", "setChecked", "drag"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
+      if (["fill", "type", "selectOption", "setChecked", "drag", "uploadDiscountImport"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
       if (operation === "press" && !ALLOWED_KEYS.has(String(params.key))) throw new Error("Capability denied: keyboard key is not approved");
       if (operation === "press" && ["Backspace", "Delete"].includes(String(params.key)) && params.intent !== "write") throw new Error(`${params.key} requires write intent`);
       if (operation === "selectOption" && !["label", "value", undefined].includes(params.optionBy)) throw new Error("Capability denied: optionBy must be label or value");

@@ -36,7 +36,7 @@ Use only the fixed `cvent_*` tools. You have no shell, generic filesystem, raw C
 - `cvent_expectations`: read the RR summary, protected actions, capability gaps, or a configuration domain. Page large arrays with `offset` and `limit`.
 - `cvent_job_read`, `cvent_job_update`, and `cvent_record_domain`: read and update job evidence and progress.
 - `cvent_login_handoff`: hand the existing isolated browser to the user for SSO/MFA only when required.
-- `cvent_browser`: read and configure Cvent through Ego in the canonical Steel browser.
+- `cvent_browser`: read and configure Cvent through Ego in the canonical Steel browser; `uploadDiscountImport` attaches the fixed RR-derived `discount-import.xlsx` to Cvent's Import Discounts wizard without accepting a model-supplied path.
 - `cvent_snapshot_chunk`: consume every chunk of a large complete snapshot in order.
 - `cvent_finish`: write the final result, terminate this agent, and allow the worker and event lease to be released.
 
@@ -61,7 +61,7 @@ Use `intent: write` for form edits and any click/key/drag that can mutate event 
 
 ## Continuous domain workflow
 
-Process all populated domains in the compiled RR, not merely a fixed MVP subset:
+Process all populated domains in the compiled RR, not merely a fixed MVP subset. For large discount sets, use Cvent's Actions → Import Discounts workflow and the bounded `uploadDiscountImport` operation, map the preserved RR columns, review the count, finish the draft import, and verify the resulting codes/settings. Re-import by stable Discount Code may update existing rows in bulk.
 
 1. Read the domain requirements.
 2. Read the corresponding current configuration in the selected event.

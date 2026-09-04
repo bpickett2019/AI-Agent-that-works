@@ -9,7 +9,7 @@ from browser_gate import action
 from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
-EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
+EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'}
 INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
 def event_key(url):
     try:
@@ -148,6 +148,14 @@ def preflight_write_target(runtime_path,operation,params):
         assert_safe_write_target(operation,params,descriptor)
         resolved[key]=result.get('resolvedTarget') or target
     return resolved
+def fixed_upload_artifact(params):
+    if params.get('artifact')!='discount-import.xlsx':raise RuntimeError('Only the compiled RR discount import artifact may be uploaded')
+    candidate=CURRENT/'discount-import.xlsx';info=candidate.lstat()
+    if candidate.is_symlink() or not candidate.is_file() or info.st_size>25*1024*1024:raise RuntimeError('Discount import artifact is invalid')
+    path=candidate.resolve()
+    if path.parent!=CURRENT.resolve():raise RuntimeError('Upload artifact escaped the private job workspace')
+    return path
+
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
     if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
@@ -168,6 +176,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         is_write=params.get('intent')=='write'
         if is_write:
             params=preflight_write_target(runtime_path,operation,params)
+            if operation=='uploadDiscountImport':params['filePath']=str(fixed_upload_artifact(params))
             audit_scope_write(operation,params,current,'attempted')
         try:
             proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))

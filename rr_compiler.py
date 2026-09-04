@@ -10,7 +10,7 @@ import tempfile
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
 ROOT = Path(__file__).resolve().parent
@@ -69,6 +69,35 @@ def atomic_json(path, payload):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def write_discount_import(path, source_ws, header_row, records):
+    workbook = Workbook(write_only=False)
+    sheet = workbook.active
+    sheet.title = "Discount Codes"
+    columns = list(range(1, 17))
+    sheet.append([clean(source_ws.cell(header_row, column).value) for column in columns])
+    method_column = 4
+    amount_column = 5
+    for record in records:
+        row = record["sourceRow"]
+        values = [source_ws.cell(row, column).value for column in columns]
+        method = str(clean(values[method_column - 1]) or "")
+        if re.fullmatch(r"amount off", method, re.I):
+            values[method_column - 1] = "Subtract an amount"
+        elif re.fullmatch(r"percent(?:age)? off", method, re.I):
+            values[method_column - 1] = "Subtract a percentage"
+        if "percentage" in str(values[method_column - 1]).lower() and "%" in source_ws.cell(row, amount_column).number_format:
+            amount = values[amount_column - 1]
+            if isinstance(amount, (int, float)):
+                values[amount_column - 1] = amount * 100
+        sheet.append(values)
+    temporary = path.with_name(path.name + ".tmp.xlsx")
+    workbook.save(temporary)
+    workbook.close()
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return {"path": str(path), "records": len(records), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def value_map(ws):
@@ -324,6 +353,8 @@ try:
         "sessions": matching_column(discount_headers, "sessions"),
     }
     discounts = populated_records(discount_ws, "Discount Code Template", 3, 4, discount_columns, required=("name", "code"))
+    discounts = [item for item in discounts if str(item["fields"].get("active", {}).get("value", "")).strip().lower() == "yes"]
+    discount_import = write_discount_import(JOB_DIR / "discount-import.xlsx", discount_ws, 3, discounts)
 
     optional_items = []
     if "Optional Items" in wb.sheetnames:
@@ -361,18 +392,6 @@ try:
     scan_go_requirements = raw_rows(wb["Onsite Scan & Go Screen"], "Onsite Scan & Go Screen", 3, 11, range(5, 8)) if "Onsite Scan & Go Screen" in wb.sheetnames else []
     approval_requirements = raw_rows(wb["Approvals"], "Approvals", 4, 24, range(1, 4)) if "Approvals" in wb.sheetnames else []
     capability_gaps = []
-    if len(discounts) > 100:
-        capability_gaps.append({
-            "domain": "discounts_vouchers", "records": len(discounts),
-            "missingCapability": "Cvent bulk discount import or authenticated write API",
-            "reason": "Per-record browser creation is not a reliable full-RR bulk path.",
-        })
-    if communication_requirements:
-        capability_gaps.append({
-            "domain": "communications", "records": len(communication_requirements),
-            "missingCapability": "Cvent-specific draft communication editor that cannot activate, schedule, test, or send",
-            "reason": "The generic browser can edit event templates, but RR activation/scheduling requests cannot be executed under the no-communications safeguard.",
-        })
     if approval_requirements and not any(record["values"].get("A") and record["values"].get("B") for record in approval_requirements):
         capability_gaps.append({
             "domain": "associations", "missingCapability": "none",
@@ -391,7 +410,7 @@ try:
         "questions": {"items": questions},
         "sessions": {"items": sessions},
         "integrations": {"requirements": integration_requirements},
-        "communications": {"requirements": communication_requirements, "constraint": "Configure draft content/settings only; never activate, schedule, test, or send."},
+        "communications": {"requirements": communication_requirements, "constraint": "Event-scoped templates and triggered-confirmation settings may be configured; never manually send, test-send, schedule a blast, or access recipients."},
         "badges_onsite": {"badgeRequirements": badge_requirements, "scanAndGoText": scan_go_requirements},
         "associations": {"approvalRequirements": approval_requirements},
         "final_qa": {"checks": ["selected event identity unchanged", "event remains unpublished", "all RR-requested event configuration reread", "no unintended duplicates", "no communications sent", "no attendee/contact access"]},
@@ -416,6 +435,7 @@ try:
             "selected event identity", "publish/go live", "delete/archive", "communications",
             "attendees/contacts", "account-global or reusable definitions",
         ],
+        "artifacts": {"discountImport": discount_import},
         "capabilityGaps": capability_gaps,
         "counts": {
             "applicableFields": count_fields(domains),

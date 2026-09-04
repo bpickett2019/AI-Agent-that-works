@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +117,15 @@ class RRCompilerTests(unittest.TestCase):
             self.assertEqual(expected["counts"]["discountRecords"], 1)
             self.assertEqual(expected["domains"]["questions"]["items"][0]["fields"]["internal_name"]["value"], "TESTQ")
             self.assertNotIn("scopeId", json.dumps(expected))
+            import_file = job_dir / "discount-import.xlsx"
+            self.assertTrue(import_file.exists())
+            imported = load_workbook(import_file, data_only=True, read_only=True)
+            try:
+                self.assertEqual(imported.active["B1"].value, "Discount Code")
+                self.assertEqual(imported.active["B2"].value, "TEST10")
+                self.assertEqual(imported.active["D2"].value, "Subtract an amount")
+            finally:
+                imported.close()
 
 
 if __name__ == "__main__":

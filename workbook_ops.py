@@ -99,7 +99,7 @@ def edited_cell_value(cell, text):
 
 def reset_after_edit(directory: Path, filename: str) -> None:
     for name in (
-        "benchmark-results.json", "build-checklist.json", "domain-results.json", "expected-domains.json",
+        "benchmark-results.json", "build-checklist.json", "discount-import.xlsx", "domain-results.json", "expected-domains.json",
         "input.inspection.json", "input.inspection-summary.json", "review-required.json", "rr-checklist.json",
         "rr-execution-checklist.json", "rr-focus.json", "rr-focused.txt", "rr-inspection.json",
         "rr-inspection-summary.json", "rr-question-checklist.json",

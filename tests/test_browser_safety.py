@@ -202,6 +202,16 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
         self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
 
+    def test_only_fixed_rr_discount_artifact_can_be_uploaded(self):
+        artifact=self.base/'discount-import.xlsx';artifact.write_bytes(b'xlsx')
+        self.assertEqual(browser_tool.fixed_upload_artifact({'artifact':'discount-import.xlsx'}),artifact.resolve())
+        with self.assertRaisesRegex(RuntimeError,'Only the compiled RR'):
+            browser_tool.fixed_upload_artifact({'artifact':'other.xlsx'})
+        artifact.unlink();artifact.symlink_to(self.base/'outside.xlsx')
+        (self.base/'outside.xlsx').write_bytes(b'outside')
+        with self.assertRaisesRegex(RuntimeError,'escaped|invalid'):
+            browser_tool.fixed_upload_artifact({'artifact':'discount-import.xlsx'})
+
     def test_preflight_can_replace_role_locator_before_write_dispatch(self):
         resolved=subprocess.CompletedProcess(['node'],0,
             'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"SELECT","connected":true,"disabled":false},"resolvedTarget":"[data-cvent-agent-target=\\"one\\"]","fallbackUsed":true}\n','')
@@ -290,7 +300,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('cvent_execute',extension)
         self.assertNotIn('cvent_run_js',extension)
         self.assertNotIn('cvent_raw_cdp',extension)
-        for operation in ('recover','authStatus','openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag'):
+        for operation in ('recover','authStatus','openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag','uploadDiscountImport'):
             self.assertIn(f'"{operation}"',extension)
         self.assertIn('Snapshot chunks must be read exactly once in order',extension)
         self.assertIn('Snapshot worker/browser/job identity mismatch',extension)
@@ -305,6 +315,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('snapshotCacheHit',EGO_DIRECT)
         self.assertIn('MutationObserver',EGO_DIRECT)
         self.assertIn('fallbackUsed',EGO_DIRECT)
+        self.assertIn("ego.setInputFiles(params.target,params.filePath)",EGO_DIRECT)
+        self.assertIn('params.artifact = "discount-import.xlsx"',extension)
         self.assertNotIn('name: "bash"',extension)
         self.assertNotIn('name: "read"',extension)
         self.assertIn('name: "cvent_login_handoff"',extension)

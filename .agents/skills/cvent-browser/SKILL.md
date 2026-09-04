@@ -24,7 +24,7 @@ Use `intent: write` for mutations. An optional `rrSource` can identify the relev
 
 ## Browser operations
 
-Use complete `snapshotText` reads and `controlInventory` only for selector recovery. Consume all chunks of a large snapshot in strict order. Prefer exact role/name locators. `selectOption` supports native selects and exact-label Cvent custom comboboxes. Repeated exact controls can be resolved before dispatch with an observed `targetContext` and, only when necessary, the fresh inventory's zero-based `targetIndex`.
+Use complete `snapshotText` reads and `controlInventory` only for selector recovery. Consume all chunks of a large snapshot in strict order. Prefer exact role/name locators. `selectOption` supports native selects and exact-label Cvent custom comboboxes. Repeated exact controls can be resolved before dispatch with an observed `targetContext` and, only when necessary, the fresh inventory's zero-based `targetIndex`. For large discount sets, use Cvent's Import Discounts wizard with `uploadDiscountImport`; it can upload only the fixed RR-derived job artifact and accepts no path.
 
 On unfamiliar pages: read → scroll → understand → configure → Save → fresh reread. Use `recover` once if rendering stalls. Never blindly retry an uncertain write.
 
