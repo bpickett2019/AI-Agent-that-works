@@ -96,7 +96,8 @@ def marker_script(marker):
     )
 
 
-def initialize(job_dir=None, slot_id=None, authorized_name=None, authorized_event_id=None, authorized_event_key=None, viewer_url=None):
+def initialize(job_dir=None, slot_id=None, authorized_name=None, authorized_event_id=None, authorized_event_key=None,
+               viewer_url=None, profile_path=None):
     current = Path(job_dir or CURRENT)
     slot = slot_by_id(int(slot_id or os.environ.get("CVENT_WORKER_SLOT", "1")))
     cdp_http = os.environ.get("CVENT_CDP_ORIGIN", slot.cdp_origin)
@@ -117,7 +118,7 @@ def initialize(job_dir=None, slot_id=None, authorized_name=None, authorized_even
         "steelWorkspaceId": current.name,
         "providerSessionId": slot.container_name,
         "workerSlot": slot.slot_id,
-        "profilePath": str(Path(os.environ.get("CVENT_BROWSER_PROFILE_DIR", current / "chromium-profile")).resolve()),
+        "profilePath": str(Path(profile_path or os.environ.get("CVENT_BROWSER_PROFILE_DIR", current / "chromium-profile")).resolve()),
         "apiOrigin": api_origin,
         "cdpEndpoint": browser_ws,
         "cdpHttpOrigin": cdp_http,

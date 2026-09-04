@@ -276,6 +276,7 @@ class JobRunner:
             runtime = initialize_browser_runtime(
                 directory, active.slot_id, job["event_name"], job["event_id"], job["event_key"],
                 f"/api/jobs/{job['id']}/viewer",
+                profile_path=browser_profile_dir(job["workspace_id"], active.slot_id),
             )
             BrowserGate(directory).initialize()
             prompt = self.render_prompt(job, directory, runtime)
