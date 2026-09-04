@@ -176,6 +176,27 @@ class AuthorizationTests(unittest.TestCase):
             self.assertEqual(gate.read()["ownership"], "AGENT")
             resume.assert_called_once_with(job["id"], "dev:user-one")
 
+    def test_start_returns_immediate_409_for_busy_event_or_capacity(self):
+        with TestClient(cvent_app.app) as client:
+            me = client.get("/api/me").json()
+            user = self.store.ensure_user("dev:user-one", "one@example.test", "User One", False)
+            job = self.make_job(user, "busy")
+            directory = Path(self.temp.name) / "busy-start"
+            directory.mkdir()
+            (directory / "input.xlsx").touch()
+            BrowserGate(directory).initialize()
+            headers = {"X-CSRF-Token": me["csrf"]}
+            for message in (
+                "Event is busy; another job holds the canonical event lease",
+                "All three worker slots are busy",
+            ):
+                with patch.object(cvent_app, "directory_for", return_value=directory), \
+                     patch.object(cvent_app, "scope_summary", return_value={"valid": True}), \
+                     patch.object(cvent_app.runner, "start", side_effect=ValueError(message)):
+                    response = client.post(f"/api/start?job_id={job['id']}", headers=headers)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["detail"], message)
+
     def test_unauthenticated_api_is_rejected(self):
         del os.environ["CVENT_DEV_AUTH_SUBJECT"]
         with TestClient(cvent_app.app) as client:

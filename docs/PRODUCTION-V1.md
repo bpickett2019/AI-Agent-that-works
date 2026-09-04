@@ -162,12 +162,13 @@ curl -fsS http://127.0.0.1:8877/healthz
 - **Worker/Steel failure:** lease heartbeat expires, job becomes
   `failed_uncertain`, named container is removed on controller restart, and the
   next job starts with a fresh preflight/readback.
-- **Application restart:** active jobs fail closed as uncertain; queued jobs are
-  retained and may schedule after restart.
+- **Application restart:** active jobs fail closed as uncertain. Legacy queued
+  jobs are cancelled safely and require an explicit restart; no job auto-runs.
 - **VM restart:** SQLite, profiles, and artifacts persist on the managed data
   disk. Azure Backup protects OS and data disks daily for 14 days.
-- **Capacity:** a fourth different-event job queues. Jobs for the same canonical
-  event serialize even when slots are free.
+- **Capacity:** a fourth simultaneous job receives HTTP 409 immediately and
+  remains safely restartable. A second job for an already leased canonical
+  event also receives HTTP 409 immediately. V1 has no waiting queue.
 - **Human control:** explicit takeover pauses that job's process group only after
   acquiring its gate; return shields first and requires fresh Ego/runtime/event
   verification before resume.

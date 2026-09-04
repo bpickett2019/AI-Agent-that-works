@@ -8,8 +8,9 @@ Each active job has its own Pi process/session/config, pinned Steel container,
 Chromium profile/cache, API/CDP endpoints, BrowserRuntime, Ego process calls,
 BrowserActionGate, authenticated viewer, files, logs, evidence, and report.
 SQLite/WAL provides crash-safe host-wide worker and canonical Cvent event leases.
-Jobs for different approved events can use all three workers; jobs for the same
-event serialize.
+Jobs for different approved events can use all three workers. A same-event job
+or a fourth simultaneous job is rejected immediately with HTTP 409 and remains
+safely restartable; V1 has no waiting queue.
 
 Pi is explicitly configured as `anthropic/claude-sonnet-4-6`. The Anthropic key
 is read only from `ANTHROPIC_API_KEY`; Azure production loads it from Key Vault

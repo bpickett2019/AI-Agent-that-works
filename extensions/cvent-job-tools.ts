@@ -485,7 +485,7 @@ export default function cventJobTools(pi: any) {
       return withQueue("job-files", async () => {
         const allowedStatuses = new Set(["running", "login_required", "review_required"]);
         if (params.status && !allowedStatuses.has(params.status)) throw new Error("Capability denied: invalid progress status");
-        if (params.stage && !DOMAINS.has(params.stage) && !["starting", "target_discovery", "queued"].includes(params.stage)) {
+        if (params.stage && !DOMAINS.has(params.stage) && !["starting", "target_discovery"].includes(params.stage)) {
           throw new Error("Capability denied: invalid job stage");
         }
         const path = join(jobDir, "state.json");

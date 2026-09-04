@@ -187,58 +187,63 @@ class ControlStore:
                 rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [dict(row) for row in rows]
 
-    def queue_job(self, job_id: str, actor: str) -> None:
-        now = iso()
-        with self.immediate() as conn:
-            current = conn.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if not current or current["state"] not in {"draft", "login_required", "review_required", "failed", "failed_prewrite", "cancelled"}:
-                raise ValueError("Job cannot be queued from its current state")
-            conn.execute(
-                "UPDATE jobs SET state='queued',queued_at=?,finished_at=NULL,error=NULL,updated_at=? WHERE id=?",
-                (now, now, job_id),
-            )
-            self._audit(conn, actor, "job.queued", job_id, {})
+    def reserve_now(self, job_id: str, actor: str) -> dict[str, Any]:
+        """Immediately acquire a worker and event lease or reject without waiting.
 
-    def acquire(self, job_id: str) -> dict[str, Any] | None:
-        """Atomically acquire one worker and the canonical event lease.
-
-        Returning None means the job remains queued; no partial lease is possible.
+        A rejected job stays in its safely restartable prior state. Event
+        contention is checked before worker capacity so callers receive the
+        most specific 409 reason. No externally visible queued state exists.
         """
         now_dt = utcnow()
         now = iso(now_dt)
         expires = iso(now_dt + timedelta(seconds=self.lease_seconds))
+        result: dict[str, Any]
         with self.immediate() as conn:
             self._expire_stale(conn, now)
             job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if not job or job["state"] != "queued":
-                return None
-            event_busy = conn.execute("SELECT 1 FROM event_leases WHERE event_id=?", (job["event_id"],)).fetchone()
-            if event_busy:
-                return None
-            occupied = {row[0] for row in conn.execute("SELECT slot_id FROM worker_leases")}
-            preferred = job["preferred_slot"]
-            slot_id = preferred if preferred in range(1, self.slots + 1) and preferred not in occupied else (
-                next((slot for slot in range(1, self.slots + 1) if slot not in occupied), None) if preferred is None else None
-            )
-            if slot_id is None:
-                return None
-            token = uuid.uuid4().hex
-            values = (job_id, token, now, now, expires)
-            conn.execute(
-                "INSERT INTO event_leases(event_id,holder_job_id,token,acquired_at,heartbeat_at,expires_at) VALUES(?,?,?,?,?,?)",
-                (job["event_id"], *values),
-            )
-            conn.execute(
-                "INSERT INTO worker_leases(slot_id,holder_job_id,token,acquired_at,heartbeat_at,expires_at) VALUES(?,?,?,?,?,?)",
-                (slot_id, *values),
-            )
-            conn.execute(
-                """UPDATE jobs SET state='starting',slot_id=?,lease_token=?,started_at=COALESCE(started_at,?),
-                heartbeat_at=?,updated_at=? WHERE id=?""",
-                (slot_id, token, now, now, now, job_id),
-            )
-            self._audit(conn, "system", "leases.acquired", job_id, {"slot_id": slot_id, "event_id": job["event_id"]})
-            return {"slot_id": slot_id, "token": token, "event_id": job["event_id"], "expires_at": expires}
+            startable = {"draft", "login_required", "review_required", "failed", "failed_prewrite", "cancelled"}
+            if not job or job["state"] not in startable:
+                result = {"error": "Job cannot be started from its current state"}
+            elif conn.execute("SELECT 1 FROM event_leases WHERE event_id=?", (job["event_id"],)).fetchone():
+                result = {"error": "Event is busy; another job holds the canonical event lease"}
+                self._audit(conn, actor, "job.start_rejected", job_id, {"reason": "event_busy"})
+            else:
+                occupied = {row[0] for row in conn.execute("SELECT slot_id FROM worker_leases")}
+                preferred = job["preferred_slot"]
+                slot_id = preferred if preferred in range(1, self.slots + 1) and preferred not in occupied else (
+                    next((slot for slot in range(1, self.slots + 1) if slot not in occupied), None)
+                    if preferred is None else None
+                )
+                if slot_id is None:
+                    message = (
+                        f"Selected worker slot {preferred} is busy"
+                        if preferred is not None else "All three worker slots are busy"
+                    )
+                    result = {"error": message}
+                    self._audit(conn, actor, "job.start_rejected", job_id, {"reason": "worker_busy"})
+                else:
+                    token = uuid.uuid4().hex
+                    values = (job_id, token, now, now, expires)
+                    conn.execute(
+                        "INSERT INTO event_leases(event_id,holder_job_id,token,acquired_at,heartbeat_at,expires_at) VALUES(?,?,?,?,?,?)",
+                        (job["event_id"], *values),
+                    )
+                    conn.execute(
+                        "INSERT INTO worker_leases(slot_id,holder_job_id,token,acquired_at,heartbeat_at,expires_at) VALUES(?,?,?,?,?,?)",
+                        (slot_id, *values),
+                    )
+                    conn.execute(
+                        """UPDATE jobs SET state='starting',slot_id=?,lease_token=?,queued_at=NULL,
+                        started_at=COALESCE(started_at,?),finished_at=NULL,heartbeat_at=?,error=NULL,
+                        uncertain=0,updated_at=? WHERE id=?""",
+                        (slot_id, token, now, now, now, job_id),
+                    )
+                    self._audit(conn, actor, "job.started", job_id, {"slot_id": slot_id, "event_id": job["event_id"]})
+                    self._audit(conn, "system", "leases.acquired", job_id, {"slot_id": slot_id, "event_id": job["event_id"]})
+                    result = {"slot_id": slot_id, "token": token, "event_id": job["event_id"], "expires_at": expires}
+        if result.get("error"):
+            raise ValueError(str(result["error"]))
+        return result
 
     def heartbeat(self, job_id: str, token: str) -> bool:
         now_dt = utcnow()
@@ -305,11 +310,19 @@ class ControlStore:
             )
             self._audit(conn, actor, "job.finished", job_id, {"state": state, "uncertain": uncertain, "error": error})
 
-    def queued_jobs(self) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            return [dict(row) for row in conn.execute(
-                "SELECT * FROM jobs WHERE state='queued' ORDER BY queued_at,created_at"
-            ).fetchall()]
+    def cancel_legacy_queued_jobs(self) -> list[str]:
+        """Make pre-upgrade queued jobs safely restartable; never auto-run them."""
+        now = iso()
+        with self.immediate() as conn:
+            rows = conn.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY queued_at,created_at").fetchall()
+            for row in rows:
+                conn.execute(
+                    """UPDATE jobs SET state='cancelled',slot_id=NULL,pid=NULL,lease_token=NULL,
+                    finished_at=?,error=?,uncertain=0,updated_at=? WHERE id=?""",
+                    (now, "Waiting queue was removed; start this job again explicitly", now, row["id"]),
+                )
+                self._audit(conn, "system", "job.legacy_queue_cancelled", row["id"], {})
+            return [row["id"] for row in rows]
 
     def recover_after_controller_restart(self) -> list[str]:
         """Classify interrupted jobs from durable write-attempt evidence; never auto-retry."""

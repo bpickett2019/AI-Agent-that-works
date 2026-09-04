@@ -16,8 +16,7 @@ class BrowserEventLeaseTests(unittest.TestCase):
         user = self.store.ensure_user("subject", "user@example.test", "User", False)
         event = SimpleNamespace(event_id="event-one", event_key="event-one", name="Event One")
         self.job = self.store.create_job(user, event, "rr.xlsx")
-        self.store.queue_job(self.job["id"], user["subject"])
-        self.lease = self.store.acquire(self.job["id"])
+        self.lease = self.store.reserve_now(self.job["id"], user["subject"])
         self.runtime = {"authorizedEventId": "event-one"}
 
     def tearDown(self):

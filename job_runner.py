@@ -1,4 +1,4 @@
-"""Three-slot job scheduler and isolated Pi/Steel lifecycle."""
+"""Immediate three-slot admission and isolated Pi/Steel lifecycle."""
 from __future__ import annotations
 
 import json
@@ -52,7 +52,7 @@ class UploadTooLarge(ValueError):
 def fresh_state(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "job_id": job["id"], "workspace_id": job["workspace_id"], "status": job["state"],
-        "current_stage": "upload", "current_action": "RR uploaded; ready to queue",
+        "current_stage": "upload", "current_action": "RR uploaded; ready to start",
         "completed": [], "pending": [
             "target_discovery", "event_basics", "theme_branding", "header_footer_body",
             "registration_paths", "registration_types", "admission_items", "pricing_fees",
@@ -81,9 +81,7 @@ class JobRunner:
         self.store = store
         self._lock = threading.RLock()
         self._active: dict[str, ActiveJob] = {}
-        self._wake = threading.Event()
         self._shutdown = threading.Event()
-        self._thread: threading.Thread | None = None
 
     def start_scheduler(self) -> list[str]:
         interrupted = [job for job in self.store.list_jobs(limit=1000) if job["state"] in {"starting", "running", "stopping"}]
@@ -104,6 +102,20 @@ class JobRunner:
             })
             atomic_json(directory / "state.json", state)
             append_log(directory, f"Controller recovery classified job as {job['state']}")
+        legacy_queued = self.store.cancel_legacy_queued_jobs()
+        for job_id in legacy_queued:
+            job = self.store.get_job(job_id)
+            if not job:
+                continue
+            directory = job_dir(job["workspace_id"], job_id)
+            state = read_json(directory / "state.json", fresh_state(job))
+            state.update({
+                "status": "cancelled", "current_stage": "cancelled",
+                "current_action": job.get("error") or "Start this job again explicitly",
+                "pi_pid": None, "process_started_at": None, "worker_slot": None, "updated_at": now(),
+            })
+            atomic_json(directory / "state.json", state)
+            append_log(directory, "Legacy waiting job cancelled; explicit restart required")
         # Containers may outlive a hard controller crash. Remove only named slot
         # containers; job profiles and evidence remain untouched for review.
         for slot_id in range(1, self.store.slots + 1):
@@ -111,19 +123,14 @@ class JobRunner:
                 ["docker", "rm", "-f", slot_by_id(slot_id).container_name],
                 text=True, capture_output=True, timeout=30,
             )
-        self._thread = threading.Thread(target=self._scheduler, name="cvent-job-scheduler", daemon=True)
-        self._thread.start()
-        return recovered
+        return recovered + legacy_queued
 
     def shutdown(self) -> None:
         self._shutdown.set()
-        self._wake.set()
         with self._lock:
             jobs = list(self._active)
         for job_id in jobs:
             self.stop(job_id, "system", uncertain=True)
-        if self._thread:
-            self._thread.join(timeout=5)
 
     def create_files(self, job: dict[str, Any], upload, max_bytes: int = 25 * 1024 * 1024) -> Path:
         directory = job_dir(job["workspace_id"], job["id"])
@@ -202,31 +209,27 @@ class JobRunner:
             data["error"] = f"Steel command exited {result.returncode}"
         return data
 
-    def queue(self, job_id: str, actor: str) -> None:
-        self.store.queue_job(job_id, actor)
+    def start(self, job_id: str, actor: str) -> dict[str, Any]:
+        """Reserve capacity now and launch; reject busy events/slots immediately."""
+        lease = self.store.reserve_now(job_id, actor)
         job = self.store.get_job(job_id)
+        if not job:
+            raise ValueError("Job not found")
+        active = ActiveJob(job_id, lease["token"], lease["slot_id"], threading.Event())
+        with self._lock:
+            self._active[job_id] = active
         directory = job_dir(job["workspace_id"], job_id)
         state = read_json(directory / "state.json", fresh_state(job))
-        state.update({"status": "queued", "current_stage": "queued", "current_action": "Waiting for an isolated worker and event lease", "updated_at": now()})
+        state.update({
+            "status": "starting", "current_stage": "starting",
+            "current_action": f"Starting isolated worker {lease['slot_id']}",
+            "worker_slot": lease["slot_id"], "updated_at": now(),
+        })
         atomic_json(directory / "state.json", state)
-        append_log(directory, "Job queued; waiting for worker and canonical event lease")
-        self._wake.set()
-
-    def _scheduler(self) -> None:
-        while not self._shutdown.is_set():
-            progressed = False
-            for job in self.store.queued_jobs():
-                lease = self.store.acquire(job["id"])
-                if not lease:
-                    continue
-                active = ActiveJob(job["id"], lease["token"], lease["slot_id"], threading.Event())
-                with self._lock:
-                    self._active[job["id"]] = active
-                threading.Thread(target=self._heartbeat, args=(active,), daemon=True).start()
-                threading.Thread(target=self._launch, args=(job, active), daemon=True).start()
-                progressed = True
-            self._wake.wait(0.5 if progressed else 2.0)
-            self._wake.clear()
+        append_log(directory, f"Immediately reserved worker {lease['slot_id']} and canonical event lease")
+        threading.Thread(target=self._heartbeat, args=(active,), daemon=True).start()
+        threading.Thread(target=self._launch, args=(job, active), daemon=True).start()
+        return lease
 
     def _heartbeat(self, active: ActiveJob) -> None:
         interval = max(1, self.store.lease_seconds // 3)
@@ -347,26 +350,12 @@ class JobRunner:
         atomic_json(directory / "state.json", state)
         append_log(directory, f"Released worker {active.slot_id} and event lease; job state is {finish_state}")
         self._remove_active(active)
-        self._wake.set()
 
     def stop(self, job_id: str, actor: str, uncertain: bool = True) -> None:
         with self._lock:
             active = self._active.get(job_id)
         if not active:
-            job = self.store.get_job(job_id)
-            if job and job["state"] == "queued":
-                self.store.finish(job_id, None, "cancelled", "Cancelled before worker acquisition", False, actor)
-                directory = job_dir(job["workspace_id"], job_id)
-                state = read_json(directory / "state.json", fresh_state(job))
-                state.update({
-                    "status": "cancelled", "current_stage": "cancelled",
-                    "current_action": "Cancelled before worker acquisition; this RR can be started again",
-                    "pi_pid": None, "process_started_at": None, "worker_slot": None, "updated_at": now(),
-                })
-                atomic_json(directory / "state.json", state)
-                append_log(directory, "Queued build cancelled before worker acquisition; safe to start again")
-                return
-            raise ValueError("Job is not running or queued")
+            raise ValueError("Job is not running")
         job = self.store.get_job(job_id)
         process = active.process
         if process and process.poll() is None:
@@ -391,7 +380,7 @@ class JobRunner:
         state = read_json(directory / "state.json", fresh_state(job))
         state["resume_requested"] = True
         atomic_json(directory / "state.json", state)
-        self.queue(job_id, actor)
+        self.start(job_id, actor)
 
     def active(self, job_id: str) -> ActiveJob | None:
         with self._lock:

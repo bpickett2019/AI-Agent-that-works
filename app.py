@@ -236,14 +236,6 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
             state["provider_failure"] = provider_failure
             if provider_failure.lower() not in str(state.get("current_action", "")).lower():
                 state["current_action"] = f"{provider_failure}; {state.get('current_action', 'agent stopped')}"
-    if persisted and persisted["state"] == "queued":
-        lease = next((item for item in store.active_leases()["events"] if item["event_id"] == persisted["event_id"]), None)
-        if lease and lease["holder_job_id"] != persisted["id"]:
-            holder = store.get_job(lease["holder_job_id"])
-            state["current_action"] = (
-                f"Queued — this event is currently leased by User {holder.get('slot_id') or holder.get('preferred_slot') or '?'}; "
-                "a different authorized event can run concurrently"
-            )
     state["automation_scope"] = scope_summary()
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)
@@ -312,7 +304,7 @@ def upload(request: Request, rr: UploadFile = File(...), event_id: str = Form(..
         runner.create_files(
             job, rr.file, int(os.environ.get("CVENT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
         )
-        workbook_info_data(directory)  # Reject malformed/non-Excel input before it can be queued.
+        workbook_info_data(directory)  # Reject malformed/non-Excel input before it can be started.
     except UploadTooLarge as exc:
         store.finish(job["id"], None, "failed", str(exc), False, identity["subject"])
         shutil.rmtree(directory, ignore_errors=True)
@@ -403,10 +395,10 @@ def start(request: Request, job_id: str | None = None):
     if not scope_summary().get("valid"):
         raise HTTPException(500, "Automation scope is invalid")
     try:
-        runner.queue(job["id"], identity["subject"])
+        runner.start(job["id"], identity["subject"])
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "job_id": job["id"], "state": "queued"}
+    return {"ok": True, "job_id": job["id"], "state": "starting"}
 
 
 @app.post("/api/continue")
@@ -425,7 +417,7 @@ def continue_job(request: Request, job_id: str | None = None):
         runner.resume(job["id"], identity["subject"])
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "job_id": job["id"], "state": "queued"}
+    return {"ok": True, "job_id": job["id"], "state": "starting"}
 
 
 @app.post("/api/stop-agent")
