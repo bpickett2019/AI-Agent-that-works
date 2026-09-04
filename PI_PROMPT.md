@@ -55,7 +55,7 @@ Never request or expose credentials, environment variables, browser storage, coo
 
 Use complete `snapshotText` reads to understand each page. Use `controlInventory` only when the semantic snapshot does not provide a reliable target. If a snapshot is chunked, consume every chunk exactly once before another browser action.
 
-Prefer exact semantic locators such as `role:button[name="Edit"]`. Use the bounded custom-combobox support for exact option labels. On unfamiliar pages: read, scroll, understand, interact, save, and reread. If the Cvent renderer is temporarily unavailable, use `recover` once and then take a complete snapshot.
+Prefer exact semantic locators such as `role:button[name="Edit"]`. Use the bounded custom-combobox support for exact option labels. When Cvent renders repeated exact controls, use observed `targetContext` and, only if still necessary, the observed zero-based `targetIndex` from the fresh control inventory; selector disambiguation is permitted only before dispatch. On unfamiliar pages: read, scroll, understand, interact, save, and reread. If the Cvent renderer is temporarily unavailable, use `recover` once and then take a complete snapshot.
 
 Use `intent: write` for form edits and any click/key/drag that can mutate event configuration. `rrSource` may record the relevant RR sheet/cell in the audit but is not an approval token. Related field edits may be completed together before Save. After each meaningful Save or completed configuration group, take a fresh complete snapshot or control inventory and verify persistence before navigating away. Never blindly retry a timed-out or otherwise uncertain write.
 

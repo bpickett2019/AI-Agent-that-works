@@ -260,6 +260,8 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
   if (operation === "scanEventList") params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
   if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait"].includes(operation) && input.target) {
     params.target = cleanText(input.target, 4000);
+    if (input.targetContext) params.targetContext = cleanText(input.targetContext, 1000);
+    if (Number.isInteger(input.targetIndex)) params.targetIndex = Math.max(0, Math.min(Number(input.targetIndex), 20));
   }
   if (["fill", "type", "search"].includes(operation)) params.text = cleanText(input.text, 20000);
   if (operation === "selectOption") {
@@ -644,6 +646,8 @@ export default function cventJobTools(pi: any) {
       intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
       rrSource: Type.Optional(Type.String({ maxLength: 500, description: "Optional RR sheet/cell reference for the write audit" })),
       target: Type.Optional(Type.String({ maxLength: 4000 })),
+      targetContext: Type.Optional(Type.String({ maxLength: 1000, description: "Observed surrounding dialog, section, or row text used only to disambiguate repeated controls" })),
+      targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, description: "Observed zero-based visible-control index used only when identical controls remain after context filtering" })),
       text: Type.Optional(Type.String({ maxLength: 20000 })),
       url: Type.Optional(Type.String({ maxLength: 8000 })),
       option: Type.Optional(Type.String({ maxLength: 2000 })),

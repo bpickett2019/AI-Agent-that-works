@@ -138,7 +138,7 @@ def preflight_write_target(runtime_path,operation,params):
     for key in keys:
         target=params.get(key)
         if not target:continue
-        probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','__preflightTarget','--params',json.dumps({'target':target})],cwd=ROOT,text=True,capture_output=True,timeout=30)
+        probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','__preflightTarget','--params',json.dumps({'target':target,'context':params.get('targetContext'),'index':params.get('targetIndex')})],cwd=ROOT,text=True,capture_output=True,timeout=30)
         result=child_result(probe)
         if probe.returncode or not result.get('ok'):
             raise RuntimeError('Write rejected before browser dispatch: '+result.get('error','target could not be resolved')[-800:])
