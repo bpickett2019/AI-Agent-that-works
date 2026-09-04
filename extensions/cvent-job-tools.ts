@@ -709,7 +709,9 @@ export default function cventJobTools(pi: any) {
     label: "Finish Cvent job",
     description: "Write the final structured job report and end the agent turn. Use only after final QA or a genuine blocker. Cannot publish, mutate Cvent, select paths, or execute commands.",
     parameters: Type.Object({
-      status: Type.String({ description: "DRAFT_COMPLETE, REVIEW_REQUIRED, or INCOMPLETE" }),
+      status: Type.Union([
+        Type.Literal("DRAFT_COMPLETE"), Type.Literal("REVIEW_REQUIRED"), Type.Literal("INCOMPLETE"),
+      ], { description: "Final controlled outcome" }),
       unresolvedItems: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 200 }),
       realReads: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 500 }),
       realWrites: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 500 }),
@@ -738,7 +740,7 @@ export default function cventJobTools(pi: any) {
         };
         await atomicJson(join(jobDir, "final-report.json"), report);
         const state = await readJson(join(jobDir, "state.json"), {});
-        if (params.status === "REVIEW_REQUIRED") state.status = "review_required";
+        if (["REVIEW_REQUIRED", "INCOMPLETE"].includes(params.status)) state.status = "review_required";
         state.current_stage = "final_qa";
         state.current_action = params.status === "DRAFT_COMPLETE" ? "Draft build complete" : params.status.replaceAll("_", " ").toLowerCase();
         state.updated_at = new Date().toISOString();

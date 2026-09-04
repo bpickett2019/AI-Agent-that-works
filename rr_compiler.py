@@ -70,6 +70,16 @@ def value_map(ws):
     }
 
 
+def worksheet_by_alias(workbook, purpose, *names):
+    matches = [name for name in names if name in workbook.sheetnames]
+    if not matches:
+        raise ValueError(f"RR is missing the required {purpose} worksheet; expected one of: {', '.join(names)}")
+    if len(matches) > 1:
+        raise ValueError(f"RR has multiple {purpose} worksheets; keep exactly one of: {', '.join(names)}")
+    name = matches[0]
+    return name, workbook[name]
+
+
 def choice_rows(ws, start, next_start):
     choices = []
     for row in range(start + 1, next_start):
@@ -156,7 +166,9 @@ try:
     # The current RR has no post-registration redirect field.
     registration_paths = {"paths": []}
 
-    reg_ws = wb_values["NEW Reg Types & Pricing"]
+    reg_sheet, reg_ws = worksheet_by_alias(
+        wb_values, "registration types and pricing", "NEW Reg Types & Pricing", "Reg Types & Pricing",
+    )
     reg_types, admissions, prices = [], [], []
     for row in range(5, 28):
         state = str(reg_ws.cell(row, 4).value or "").strip().upper()
@@ -171,34 +183,34 @@ try:
             reg_types.append({
                 "rrNameReference": reg_name,
                 "sourceRow": row,
-                "fields": {"code": field(str(reg_code).strip(), "scope-037", f"NEW Reg Types & Pricing!B{row}")},
+                "fields": {"code": field(str(reg_code).strip(), "scope-037", f"{reg_sheet}!B{row}")},
             })
         if admission_name:
             ai_fields = {}
             if description:
-                ai_fields["description"] = field(description, "scope-039", f"NEW Reg Types & Pricing!J{row}")
+                ai_fields["description"] = field(description, "scope-039", f"{reg_sheet}!J{row}")
             if reg_name:
-                ai_fields["registration_type_availability"] = field(reg_name, "scope-040", f"NEW Reg Types & Pricing!C{row}")
+                ai_fields["registration_type_availability"] = field(reg_name, "scope-040", f"{reg_sheet}!C{row}")
             admissions.append({"admissionNameReference": admission_name, "admissionCodeReference": str(admission_code).strip() if admission_code else None, "sourceRow": row, "fields": ai_fields})
         tier_values = [reg_ws.cell(row, col).value for col in (20, 21)]
         if any(value is not None for value in tier_values):
             price_fields = {}
             for key, value, sid, col in zip(("advance_price", "onsite_price"), tier_values, ("scope-044", "scope-045"), ("T", "U")):
                 if value is not None:
-                    price_fields[key] = field(value, sid, f"NEW Reg Types & Pricing!{col}{row}")
+                    price_fields[key] = field(value, sid, f"{reg_sheet}!{col}{row}")
             prices.append({"registrationTypeReference": reg_name, "admissionNameReference": admission_name, "sourceRow": row, "fields": price_fields})
     tier_headers = [reg_ws["T4"].value, reg_ws["U4"].value]
     pricing = {
         "fields": {
-            "tier_date_ranges": field(tier_headers, "scope-041", "NEW Reg Types & Pricing!T4:U4"),
-            "processing_fee_note": field(reg_ws["B1"].value, "scope-046", "NEW Reg Types & Pricing!B1"),
+            "tier_date_ranges": field(tier_headers, "scope-041", f"{reg_sheet}!T4:U4"),
+            "processing_fee_note": field(reg_ws["B1"].value, "scope-046", f"{reg_sheet}!B1"),
         },
         "items": prices,
     }
     onsite_header = str(reg_ws["U4"].value or "")
     onsite_dates = re.findall(r"\d{1,2}/\d{1,2}/\d{4}", onsite_header)
     if len(onsite_dates) == 2:
-        event_fields["registration_deadline"] = field(onsite_dates[1], "scope-015", "NEW Reg Types & Pricing!U4")
+        event_fields["registration_deadline"] = field(onsite_dates[1], "scope-015", f"{reg_sheet}!U4")
 
     discount_scope = {
         "name": "scope-047", "code": "scope-048", "method": "scope-049", "amount_or_percentage": "scope-050",

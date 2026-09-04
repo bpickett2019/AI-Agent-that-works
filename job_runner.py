@@ -45,6 +45,25 @@ def append_log(directory: Path, message: str) -> None:
         output.write(f"{now()}  {message.strip()}\n")
 
 
+def classify_process_outcome(code: int, report_status: str, reported_state: str,
+                             writes_exist: bool, provider_failure: str | None) -> tuple[str, bool, str | None]:
+    """Map a completed agent process to a durable fail-closed job outcome."""
+    if code == 0 and report_status == "DRAFT_COMPLETE":
+        return "completed", False, None
+    if code == 0 and (report_status in {"REVIEW_REQUIRED", "INCOMPLETE"} or reported_state == "review_required"):
+        return "review_required", False, None
+    if reported_state == "login_required" and not writes_exist:
+        return "login_required", False, None
+    uncertain = writes_exist
+    finish_state = "failed_uncertain" if uncertain else "failed_prewrite"
+    outcome = (
+        "job also has an unresolved Cvent write attempt; mutation outcome requires review"
+        if uncertain else "no Cvent write was attempted; a fresh preflight is required"
+    )
+    error = f"{provider_failure}; {outcome}" if provider_failure else f"CVENT Agent exited with code {code}; {outcome}"
+    return finish_state, uncertain, error
+
+
 class UploadTooLarge(ValueError):
     pass
 
@@ -314,20 +333,9 @@ class JobRunner:
         reported_state = str(state.get("status", "")).lower()
         writes_exist = self._mutation_attempted(directory)
         provider_failure = self._provider_failure(directory)
-        if code == 0 and report_status == "DRAFT_COMPLETE":
-            finish_state, uncertain, error = "completed", False, None
-        elif code == 0 and (report_status == "REVIEW_REQUIRED" or reported_state == "review_required"):
-            finish_state, uncertain, error = "review_required", False, None
-        elif reported_state == "login_required" and not writes_exist:
-            finish_state, uncertain, error = "login_required", False, None
-        else:
-            uncertain = writes_exist
-            finish_state = "failed_uncertain" if uncertain else "failed_prewrite"
-            outcome = (
-                "job also has an unresolved Cvent write attempt; mutation outcome requires review"
-                if uncertain else "no Cvent write was attempted; a fresh preflight is required"
-            )
-            error = f"{provider_failure}; {outcome}" if provider_failure else f"CVENT Agent exited with code {code}; {outcome}"
+        finish_state, uncertain, error = classify_process_outcome(
+            code, report_status, reported_state, writes_exist, provider_failure,
+        )
         try:
             self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
         finally:

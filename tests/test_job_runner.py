@@ -6,7 +6,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from control_store import ControlStore
-from job_runner import JobRunner
+from job_runner import JobRunner, classify_process_outcome
 from runtime_config import DEFAULT_EVENT_KEY, DEFAULT_EVENT_NAME
 
 
@@ -81,6 +81,16 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertEqual(
             self.runner._provider_failure(self.directory),
             "Anthropic API credit balance is too low",
+        )
+
+    def test_controlled_incomplete_report_requires_review_instead_of_failed_prewrite(self):
+        self.assertEqual(
+            classify_process_outcome(0, "INCOMPLETE", "running", False, None),
+            ("review_required", False, None),
+        )
+        self.assertEqual(
+            classify_process_outcome(1, "INCOMPLETE", "running", False, None)[0],
+            "failed_prewrite",
         )
 
     def test_prompt_has_job_paths_and_no_unresolved_placeholders(self):
