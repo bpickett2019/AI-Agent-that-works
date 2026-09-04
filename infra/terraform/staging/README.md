@@ -54,8 +54,9 @@ terraform show staging.tfplan
 ```
 
 Never apply until the plan is non-destructive and all drift from the earlier
-CLI-created VM has been reconciled. The approved application artifact remains
-immutable commit `1c5a1784b2207a4516c84c6f9184975a28284b5f`.
+CLI-created VM has been reconciled. The approved application artifact is
+immutable commit `c7b793a44c396abf4924b1d0f5d96b46cc17b473`; rollback remains
+`1c5a1784b2207a4516c84c6f9184975a28284b5f`.
 
 ## Guest deployment boundary
 

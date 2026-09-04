@@ -32,7 +32,7 @@ variable "location" {
 
 variable "deployed_commit" {
   type    = string
-  default = "1c5a1784b2207a4516c84c6f9184975a28284b5f"
+  default = "c7b793a44c396abf4924b1d0f5d96b46cc17b473"
   validation {
     condition     = can(regex("^[0-9a-f]{40}$", var.deployed_commit))
     error_message = "deployed_commit must be a complete immutable Git SHA."
