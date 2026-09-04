@@ -93,6 +93,24 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn("`${prettyStage(last)} complete`",HTML)
         self.assertIn("completed.length>knownCompleted",HTML)
         self.assertIn("classList.toggle('is-complete',done)",HTML)
+    def test_operator_errors_are_actionable_and_do_not_lead_with_stack_traces(self):
+        for text in (
+            'Anthropic is unavailable',
+            'Cvent login is required',
+            'Your Cvent session expired',
+            'USER 1 is busy',
+            'All 3 workers are busy',
+            'This event is already being modified',
+            'Your security token expired',
+            'The event was not uniquely found',
+            'Stopped safely before any Cvent write',
+            'A Cvent write may have started',
+            'Build completed and final Cvent readback passed',
+        ):
+            self.assertIn(text, HTML)
+        self.assertIn("lower.includes('traceback')", HTML)
+        self.assertIn("'RESTRICTED STAGING ACCESS':'ENTRA AUTHENTICATED'", HTML)
+
     def test_live_data_is_never_cached(self):
         self.assertIn("opts.cache='no-store'",HTML)
         self.assertIn('state.rr_version!==loadedRRVersion',HTML)
