@@ -12,6 +12,49 @@ import app as cvent_app
 from browser_gate import BrowserGate
 from control_store import ControlStore
 from runtime_config import AuthorizedEvent
+from auth import EntraAuth
+
+
+class EntraAuthorizationTests(unittest.TestCase):
+    tenant = "661c8d9b-e19e-4330-b412-75dce2d26154"
+
+    def auth(self, **extra):
+        environment = {
+            "CVENT_ENV": "production",
+            "ENTRA_TENANT_ID": self.tenant,
+            "ENTRA_CLIENT_ID": "client-test",
+            "ENTRA_CLIENT_SECRET": "secret-test",
+            **extra,
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            return EntraAuth()
+
+    def test_verified_tenant_user_needs_no_manual_role_assignment(self):
+        identity = self.auth().identity_from_claims({
+            "tid": self.tenant, "oid": "normal-user", "preferred_username": "normal@emerald.test",
+        })
+        self.assertIn("Cvent.Agent.User", identity.roles)
+        self.assertFalse(identity.is_admin)
+
+    def test_other_tenant_and_missing_object_id_are_rejected(self):
+        with self.assertRaisesRegex(Exception, "tenant is not authorized"):
+            self.auth().identity_from_claims({"tid": "other", "oid": "user"})
+        with self.assertRaisesRegex(Exception, "no object identifier"):
+            self.auth().identity_from_claims({"tid": self.tenant})
+
+    def test_only_verified_admin_role_or_server_allowlist_grants_admin(self):
+        unrecognized = self.auth().identity_from_claims({
+            "tid": self.tenant, "oid": "normal-user", "roles": ["Untrusted.Admin"],
+        })
+        role_admin = self.auth().identity_from_claims({
+            "tid": self.tenant, "oid": "role-admin", "roles": ["Cvent.Agent.Admin"],
+        })
+        allowlisted = self.auth(CVENT_ADMIN_USERS="allowed-user").identity_from_claims({
+            "tid": self.tenant, "oid": "allowed-user",
+        })
+        self.assertFalse(unrecognized.is_admin)
+        self.assertTrue(role_admin.is_admin)
+        self.assertTrue(allowlisted.is_admin)
 
 
 class AuthorizationTests(unittest.TestCase):

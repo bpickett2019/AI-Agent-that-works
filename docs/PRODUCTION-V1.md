@@ -27,11 +27,13 @@ lease marks the job `failed_uncertain`; it is never replayed automatically.
 
 ## Microsoft Entra authorization
 
-Terraform creates one single-tenant application with assignment required and two
-app roles:
-
-- `Cvent.Agent.User`: own workspace/jobs only;
-- `Cvent.Agent.Admin`: all-job and active-lease overview.
+The staging MVP uses one single-tenant application with assignment not required.
+A successfully validated token from the configured Emerald tenant receives
+normal `Cvent.Agent.User` access without manual assignment. Administrative
+access remains separate and requires either the verified `Cvent.Agent.Admin`
+app-role claim or an explicit server-side `CVENT_ADMIN_USERS` allowlist entry;
+a normal tenant login is never administrative. Production may adopt stricter
+assignment policy after application ownership is confirmed.
 
 MSAL authorization-code flow runs server-side. The signed, HttpOnly, Secure,
 SameSite=Lax cookie stores only identity/role claims and a CSRF token—not Entra

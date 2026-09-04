@@ -38,6 +38,9 @@ class EntraAuth:
         self.client_secret = os.environ.get("ENTRA_CLIENT_SECRET", "")
         self.user_role = os.environ.get("CVENT_USER_APP_ROLE", "Cvent.Agent.User")
         self.admin_role = os.environ.get("CVENT_ADMIN_APP_ROLE", "Cvent.Agent.Admin")
+        self.admin_users = {
+            value.strip().lower() for value in os.environ.get("CVENT_ADMIN_USERS", "").split(",") if value.strip()
+        }
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}" if self.tenant_id else ""
         self.router = APIRouter()
         self.router.add_api_route("/auth/login", self.login, methods=["GET"])
@@ -66,6 +69,28 @@ class EntraAuth:
         request.session["entra_flow"] = flow
         return RedirectResponse(flow["auth_uri"], status_code=302)
 
+    def identity_from_claims(self, claims: dict[str, Any]) -> Identity:
+        if claims.get("tid") != self.tenant_id:
+            raise HTTPException(403, "Microsoft Entra tenant is not authorized")
+        oid = str(claims.get("oid") or "").strip()
+        if not oid:
+            raise HTTPException(403, "Microsoft Entra token has no object identifier")
+        email = str(claims.get("preferred_username") or claims.get("email") or "").strip()
+        raw_roles = claims.get("roles", [])
+        claimed_roles = tuple(role for role in raw_roles if isinstance(role, str)) if isinstance(raw_roles, list) else ()
+        # A token validated by the tenant-specific MSAL authority grants normal
+        # staging access. Administrative access remains an independent,
+        # explicit verified app-role claim or server-side allowlist decision.
+        is_admin = self.admin_role in claimed_roles or oid.lower() in self.admin_users or email.lower() in self.admin_users
+        effective_roles = tuple(dict.fromkeys((*claimed_roles, self.user_role)))
+        return Identity(
+            subject=f"{self.tenant_id}:{oid}",
+            email=email,
+            display_name=str(claims.get("name") or email or "CVENT user"),
+            roles=effective_roles,
+            is_admin=is_admin,
+        )
+
     async def callback(self, request: Request):
         flow = request.session.pop("entra_flow", None)
         if not flow:
@@ -75,21 +100,9 @@ class EntraAuth:
         except ValueError as exc:
             raise HTTPException(400, "Microsoft Entra state validation failed") from exc
         claims = result.get("id_token_claims") or {}
-        if "error" in result or claims.get("tid") != self.tenant_id:
+        if "error" in result:
             raise HTTPException(403, result.get("error_description", "Microsoft Entra authentication failed"))
-        roles = tuple(str(role) for role in claims.get("roles", []))
-        if self.user_role not in roles and self.admin_role not in roles:
-            raise HTTPException(403, "Your account is not assigned to the CVENT Agent application")
-        oid = claims.get("oid")
-        if not oid:
-            raise HTTPException(403, "Microsoft Entra token has no object identifier")
-        identity = Identity(
-            subject=f"{self.tenant_id}:{oid}",
-            email=str(claims.get("preferred_username") or claims.get("email") or ""),
-            display_name=str(claims.get("name") or claims.get("preferred_username") or "CVENT user"),
-            roles=roles,
-            is_admin=self.admin_role in roles,
-        )
+        identity = self.identity_from_claims(claims)
         request.session.clear()
         request.session["identity"] = identity.session_value()
         request.session["csrf"] = secrets.token_urlsafe(32)
