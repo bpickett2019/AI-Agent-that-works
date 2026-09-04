@@ -42,21 +42,21 @@ uploads never choose or authorize arbitrary Cvent targets.
 
 ## Safety model
 
-The Forge Intake scope in `scope/intake-emerald.xlsx` is authoritative: only 65
-confirmed mapped fields can be changed; unconfirmed fields are report-only;
-deferred and absent fields are out of scope. Every potentially mutating Ego call
-must pass exact confirmed scope IDs. Immediately before every write,
-`browser_tool.py` verifies:
+The uploaded RR is the authority for normal event-scoped configuration. RR-driven
+configuration is writable by default and does not require per-field approval or
+scope IDs. Immediately before every write, `browser_tool.py` verifies:
 
 1. the per-job BrowserActionGate is agent-owned;
 2. the canonical event lease exists, is unexpired, and belongs to this job/token;
 3. runtime, authorized-target, and live-page event identities match;
-4. all supplied Forge Intake scope IDs are confirmed.
+4. the target is not a protected publish, communication-send, attendee/contact,
+   delete/archive, event-identity, or account-global action.
 
 Only Ego direct in the job's canonical Steel Chromium may automate Cvent. The
-viewer is display-only until explicit takeover. Return to agent performs fresh
-Ego/runtime/event readback before resuming. Never publish, communicate,
-delete/archive, access attendees/contacts, or mutate reusable/global definitions.
+viewer is display-only until explicit takeover. Related form edits can be grouped,
+but each saved configuration group must receive fresh readback before navigation
+or completion. Never publish/Go Live, send communications, delete/archive, access
+attendees/contacts, mutate another event, or mutate reusable/global definitions.
 
 Pi runs with `--no-builtin-tools`: it has no shell, generic read/write, process,
 environment, or arbitrary-path access. The explicit
@@ -91,5 +91,5 @@ scale-out architecture.
 
 The audited pre-refactor map is in
 [`docs/CURRENT-STATE-AUDIT.md`](docs/CURRENT-STATE-AUDIT.md). Performance notes
-are in [`docs/PERFORMANCE-NOTES.md`](docs/PERFORMANCE-NOTES.md). Full-page,
-full-context DOM reads and fresh post-write readback remain mandatory.
+are in [`docs/PERFORMANCE-NOTES.md`](docs/PERFORMANCE-NOTES.md). Complete page reads
+and fresh verification after each saved configuration group remain mandatory.

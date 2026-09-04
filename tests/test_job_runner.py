@@ -39,7 +39,7 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("read", tools)
         self.assertNotIn("bash", tools)
         self.assertEqual(tools, {
-            "cvent_prepare_rr", "cvent_expectations", "cvent_scope", "cvent_job_read",
+            "cvent_prepare_rr", "cvent_expectations", "cvent_job_read",
             "cvent_job_update", "cvent_record_domain", "cvent_browser", "cvent_login_handoff",
             "cvent_snapshot_chunk", "cvent_finish",
         })
@@ -88,7 +88,7 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         expected = {
             "rr": {"sha256": hashlib.sha256(workbook.read_bytes()).hexdigest()},
             "target": {"eventKey": self.job["event_key"], "name": self.job["event_name"]},
-            "counts": {"confirmedApplicableFields": 1},
+            "counts": {"applicableFields": 1},
         }
         commands = []
 

@@ -24,7 +24,6 @@ from browser_runtime import command as browser_command, load as load_browser_run
 from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
 from runtime_config import DATA_ROOT, ROOT, authorized_events, browser_auth_metadata_path, browser_profile_dir, job_dir, validate_production_environment
-from scope_manifest import load_manifest as load_scope_manifest
 from workbook_ops import info as workbook_info_data, sheet as workbook_sheet_data, update as update_workbook_data
 
 def session_secret() -> str:
@@ -350,20 +349,16 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
 
 
 def scope_summary():
-    try:
-        scope = load_scope_manifest()
-        return {"valid": True, "authority": scope["authority"], "counts": scope["counts"], "sha256": scope["sourceSha256"]}
-    except Exception as exc:
-        return {"valid": False, "error": str(exc)}
+    return {
+        "valid": True, "authority": "Uploaded RR", "mode": "writable_event_configuration",
+        "safeguards": ["exact selected event", "one writer", "protected actions blocked", "saved changes verified"],
+    }
 
 
 @app.get("/api/scope")
 def automation_scope(request: Request):
     current_user(request)
-    try:
-        return JSONResponse(load_scope_manifest(), headers={"Cache-Control": "no-store"})
-    except Exception as exc:
-        raise HTTPException(500, f"Automation scope is invalid: {exc}") from exc
+    return JSONResponse(scope_summary(), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/upload")
@@ -448,8 +443,6 @@ def start(request: Request, job_id: str | None = None):
             store.audit(identity["subject"], "browser.stale_control_reset_on_start", job["id"], {})
         else:
             raise HTTPException(409, "Return browser control to the agent before starting")
-    if not scope_summary().get("valid"):
-        raise HTTPException(500, "Automation scope is invalid")
     try:
         runner.start(job["id"], identity["subject"])
     except ValueError as exc:

@@ -19,7 +19,6 @@ from browser_gate import BrowserGate
 from browser_runtime import initialize as initialize_browser_runtime
 from control_store import ControlStore
 from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, event_by_id, job_dir, pi_model, pi_provider, slot_by_id
-from scope_manifest import SCOPE_MANIFEST, SCOPE_WORKBOOK, load_manifest as load_scope_manifest
 
 
 def now() -> str:
@@ -74,9 +73,10 @@ def fresh_state(job: dict[str, Any]) -> dict[str, Any]:
         "job_id": job["id"], "workspace_id": job["workspace_id"], "status": job["state"],
         "current_stage": "upload", "current_action": "RR uploaded; ready to start",
         "completed": [], "pending": [
-            "target_discovery", "event_basics", "theme_branding", "header_footer_body",
-            "registration_paths", "registration_types", "admission_items", "pricing_fees",
-            "discounts", "registration_questions", "terms_policies", "final_qa",
+            "target_discovery", "event_settings", "site_designer", "registration_paths",
+            "registration_types", "admission_items", "optional_items", "pricing",
+            "discounts_vouchers", "questions", "sessions", "integrations", "communications",
+            "badges_onsite", "associations", "final_qa",
         ],
         "review_required": [], "rr_file": job["original_filename"], "run_mode": "mock",
         "authorized_event_name": job["event_name"], "authorized_event_id": job["event_id"],
@@ -309,7 +309,6 @@ class JobRunner:
     def _launch(self, job: dict[str, Any], active: ActiveJob) -> None:
         directory = job_dir(job["workspace_id"], job["id"])
         try:
-            load_scope_manifest()
             state = read_json(directory / "state.json", fresh_state(job))
             state.update({
                 "status": "starting", "current_stage": "starting", "current_action": "Compiling and verifying the current RR",
@@ -317,7 +316,7 @@ class JobRunner:
             })
             atomic_json(directory / "state.json", state)
             expected = self.prepare_rr(job, active.slot_id)
-            append_log(directory, f"RR preflight compiled {expected.get('counts', {}).get('confirmedApplicableFields', 0)} confirmed applicable fields")
+            append_log(directory, f"RR preflight compiled {expected.get('counts', {}).get('applicableFields', 0)} writable configuration fields")
             state.update({"current_action": "Starting isolated Steel browser", "updated_at": now()})
             atomic_json(directory / "state.json", state)
             append_log(directory, f"Acquired worker {active.slot_id} and event lease {job['event_id']}")
@@ -466,7 +465,7 @@ class JobRunner:
     def pi_command(self, job: dict[str, Any], directory: Path, state: dict[str, Any], prompt: str) -> list[str]:
         sessions = directory / "pi-sessions"
         capability_tools = (
-            "cvent_prepare_rr,cvent_expectations,cvent_scope,cvent_job_read,"
+            "cvent_prepare_rr,cvent_expectations,cvent_job_read,"
             "cvent_job_update,cvent_record_domain,cvent_browser,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
         )
@@ -491,8 +490,7 @@ class JobRunner:
 
     def render_prompt(self, job: dict[str, Any], directory: Path, runtime: dict[str, Any]) -> str:
         values = {
-            "RR_PATH": str((directory / "input.xlsx").resolve()), "SCOPE_WORKBOOK_PATH": str(SCOPE_WORKBOOK.resolve()),
-            "SCOPE_MANIFEST_PATH": str(SCOPE_MANIFEST.resolve()),
+            "RR_PATH": str((directory / "input.xlsx").resolve()),
             "TARGET_URL": f"DISCOVER EXACTLY {job['event_name']} — THE RR MUST NOT SELECT THE TARGET",
             "STATE_PATH": str((directory / "state.json").resolve()), "LOG_PATH": str((directory / "activity.log").resolve()),
             "REPORT_PATH": str((directory / "final-report.json").resolve()),

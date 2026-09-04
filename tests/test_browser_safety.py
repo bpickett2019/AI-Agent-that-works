@@ -85,7 +85,7 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertLess(HTML.index('data-target="workbook-panel"'),HTML.index('data-target="browser-panel"'))
         self.assertIn('<strong>CVENT browser</strong><small>Watch and take control</small>',HTML)
         self.assertIn("x.setAttribute('aria-current','page')",HTML)
-        self.assertIn('Forge Intake is authoritative',HTML)
+        self.assertIn('The uploaded RR drives configuration',HTML)
         self.assertIn('scope-confirmed',HTML)
     def test_completed_work_is_visibly_reported(self):
         self.assertIn('id="completion-summary"',HTML)
@@ -130,12 +130,11 @@ class ViewerSafetyTests(unittest.TestCase):
 class BrowserTargetSafetyTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.base=Path(self.tmp.name)
-        self.old=(browser_tool.CURRENT,browser_tool.local_probe,browser_tool.load_scope_manifest)
+        self.old=(browser_tool.CURRENT,browser_tool.local_probe)
         browser_tool.CURRENT=self.base
-        browser_tool.load_scope_manifest=lambda workbook,manifest:{'entries':[{'id':'scope-004','status':'confirmed'},{'id':'scope-070','status':'unconfirmed'}]}
         self.runtime={'browserRuntimeId':'runtime-current','authorizedEventName':'(C+D) Medtrade Testing Clone 2','authorizedEventKey':'locked','targetBrowserIdentity':{'url':'https://app.cvent.com/event?evtstub=locked'}}
     def tearDown(self):
-        browser_tool.CURRENT,browser_tool.local_probe,browser_tool.load_scope_manifest=self.old;self.tmp.cleanup()
+        browser_tool.CURRENT,browser_tool.local_probe=self.old;self.tmp.cleanup()
     def write_lock(self):
         (self.base/'authorized-target.json').write_text(json.dumps({'name':'(C+D) Medtrade Testing Clone 2','url':'https://app.cvent.com/event?evtstub=locked','event_key':'locked','browser_runtime_id':'runtime-current'}))
     def test_write_requires_lock_matching_live_page(self):
@@ -144,14 +143,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
         self.write_lock()
-        with self.assertRaisesRegex(RuntimeError,'scopeId'):
-            browser_tool.guard(self.runtime,'click',{'intent':'write'})
-        browser_tool.guard(self.runtime,'click',{'intent':'write','scopeIds':['scope-004']})
+        browser_tool.guard(self.runtime,'click',{'intent':'write'})
         stale=dict(self.runtime,browserRuntimeId='runtime-restarted')
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
-            browser_tool.guard(stale,'click',{'intent':'write','scopeIds':['scope-004']})
-        with self.assertRaisesRegex(RuntimeError,'scope-070'):
-            browser_tool.guard(self.runtime,'fill',{'intent':'write','scopeIds':['scope-070']})
+            browser_tool.guard(stale,'click',{'intent':'write'})
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=other'}
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
@@ -160,10 +155,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.write_lock()
         (self.base/'browser-mutation-uncertain.json').write_text('{}')
         with self.assertRaisesRegex(RuntimeError,'uncertain outcome'):
-            browser_tool.guard(self.runtime,'click',{'intent':'write','scopeIds':['scope-004']})
+            browser_tool.guard(self.runtime,'click',{'intent':'write'})
     def test_write_timeout_is_audited_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
-        params={'intent':'write','scopeIds':['scope-004'],'target':'#Save','timeoutSeconds':1}
+        params={'intent':'write','rrSource':'Event Details!B10','target':'#Save','timeoutSeconds':1}
         resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON","connected":true,"disabled":false}}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
@@ -175,7 +170,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertTrue((self.base/'browser-mutation-uncertain.json').exists())
     def test_write_helper_error_is_uncertain_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
-        params={'intent':'write','scopeIds':['scope-004'],'target':'#Save','timeoutSeconds':1}
+        params={'intent':'write','rrSource':'Event Details!B10','target':'#Save','timeoutSeconds':1}
         resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON","connected":true,"disabled":false}}\n','')
         failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"post-action marker failed"}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
@@ -191,13 +186,13 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.write_lock()
         with self.assertRaisesRegex(RuntimeError,'Unsupported selector syntax'):
             browser_tool.guard(self.runtime,'click',{
-                'intent':'write','scopeIds':['scope-004'],'target':'button:has-text("Edit")',
+                'intent':'write','target':'button:has-text("Edit")',
             })
         self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
         self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
     def test_unresolved_write_target_is_rejected_before_dispatch(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
-        params={'intent':'write','scopeIds':['scope-004'],'target':'role:button[name="Missing"]'}
+        params={'intent':'write','target':'role:button[name="Missing"]'}
         failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"could not locate target"}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
@@ -212,7 +207,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
             'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"SELECT","connected":true,"disabled":false},"resolvedTarget":"[data-cvent-agent-target=\\"one\\"]","fallbackUsed":true}\n','')
         with patch.object(browser_tool.subprocess,'run',return_value=resolved):
             params=browser_tool.preflight_write_target(self.base/'runtime.json','selectOption',{
-                'intent':'write','scopeIds':['scope-004'],'target':'role:combobox[name="Time Zone:"]',
+                'intent':'write','rrSource':'Event Details!B11','target':'role:combobox[name="Time Zone:"]',
             })
         self.assertEqual(params['target'],'[data-cvent-agent-target="one"]')
     def test_open_authorized_event_requires_live_lease_inventory_and_runtime_identity(self):
@@ -260,25 +255,34 @@ class BrowserTargetSafetyTests(unittest.TestCase):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/event?evtstub=other','intent':'read'})
         with self.assertRaisesRegex(RuntimeError,'account-global'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/account/settings','intent':'read'})
+        with self.assertRaisesRegex(RuntimeError,'attendee/contact'):
+            browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/attendees?evtstub=locked','intent':'read'})
+
+    def test_protected_mutation_controls_are_rejected_before_dispatch(self):
+        for label in ('Publish', 'Go Live', 'Send Email', 'Delete', 'Archive', 'Attendees', 'Contacts'):
+            with self.subTest(label=label), patch.object(browser_tool.subprocess,'run',return_value=subprocess.CompletedProcess(
+                ['node'],0,'BROWSER_TOOL_RESULT='+json.dumps({'ok':True,'resolved':{'tag':'BUTTON','text':label,'connected':True,'disabled':False}})+'\n','')):
+                with self.assertRaisesRegex(RuntimeError,'protected|immutable'):
+                    browser_tool.preflight_write_target(self.base/'runtime.json','click',{'intent':'write','target':f'role:button[name="{label}"]'})
     def test_ego_inside_steel_is_the_only_active_router(self):
-        self.assertIn('Use the `cvent_browser` capability for all Cvent browsing and building',PROMPT)
-        self.assertIn('Use `cvent_browser` for all Cvent browsing, building, and verification',SKILL)
+        self.assertIn('Use only the fixed `cvent_*` tools',PROMPT)
+        self.assertIn('Use `cvent_browser` for all Cvent reading, configuration, and verification',SKILL)
         self.assertFalse((ROOT/'browser_use_operator.py').exists())
         self.assertFalse((ROOT/'browser_use_direct.py').exists())
         self.assertIn("choices=['auto','ego']",ROUTER)
         self.assertIn("tool='ego'",ROUTER)
         self.assertIn('"browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"',APP)
-        self.assertIn('AUTHORITATIVE SCOPE — FAIL CLOSED',PROMPT)
-        self.assertIn("params.get('scopeIds',[])",ROUTER)
-        self.assertIn('Forge Intake scopeId is required',ROUTER)
-        self.assertIn('Never request viewport-only, element-only, truncated, targeted, or smaller DOM reads',PROMPT)
-        self.assertIn('no shell, generic read, generic write',PROMPT)
+        self.assertIn('The uploaded RR is the source of truth',PROMPT)
+        self.assertNotIn("scopeIds",ROUTER)
+        self.assertIn('Do not require per-field scope IDs',PROMPT)
+        self.assertIn('Use complete `snapshotText` reads',PROMPT)
+        self.assertIn('no shell, generic filesystem',PROMPT)
         extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
         self.assertIn('this production agent has no shell or general filesystem tools',extension)
         self.assertNotIn('"read", "bash"',extension)
         self.assertIn('safeChildEnvironment',extension)
         self.assertNotIn('environment.ANTHROPIC_API_KEY',extension)
-        self.assertIn('Arbitrary JavaScript and raw CDP are not exposed',PROMPT)
+        self.assertIn('raw CDP',PROMPT)
         self.assertNotIn("case 'js'",(ROOT/'ego_direct.mjs').read_text())
         self.assertNotIn("case 'cdp'",(ROOT/'ego_direct.mjs').read_text())
         self.assertNotIn('params.expression',extension)
@@ -292,11 +296,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('Snapshot worker/browser/job identity mismatch',extension)
         self.assertIn('assertCompiledExpectations',extension)
         self.assertIn('compiled RR expectations are stale or belong to another target',extension)
-        self.assertIn('scope IDs are not applicable in the compiled RR',extension)
+        self.assertNotIn('scope IDs are not applicable in the compiled RR',extension)
         self.assertIn('reusedPreflight',extension)
-        self.assertIn('Validating scoped Cvent write',extension)
-        self.assertIn('performing required readback',extension)
-        self.assertIn('A fresh complete Cvent snapshot readback is required before another browser action',extension)
+        self.assertIn('Configuring selected Cvent event',extension)
+        self.assertIn('Verify pending Cvent configuration changes before leaving the current page',extension)
         self.assertIn('browser-write-readback-required.json',extension)
         self.assertIn('Final report blocked until the required Cvent write readback is complete',extension)
         self.assertIn('snapshotCacheHit',EGO_DIRECT)
@@ -312,13 +315,12 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('id="browser-error"',ui)
         self.assertIn("$('browser-error').textContent=e.message",ui)
         self.assertIn('fixConnectionLabel',APP)
-        self.assertIn('Immediately call `cvent_login_handoff`',PROMPT)
-        self.assertIn('while the user signs in and returns control',SKILL)
+        self.assertIn('immediately call `cvent_login_handoff`',PROMPT)
+        self.assertIn('use `cvent_login_handoff` for human SSO/MFA',SKILL)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
-        self.assertIn('Ego `scanEventList`',PROMPT)
-        self.assertIn('bounded `openAuthorizedEvent`',PROMPT)
-        self.assertIn('Do not default to Advanced Search',PROMPT)
+        self.assertIn('`scanEventList` and `openAuthorizedEvent`',PROMPT)
+        self.assertIn('Require exactly one exact name/key match',PROMPT)
 
 class BrowserGateTests(unittest.TestCase):
     def setUp(self):

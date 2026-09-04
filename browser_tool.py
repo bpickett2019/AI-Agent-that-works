@@ -8,8 +8,7 @@ from urllib.parse import parse_qs,urlparse
 from browser_gate import action
 from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
-from scope_manifest import SCOPE_MANIFEST as DEFAULT_SCOPE_MANIFEST, SCOPE_WORKBOOK as DEFAULT_SCOPE_WORKBOOK, load_manifest as load_scope_manifest
-ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'));SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
+ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
 EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
 INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
 def event_key(url):
@@ -26,12 +25,12 @@ def target_lock():
     except Exception:return {}
 def emit(data):print('BROWSER_ROUTER_RESULT='+json.dumps(data,ensure_ascii=False))
 def audit_scope_write(operation,params,current,result,error=None):
-    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'scopeIds':params.get('scopeIds',[]),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':result}
+    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'rrSource':params.get('rrSource'),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':result}
     if error:record['error']=str(error)[-800:]
     with (CURRENT/'scope-write-audit.jsonl').open('a') as output:output.write(json.dumps(record,ensure_ascii=False)+'\n')
 def mark_mutation_uncertain(operation,params,current,error):
     marker=CURRENT/'browser-mutation-uncertain.json';tmp=marker.with_suffix('.tmp')
-    tmp.write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'scopeIds':params.get('scopeIds',[]),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'error':str(error)[-800:]},indent=2));tmp.replace(marker)
+    tmp.write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'rrSource':params.get('rrSource'),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'error':str(error)[-800:]},indent=2));tmp.replace(marker)
 def child_result(proc):
     marker='BROWSER_TOOL_RESULT=';index=proc.stdout.rfind(marker)
     if index>=0:
@@ -49,6 +48,23 @@ def assert_event_lease(runtime):
     if not job_id and os.environ.get('CVENT_ENV','development')!='production':return
     if not job_id or not token or not url or not event_id:raise RuntimeError('Write blocked: job event-lease context is absent')
     if not lease_is_valid(url,job_id,token,event_id):raise RuntimeError('Write blocked: canonical event lease is absent, stale, mismatched, or owned by another job')
+PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?)(?:/|$)',re.I)
+PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test email(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
+PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|code)|evtstub|eventid)',re.I)
+
+def assert_safe_write_target(operation,params,descriptor):
+    target=str(params.get('target','')).strip()
+    role=str(descriptor.get('role') or descriptor.get('tag') or '').lower()
+    labels=[descriptor.get(key) for key in ('text','label','aria','title','name')]
+    labels=[re.sub(r'\s+',' ',str(value)).strip() for value in labels if value]
+    if PROTECTED_IDENTITY.search(target) or any(PROTECTED_IDENTITY.search(value) for value in labels):
+        raise RuntimeError('Write blocked: selected event identity is immutable')
+    if role in {'button','link','menuitem','tab','a'} and any(PROTECTED_CONTROL.search(value) for value in labels):
+        raise RuntimeError('Write blocked: publish, communications, attendee/contact, delete, and archive controls are protected')
+    href=str(descriptor.get('href') or '')
+    if href and PROTECTED_PAGE.search(urlparse(href).path):
+        raise RuntimeError('Write blocked: attendee/contact and communications areas are protected')
+
 def guard(runtime,operation,params):
     current=local_probe(runtime);lock=target_lock()
     locked=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
@@ -74,17 +90,13 @@ def guard(runtime,operation,params):
         if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
             raise RuntimeError('Write blocked: visible event key does not match the server-authorized event')
         assert_event_lease(runtime)
-        refs=params.get('scopeIds',[])
-        if isinstance(refs,str):refs=[refs]
-        if not isinstance(refs,list) or not refs or any(not isinstance(ref,str) for ref in refs):
-            raise RuntimeError('Write blocked: at least one confirmed Forge Intake scopeId is required')
-        manifest=load_scope_manifest(SCOPE_WORKBOOK,SCOPE_MANIFEST);entries={entry['id']:entry for entry in manifest['entries']}
-        blocked=[ref for ref in refs if ref not in entries or entries[ref].get('status')!='confirmed']
-        if blocked:raise RuntimeError('Write blocked by Forge Intake scope: '+', '.join(blocked))
+        if PROTECTED_PAGE.search(urlparse(current.get('url','')).path):
+            raise RuntimeError('Write blocked: attendee/contact and communications areas are protected')
     if operation in ('navigate','browser_navigate'):
         url=params.get('url','');parsed=urlparse(url);host=(parsed.hostname or '').lower();key=event_key(url)
         if host and not (host=='cvent.com' or host.endswith('.cvent.com')):raise RuntimeError('Navigation outside Cvent is blocked')
         if re.search(r'/(account|organization|admin|global)(/|$)',parsed.path,re.I):raise RuntimeError('Navigation to account-global Cvent settings is blocked')
+        if PROTECTED_PAGE.search(parsed.path):raise RuntimeError('Navigation to attendee/contact and communications areas is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
     return current
 def authenticated_profile_status(runtime):
@@ -133,6 +145,7 @@ def preflight_write_target(runtime_path,operation,params):
         descriptor=result.get('resolved') or {}
         if not descriptor.get('connected') or descriptor.get('disabled'):
             raise RuntimeError('Write rejected before browser dispatch: target is disconnected or disabled')
+        assert_safe_write_target(operation,params,descriptor)
         resolved[key]=result.get('resolvedTarget') or target
     return resolved
 def run_direct(runtime_path,runtime,tool,operation,params):

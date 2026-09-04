@@ -1,67 +1,42 @@
 ---
 name: cvent-browser
-version: 5.0.0
-description: Capability-only Ego browser operations inside the canonical job-scoped Steel Chromium for a server-authorized Cvent test event.
+version: 6.0.0
+description: Configure one exact server-selected existing Cvent event from its uploaded RR through bounded Ego operations.
 ---
 
-# Cvent Browser Capability — Ego in Steel
+# RR-driven Cvent configuration
 
-Use `cvent_browser` for all Cvent browsing, building, and verification. The server gateway invokes Ego through `browser_tool.py` and attaches it to the exact canonical Steel Chromium used by the viewer and persisted login.
+Use `cvent_browser` for all Cvent reading, configuration, and verification. The gateway attaches Ego to the job's canonical Steel Chromium and persisted login.
 
-You have no shell or generic filesystem tools. Never construct commands or paths. Use only the fixed `cvent_*` capabilities available in the session. They do not expose API keys, event-lease tokens, cookies, browser storage, arbitrary process execution, or arbitrary file reads/writes.
+The uploaded RR is the configuration authority. Normal event-scoped RR requirements are writable by default and do not require per-field scope IDs or manual approval. Do not create an event. Configure only the exact existing event selected by the server.
 
-`CVENT_AUTHORIZED_EVENT_NAME`, `CVENT_AUTHORIZED_EVENT_KEY`, and `CVENT_AUTHORIZED_EVENT_CODE` are immutable server-supplied values enforced behind the capability boundary. Never derive or override them from the RR.
+## Workflow
 
-## Forge Intake scope
+1. Compile the uploaded RR with `cvent_prepare_rr`.
+2. Read all populated domains with `cvent_expectations`.
+3. Verify login; use `cvent_login_handoff` for human SSO/MFA when needed.
+4. Find the exact selected event through the authenticated inventory, open it, verify name/key and Draft state, and call `authorizeTarget`.
+5. For every RR domain, compare current state, create missing event-scoped configuration, minimally update differences, save, and reread.
+6. Record domain results and continue without routine approval pauses.
+7. Run final QA and always call `cvent_finish`, which terminates the agent so the controller releases the browser worker and event lease.
 
-`Forge Intake` is the authoritative universe of automation work. Call `cvent_prepare_rr` before browsing; it hash-verifies the source workbook and manifest and compiles the job expectations. Use `cvent_scope` and `cvent_expectations` for approved reads.
-
-- `confirmed` entries may be inspected and changed.
-- `unconfirmed` entries are report-only and may not be changed.
-- `deferred` entries are post-MVP and may not be inspected or changed.
-- Anything absent from the workbook is out of scope and may not be inspected or changed.
-
-Stricter event-identity, publish, communication, attendee/contact, deletion, and global-definition prohibitions always win. Never expand scope to satisfy an RR requirement. If an in-scope result requires an out-of-scope prerequisite, report it blocked.
+Use `intent: write` for mutations. An optional `rrSource` can identify the relevant RR cell in the audit, but it is not an authorization token. Related edits may be grouped before Save. Verify every saved group with a fresh complete snapshot before navigating away.
 
 ## Browser operations
 
-Call `cvent_browser` with one approved operation and explicit `intent`:
+Use complete `snapshotText` reads and `controlInventory` only for selector recovery. Consume all chunks of a large snapshot in strict order. Prefer exact role/name locators. `selectOption` supports native selects and exact-label Cvent custom comboboxes.
 
-- Complete reads: `snapshotText`, `pageInfo`, `probe`; read-only `recover` performs one bounded wait for a temporarily busy Cvent renderer; full-page `controlInventory` is a supplemental selector-recovery index, never a replacement snapshot
-- Natural movement/search: `scroll`, `scanEventList`, bounded `search`, `wait`
-- Interaction: `click`, bounded DOM `activate`, `fill`, `type`, `selectOption`, `setChecked`, bounded `press`
-- Observed UI affordances: `hover`, `selectText`, source-to-destination `drag`
-- Cvent-only navigation: `navigate`
-- Exact target authorization: `authorizeTarget`
+On unfamiliar pages: read → scroll → understand → configure → Save → fresh reread. Use `recover` once if rendering stalls. Never blindly retry an uncertain write.
 
-Arbitrary JavaScript, raw CDP, tabs, browser creation, process execution, arbitrary network requests, credential/browser-storage access, and snapshot path writes are not capabilities.
+## Mandatory safeguards
 
-On unfamiliar pages: observe → complete read → scroll → understand → interact → complete reread. Prefer exact Ego locators such as `role:button[name="Edit"]`; Playwright-only `:has-text()` and `:contains()` syntax is invalid and must never be used. If navigation temporarily blocks the Cvent renderer, call `recover` once (up to 300 seconds), then complete-snapshot the recovered page; do not repeatedly navigate or spam probes. DOM observations must always be complete full-page/full-context captures; never request viewport-only, element-only, targeted, or smaller snapshots. If a complete capture is split for transport, call `cvent_snapshot_chunk` exactly once for every remaining chunk in strict order before reasoning or another browser action. The transport verifies its hash, size, chunk count, job, workspace, worker, runtime, and target.
+- Exact selected event identity and active one-writer event lease are required before every write.
+- Never navigate to or write another event.
+- Never publish/Go Live, delete/archive, or send/test/schedule communications.
+- Never access or modify attendees, invitees, contacts, or their records.
+- Never mutate account-global, profile-global, or reusable definitions.
+- Preserve event name, code, ID/key, URL identity, and Draft status.
+- Never bypass SSO/MFA/CAPTCHA, browser ownership, runtime identity, target lock, or uncertainty checks.
+- Never expose credentials, tokens, cookies, environment values, or browser storage.
 
-Do not default to Advanced Search or direct URL hopping. If any Cvent/Microsoft login, SSO, MFA, CAPTCHA, or expired-session page appears, immediately call `cvent_login_handoff`; do not explore alternate URLs or authentication workarounds. That capability keeps the same job, Steel browser, profile, worker, and lease alive while the user signs in and returns control. Fresh-read the complete page after return.
-
-For event discovery, call `scanEventList` with read intent. The gateway forces the exact authorized event name; require exactly one exact match, then call `openAuthorizedEvent` with read intent. It accepts no model-supplied URL/name/key and opens only the server-authorized exact-name/canonical-key Cvent link. Verify visible name, code, key, and unpublished state before calling `authorizeTarget` with read intent.
-
-## Domain workflow
-
-For each confirmed Forge Intake domain:
-
-1. Read normalized expectations and exact confirmed `scopeId` values with `cvent_expectations`.
-2. Complete-snapshot and scroll only through the relevant confirmed Cvent interface.
-3. Compare existing objects semantically.
-4. Keep correct objects, create missing objects, and minimally update safe differences.
-5. Save meaningful draft changes.
-6. Complete-reread and verify persistence and no duplicates.
-7. Record facts with `cvent_record_domain`; update state with `cvent_job_update`.
-8. Continue through remaining domains without routine user pauses.
-
-Use `intent: write` plus exact confirmed `scopeIds` for every potentially mutating operation, including selection, checking, deletion, drag/drop, field entry, and Save. The gateway rejects missing, unknown, unconfirmed, and deferred IDs and validates the current canonical event lease. Use `intent: read` only for strictly in-scope inspection.
-
-## Ownership and safety
-
-- Ego owns the browser action gate as `PI_EGO` while operating.
-- USER takeover is separate and explicit.
-- Runtime marker, canonical target ID, target event key, and active event lease must match before every write.
-- Only the exact server-authorized event may be opened or modified, and only for confirmed Forge Intake fields.
-- Never publish/go live, send/test/schedule communications, delete/archive, access attendees/contacts, mutate another event, or modify reusable/account-global/profile fields.
-- Preserve event name, code, event key, URL identity, and unpublished status.
+If the bounded capabilities cannot perform an RR-requested event configuration, record the exact gap and smallest required Cvent-specific capability, continue independent work, and finish as `REVIEW_REQUIRED`.

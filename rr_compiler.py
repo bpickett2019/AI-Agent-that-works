@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build confirmed, applicable Forge Intake expectations directly from the current RR."""
+"""Compile writable event-configuration requirements directly from the uploaded RR."""
 from __future__ import annotations
 
 import hashlib
@@ -7,12 +7,11 @@ import json
 import os
 import re
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from openpyxl import load_workbook
-
-from scope_manifest import load_manifest
+from openpyxl.utils import get_column_letter
 
 ROOT = Path(__file__).resolve().parent
 JOB_DIR = Path(os.environ.get("CVENT_JOB_DIR", ROOT / "data/current"))
@@ -20,6 +19,7 @@ RR = JOB_DIR / "input.xlsx"
 OUT = JOB_DIR / "expected-domains.json"
 TARGET = {
     "name": os.environ.get("CVENT_AUTHORIZED_EVENT_NAME", "(C+D) Medtrade Testing Clone 2"),
+    "eventId": os.environ.get("CVENT_AUTHORIZED_EVENT_ID", ""),
     "eventKey": os.environ.get("CVENT_AUTHORIZED_EVENT_KEY", "e712e34c-6117-4d13-bf4c-8ed54cf2b495"),
     "eventCode": os.environ.get("CVENT_AUTHORIZED_EVENT_CODE", ""),
     "mustRemainUnpublished": True,
@@ -27,22 +27,31 @@ TARGET = {
 
 
 def normalized(value):
-    if isinstance(value, (date, datetime)):
+    if isinstance(value, (date, datetime, time)):
         return value.isoformat()
     return value
 
 
+def clean(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.replace("\xa0", " ").strip()
+        return value or None
+    return normalized(value)
+
+
 def yes_no(value):
     text = str(value or "").strip().lower()
-    if text in {"yes", "y", "true"}:
+    if text in {"yes", "y", "true", "required", "activate"}:
         return True
-    if text in {"no", "n", "false"}:
+    if text in {"no", "n", "false", "not needed"}:
         return False
-    return value
+    return clean(value)
 
 
-def field(value, scope_id, source, **extra):
-    item = {"value": normalized(value), "scopeId": scope_id, "source": source}
+def field(value, source, **extra):
+    item = {"value": clean(value), "source": source}
     item.update(extra)
     return item
 
@@ -64,9 +73,9 @@ def atomic_json(path, payload):
 
 def value_map(ws):
     return {
-        str(ws.cell(row, 1).value).strip(): ws.cell(row, 2).value
+        str(ws.cell(row, 1).value).strip(): clean(ws.cell(row, 2).value)
         for row in range(1, ws.max_row + 1)
-        if ws.cell(row, 1).value not in (None, "")
+        if clean(ws.cell(row, 1).value) is not None
     }
 
 
@@ -76,295 +85,349 @@ def worksheet_by_alias(workbook, purpose, *names):
         raise ValueError(f"RR is missing the required {purpose} worksheet; expected one of: {', '.join(names)}")
     if len(matches) > 1:
         raise ValueError(f"RR has multiple {purpose} worksheets; keep exactly one of: {', '.join(names)}")
-    name = matches[0]
-    return name, workbook[name]
+    return matches[0], workbook[matches[0]]
 
 
-def choice_rows(ws, start, next_start):
-    choices = []
-    for row in range(start + 1, next_start):
-        code, text = ws.cell(row, 5).value, ws.cell(row, 6).value
-        if text not in (None, ""):
-            choices.append({"code": normalized(code), "text": normalized(text)})
-    return choices
+def header_map(ws, row):
+    result = {}
+    for column in range(1, ws.max_column + 1):
+        value = clean(ws.cell(row, column).value)
+        if value is not None:
+            result[re.sub(r"\s+", " ", str(value)).strip().lower()] = column
+    return result
 
 
-manifest = load_manifest()
-confirmed = set(manifest["confirmedIds"])
-wb_formula = load_workbook(RR, data_only=False, read_only=False)
-wb_values = load_workbook(RR, data_only=True, read_only=False)
-try:
-    event_ws = wb_values["Event Details"]
-    event = value_map(event_ws)
-    event_fields = {}
-    if event.get("Event Location"):
-        location = str(event["Event Location"]).strip()
-        parts = [part.strip() for part in location.rsplit(",", 2)]
-        if len(parts) == 3 and all(parts):
-            event_fields["venue_name"] = field(parts[0], "scope-007", "Event Details!B10")
-            event_fields["city"] = field(parts[1], "scope-008", "Event Details!B10")
-            event_fields["state"] = field(parts[2], "scope-009", "Event Details!B10")
-        else:
-            event_fields["venue_name"] = field(location, "scope-007", "Event Details!B10", combinedLocation=True)
-    if event.get("Time Zone for Event Location"):
-        event_fields["time_zone"] = field(event["Time Zone for Event Location"], "scope-010", "Event Details!B11")
-    if event.get("Show Hours"):
-        event_fields["show_hours"] = field(event["Show Hours"], "scope-014", "Event Details!B19")
-    if event.get("Total Estimated Registration") is not None:
-        event_fields["registration_goal"] = field(event["Total Estimated Registration"], "scope-016", "Event Details!B22")
+def matching_column(headers, *needles):
+    for header, column in headers.items():
+        if any(needle in header for needle in needles):
+            return column
+    return None
 
-    theme_fields = {}
-    if event.get("Event Theme"):
-        theme_fields["event_theme"] = field(event["Event Theme"], "scope-017", "Event Details!B14")
-    if event.get("Branding Colors (Enter Hex Codes)"):
-        colors = re.findall(r"#[0-9A-Fa-f]{6}(?![0-9A-Fa-f])", str(event["Branding Colors (Enter Hex Codes)"]))
-        if colors:
-            theme_fields["brand_primary_colors"] = field(colors, "scope-019", "Event Details!B15")
 
-    links_ws = wb_values["Helpful & Social Media Links"]
-    link_scope = {
-        "Show Hours": "scope-024",
-        "Show Policy": "scope-025",
-        "Emerald Privacy Policy": "scope-026",
-        "Browse Sessions": "scope-027",
-        "Review Pricing": "scope-028",
-        "Registration Status": "scope-029",
-        "FAQ": "scope-030",
-        "Contact Us Button": "scope-031",
-        "Exhibitor Resource Center \n(Exhibitor flow only)": "scope-032",
-    }
-    footer_links = []
-    for row, audience in list((r, "attendee_media") for r in range(3, 11)) + list((r, "exhibitor") for r in range(15, 24)):
-        label = links_ws.cell(row, 1).value
-        if label not in link_scope:
+def source(sheet, row, column):
+    return f"{sheet}!{get_column_letter(column)}{row}"
+
+
+def row_fields(ws, sheet, row, columns):
+    fields = {}
+    for name, column in columns.items():
+        if not column:
             continue
-        sid = link_scope[label]
+        value = clean(ws.cell(row, column).value)
+        if value is not None:
+            fields[name] = field(value, source(sheet, row, column))
+    return fields
+
+
+def populated_records(ws, sheet, header_row, start_row, columns, required=()):
+    records = []
+    for row in range(start_row, ws.max_row + 1):
+        values = row_fields(ws, sheet, row, columns)
+        if not values or any(name not in values for name in required):
+            continue
+        if any(str(item["value"]).strip().startswith("[") for item in values.values()):
+            continue
+        records.append({"sourceRow": row, "fields": values})
+    return records
+
+
+def choose_registration_layout(ws):
+    # Current RRs label REG CODE in column A. Older accepted templates used B/C/D/E/F.
+    for row in range(1, min(ws.max_row, 12) + 1):
+        headers = header_map(ws, row)
+        reg_code = matching_column(headers, "reg code", "registration type code")
+        state = matching_column(headers, "activate", "status")
+        admission_code = matching_column(headers, "admission item code")
+        if reg_code and state and admission_code:
+            return row, {
+                "registration_code": reg_code,
+                "registration_name": matching_column(headers, "reg type name", "registration type name"),
+                "active": state,
+                "admission_code": admission_code,
+                "admission_name": matching_column(headers, "admission item") if admission_code != matching_column(headers, "admission item") else admission_code + 1,
+                "admission_additional_text": matching_column(headers, "admission item additional text"),
+                "group_registration": matching_column(headers, "register another person", "group registration"),
+                "registration_path": matching_column(headers, "registration path"),
+                "admission_description": matching_column(headers, "admission item description"),
+                "badge_description": matching_column(headers, "badge description"),
+                "registration_method": matching_column(headers, "registration method"),
+                "reported": matching_column(headers, "reported"),
+                "approval_required": matching_column(headers, "approval needed"),
+                "pre_approval": matching_column(headers, "eligible for pre-approval"),
+                "advanced_pre_registration": matching_column(headers, "advanced pre-registration"),
+                "qualified": matching_column(headers, "qualified reg type"),
+                "badge_color": matching_column(headers, "badge color"),
+                "reprint_fee": matching_column(headers, "reprint fee"),
+            }
+    return 4, {
+        "registration_code": 2, "registration_name": 3, "active": 4,
+        "admission_code": 5, "admission_name": 6, "admission_description": 10,
+    }
+
+
+def tier_columns(ws, header_row, layout):
+    excluded = {column for column in layout.values() if isinstance(column, int)}
+    tiers = []
+    for column in range(1, ws.max_column + 1):
+        value = clean(ws.cell(header_row, column).value)
+        if column in excluded or value is None:
+            continue
+        text = str(value)
+        if re.search(r"(?:tier|insider|saver|early|advance|last chance|onsite)", text, re.I) or re.search(r"\d{1,2}/\d{1,2}", text):
+            tiers.append((column, text))
+    return tiers
+
+
+def raw_rows(ws, sheet, start, end=None, columns=None):
+    records = []
+    for row in range(start, min(end or ws.max_row, ws.max_row) + 1):
         values = {}
-        visible = links_ws.cell(row, 2).value
-        target = links_ws.cell(row, 3).value
-        if visible not in (None, ""):
-            values["visible"] = field(yes_no(visible), sid, f"Helpful & Social Media Links!B{row}")
-        if target not in (None, ""):
-            values["target"] = field(target, sid, f"Helpful & Social Media Links!C{row}")
-        footer_links.append({"audience": audience, "label": label, "fields": values})
+        for column in (columns or range(1, ws.max_column + 1)):
+            value = clean(ws.cell(row, column).value)
+            if value is not None:
+                values[get_column_letter(column)] = value
+        if values:
+            records.append({"sourceRow": row, "source": f"{sheet}!A{row}:{get_column_letter(ws.max_column)}{row}", "values": values})
+    return records
 
-    social = []
-    for row in range(32, 37):
-        network, url = links_ws.cell(row, 1).value, links_ws.cell(row, 3).value
-        if network and url:
-            social.append({"network": network, "fields": {"visible": field(True, "scope-034", f"Helpful & Social Media Links!C{row}"), "url": field(url, "scope-034", f"Helpful & Social Media Links!C{row}")}})
-    header_footer_body = {
-        "footerLinks": footer_links,
-        "countdown": {"fields": {
-            "enabled": field(yes_no(links_ws["B28"].value), "scope-033", "Helpful & Social Media Links!B28"),
-            "text": field(links_ws["B29"].value, "scope-033", "Helpful & Social Media Links!B29"),
-        }},
-        "social": social,
-        "alreadyRegistered": {"fields": {"visible": field(yes_no(event.get("Already Registered Link on Landing Page")), "scope-035", "Event Details!B35")}},
-    }
 
-    # The current RR has no post-registration redirect field.
-    registration_paths = {"paths": []}
-
-    reg_sheet, reg_ws = worksheet_by_alias(
-        wb_values, "registration types and pricing", "NEW Reg Types & Pricing", "Reg Types & Pricing",
-    )
-    reg_types, admissions, prices = [], [], []
-    for row in range(5, 28):
-        state = str(reg_ws.cell(row, 4).value or "").strip().upper()
-        if state not in {"ACTIVATE", "REQUIRED"}:
-            continue
-        reg_code = reg_ws.cell(row, 2).value
-        reg_name = reg_ws.cell(row, 3).value
-        admission_code = reg_ws.cell(row, 5).value
-        admission_name = reg_ws.cell(row, 6).value
-        description = reg_ws.cell(row, 10).value
-        if reg_code:
-            reg_types.append({
-                "rrNameReference": reg_name,
-                "sourceRow": row,
-                "fields": {"code": field(str(reg_code).strip(), "scope-037", f"{reg_sheet}!B{row}")},
-            })
-        if admission_name:
-            ai_fields = {}
-            if description:
-                ai_fields["description"] = field(description, "scope-039", f"{reg_sheet}!J{row}")
-            if reg_name:
-                ai_fields["registration_type_availability"] = field(reg_name, "scope-040", f"{reg_sheet}!C{row}")
-            admissions.append({"admissionNameReference": admission_name, "admissionCodeReference": str(admission_code).strip() if admission_code else None, "sourceRow": row, "fields": ai_fields})
-        tier_values = [reg_ws.cell(row, col).value for col in (20, 21)]
-        if any(value is not None for value in tier_values):
-            price_fields = {}
-            for key, value, sid, col in zip(("advance_price", "onsite_price"), tier_values, ("scope-044", "scope-045"), ("T", "U")):
-                if value is not None:
-                    price_fields[key] = field(value, sid, f"{reg_sheet}!{col}{row}")
-            prices.append({"registrationTypeReference": reg_name, "admissionNameReference": admission_name, "sourceRow": row, "fields": price_fields})
-    tier_headers = [reg_ws["T4"].value, reg_ws["U4"].value]
-    pricing = {
-        "fields": {
-            "tier_date_ranges": field(tier_headers, "scope-041", f"{reg_sheet}!T4:U4"),
-            "processing_fee_note": field(reg_ws["B1"].value, "scope-046", f"{reg_sheet}!B1"),
-        },
-        "items": prices,
-    }
-    onsite_header = str(reg_ws["U4"].value or "")
-    onsite_dates = re.findall(r"\d{1,2}/\d{1,2}/\d{4}", onsite_header)
-    if len(onsite_dates) == 2:
-        event_fields["registration_deadline"] = field(onsite_dates[1], "scope-015", f"{reg_sheet}!U4")
-
-    discount_scope = {
-        "name": "scope-047", "code": "scope-048", "method": "scope-049", "amount_or_percentage": "scope-050",
-        "effective_from": "scope-051", "effective_to": "scope-051", "capacity": "scope-052", "stackable": "scope-053",
-        "usable_by": "scope-054", "count_guests": "scope-055", "active": "scope-056", "admission_items": "scope-057",
-    }
-    discount_columns = {
-        "name": 1, "code": 2, "method": 4, "amount_or_percentage": 5, "effective_from": 6, "effective_to": 7,
-        "capacity": 8, "stackable": 9, "usable_by": 10, "count_guests": 11, "active": 12, "admission_items": 14,
-    }
-    discount_items = []
-    sheet_name = "Discount Code Template"
-    ws = wb_values[sheet_name]
-    for row in range(7, ws.max_row + 1):
-        if str(ws.cell(row, 12).value or "").strip().lower() != "yes":
-            continue
-        if ws.cell(row, 1).value in (None, "") or ws.cell(row, 2).value in (None, ""):
-            continue
-        fields = {}
-        for key, col in discount_columns.items():
-            value = ws.cell(row, col).value
-            if key in {"stackable", "active"}:
-                value = yes_no(value)
-            if value is not None and not (key == "admission_items" and str(value).strip().startswith("[")):
-                fields[key] = field(value, discount_scope[key], f"{sheet_name}!{ws.cell(row, col).coordinate}")
-        discount_items.append({"matchReference": ws.cell(row, 2).value, "sourceSheet": sheet_name, "sourceRow": row, "fields": fields})
-
-    qws = wb_values["Show Questions"]
-    definition_rows = []
-    for row in range(5, qws.max_row + 1):
-        displayed_text = qws.cell(row, 4).value
-        metadata = [qws.cell(row, col).value for col in (1, 2, 3, 7, 8, 9)]
-        if displayed_text not in (None, "") and any(value not in (None, "") for value in metadata):
-            definition_rows.append(row)
-    questions = []
-    for index, row in enumerate(definition_rows):
-        next_row = definition_rows[index + 1] if index + 1 < len(definition_rows) else qws.max_row + 1
-        raw_identifier = qws.cell(row, 2).value
-        identifier = str(raw_identifier).strip() if raw_identifier not in (None, "") else None
-        fields = {}
-        mappings = (("page_displayed_on", 1, "scope-058"), ("company_or_individual", 3, "scope-059"),
-                    ("displayed_text", 4, "scope-060"), ("appearance", 7, "scope-061"))
-        for key, col, sid in mappings:
-            value = qws.cell(row, col).value
-            if value not in (None, ""):
-                fields[key] = field(value, sid, f"Show Questions!{qws.cell(row, col).coordinate}")
-        choices = choice_rows(qws, row, next_row)
+def question_records(ws):
+    definitions = []
+    for row in range(5, ws.max_row + 1):
+        if clean(ws.cell(row, 4).value) is not None and any(clean(ws.cell(row, col).value) is not None for col in (1, 2, 3, 7, 8, 9, 10, 11)):
+            definitions.append(row)
+    records = []
+    for index, row in enumerate(definitions):
+        next_row = definitions[index + 1] if index + 1 < len(definitions) else ws.max_row + 1
+        fields = row_fields(ws, "Show Questions", row, {
+            "page": 1, "internal_name": 2, "respondent_scope": 3, "displayed_text": 4,
+            "appearance": 7, "required": 8, "registration_type_visibility": 9,
+            "determines_registration_type": 10, "trigger_question": 11,
+            "include_on_qr_code": 12,
+        })
+        choices = []
+        continuation = []
+        for answer_row in range(row + 1, next_row):
+            code, text = clean(ws.cell(answer_row, 5).value), clean(ws.cell(answer_row, 6).value)
+            if code is not None or text is not None:
+                choices.append({"code": code, "text": text, "source": f"Show Questions!E{answer_row}:F{answer_row}"})
+            extra = clean(ws.cell(answer_row, 4).value)
+            if extra is not None:
+                continuation.append(str(extra))
         if choices:
-            fields["ordered_answer_options"] = field(choices, "scope-062", f"Show Questions!E{row + 1}:F{next_row - 1}")
-        continuation = [str(qws.cell(r, 4).value).strip() for r in range(row + 1, next_row) if qws.cell(r, 4).value not in (None, "")]
+            fields["ordered_answers"] = field(choices, f"Show Questions!E{row + 1}:F{next_row - 1}")
         if continuation and "displayed_text" in fields:
-            fields["displayed_text"]["value"] = "\n\n".join([str(fields["displayed_text"]["value"]).strip(), *continuation])
+            fields["displayed_text"]["value"] = "\n\n".join([str(fields["displayed_text"]["value"]), *continuation])
             fields["displayed_text"]["source"] = f"Show Questions!D{row}:D{next_row - 1}"
-        required = qws.cell(row, 8).value
-        if required not in (None, ""):
-            fields["required"] = field(yes_no(required), "scope-063", f"Show Questions!H{row}")
-        visibility = qws.cell(row, 9).value
-        if visibility not in (None, ""):
-            text = str(visibility)
-            conditional = bool(re.search(r"(?:\bif\b|=|only ask|when |\band/or\b)", text, re.I)) or " - " in text or " / " in text
-            if not conditional:
-                fields["registration_type_visibility"] = field(visibility, "scope-064", f"Show Questions!I{row}")
-        questions.append({"rrIdentifier": identifier, "notACventIdentity": True, "sourceRow": row, "fields": fields})
+        notes = clean(ws.cell(row, 13).value)
+        records.append({"sourceRow": row, "matchReference": clean(ws.cell(row, 2).value), "fields": fields, "implementationNotes": notes})
+    return records
 
-    emp_row = next((row for row in definition_rows if str(qws.cell(row, 2).value or "").strip() == "EMPP"), None)
-    terms = {"fields": {}}
-    if emp_row:
-        terms["fields"]["privacy_policy_acceptance"] = field(qws.cell(emp_row, 4).value, "scope-068", f"Show Questions!D{emp_row}")
 
-    excluded = [
-        {"request": "RR event identity (BDNY 2026 / FP code)", "reason": "Mock RR cannot select or rename the protected target."},
-        {"request": "Event type and expo/conference dates", "scopeIds": ["scope-011", "scope-012", "scope-013"], "reason": "Exact mapped RR fields are absent; the generic Event Dates field was not repurposed."},
-        {"request": "Hotel Info footer links", "scopeId": "scope-071", "scopeStatus": "unconfirmed"},
-        {"request": "Registration path creation/privacy/status", "scopeIds": ["scope-075", "scope-076", "scope-077"], "scopeStatus": "unconfirmed"},
-        {"request": "Registration type names/path/status/schedule/capacity/guest eligibility", "scopeIds": ["scope-078", "scope-081", "scope-082", "scope-083", "scope-084", "scope-085"], "scopeStatus": "unconfirmed"},
-        {"request": "Admission item names/codes/status/schedule/capacity/fee flag", "scopeIds": ["scope-086", "scope-087", "scope-088", "scope-089", "scope-090", "scope-091"], "scopeStatus": "unconfirmed"},
-        {"request": "Discount category/type, tracks, sessions and optional items", "scopeIds": ["scope-097", "scope-098"], "scopeStatus": "unconfirmed_or_absent"},
-        {"request": "Question internal names, determines-registration-type, triggers and conditional/follow-up logic", "scopeIds": ["scope-103", "scope-104", "scope-105"], "scopeStatus": "unconfirmed"},
-        {"request": "Registration pass description", "scopeId": "scope-038", "reason": "The exact mapped RR field is absent; Badge Description was not repurposed."},
-        {"request": "Create missing registration questions", "scopeIds": ["scope-058", "scope-059", "scope-060", "scope-061", "scope-062", "scope-063", "scope-064"], "reason": "Creation requires the unconfirmed internal-name field scope-103; only safely matched existing questions may be updated."},
-        {"request": "Question online visibility", "scopeId": "scope-065", "reason": "No Visible Online field is present in this RR."},
-        {"request": "Show-policy URL and cancellation/refund text", "scopeIds": ["scope-066", "scope-067"], "reason": "The exact mapped RR fields are absent; footer URLs were not repurposed."},
-        {"request": "Optional items/add-ons, advanced rules, vouchers, sessions, speakers, communications and other areas", "scopeStatus": "deferred_or_absent"},
-    ]
-    registry = {}
-    for identifier in ("M-09", "M-10", "M-11", "AGES", "NAICS36D", "CSUB4", "SUB4", "DONATE"):
-        locations = []
-        for ws in wb_values.worksheets:
-            for row in ws.iter_rows():
-                for cell in row:
-                    if cell.value is not None and re.search(rf"(?<![A-Za-z0-9]){re.escape(identifier)}(?![A-Za-z0-9])", str(cell.value), re.I):
-                        locations.append(f"{ws.title}!{cell.coordinate}")
-        registry[identifier] = {"exact": identifier, "sourceLocations": locations, "included": identifier in {q["rrIdentifier"] for q in questions}}
-        if not locations:
-            excluded.append({"request": identifier, "reason": "Exact identifier is absent from this RR; no Cvent work authorized."})
+wb = load_workbook(RR, data_only=True, read_only=False)
+try:
+    required_sheets = {"Event Details", "Helpful & Social Media Links", "Discount Code Template", "Show Questions"}
+    absent = sorted(required_sheets - set(wb.sheetnames))
+    if absent:
+        raise ValueError("RR is missing required worksheets: " + ", ".join(absent))
 
-    result = {
-        "schemaVersion": 3,
-        "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "rr": {"path": str(RR), "sha256": hashlib.sha256(RR.read_bytes()).hexdigest(), "mode": "mock_requirements_only"},
-        "scope": {"authority": manifest["authority"], "sourceSha256": manifest["sourceSha256"], "confirmedCount": manifest["counts"]["confirmed"]},
-        "target": TARGET,
-        "domains": {
-            "event_basics": {"fields": event_fields},
-            "theme_branding": {"fields": theme_fields},
-            "header_footer_body": header_footer_body,
-            "registration_paths": registration_paths,
-            "registration_types": {"items": reg_types},
-            "admission_items": {"items": admissions},
-            "pricing_fees": pricing,
-            "discounts": {"items": discount_items},
-            "registration_questions": {"items": questions, "collisionControls": ["RR identifiers are not Cvent identities.", "Never overwrite reusable/profile/account-global definitions."]},
-            "terms_policies": terms,
-            "final_qa": {"checks": ["protected identity unchanged", "unpublished", "confirmed fields reread", "no in-scope duplicates"]},
-        },
-        "identifierRegistry": registry,
-        "excludedOrBlocked": excluded,
-        "counts": {
-            "confirmedApplicableFields": 0,
-            "registrationTypeRecords": len(reg_types),
-            "admissionRecords": len(admissions),
-            "pricingRecords": len(prices),
-            "discountRecords": len(discount_items),
-            "questionRecords": len(questions),
-            "footerLinkRecords": len(footer_links),
-            "socialRecords": len(social),
-        },
+    event_ws = wb["Event Details"]
+    protected = {"Event Name", "Event FP Code", "Event Code"}
+    event_fields = {}
+    for row in range(1, min(event_ws.max_row, 100) + 1):
+        key, value = clean(event_ws.cell(row, 1).value), clean(event_ws.cell(row, 2).value)
+        if key is None or value is None or key in protected or str(key).lower().startswith("select one"):
+            continue
+        field_name = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+        event_fields[field_name] = field(value, f"Event Details!B{row}")
+
+    links_ws = wb["Helpful & Social Media Links"]
+    links = []
+    for row in list(range(3, 25)):
+        label = clean(links_ws.cell(row, 1).value)
+        if not label or str(label).lower().startswith("for all"):
+            continue
+        visible, target = clean(links_ws.cell(row, 2).value), clean(links_ws.cell(row, 3).value)
+        if visible is None and target is None:
+            continue
+        links.append({"audience": "exhibitor" if row >= 15 else "attendee_media", "label": label, "fields": {
+            "visible": field(yes_no(visible), f"Helpful & Social Media Links!B{row}"),
+            **({"target": field(target, f"Helpful & Social Media Links!C{row}")} if target is not None else {}),
+        }})
+    countdown_messages = []
+    for row in range(30, 38):
+        name, dates, text = (clean(links_ws.cell(row, col).value) for col in (1, 2, 3))
+        if name and (dates or text):
+            countdown_messages.append({"name": name, "dateRange": dates, "text": text, "source": f"Helpful & Social Media Links!A{row}:C{row}"})
+    social = []
+    for row in range(40, links_ws.max_row + 1):
+        network, visible, url = (clean(links_ws.cell(row, col).value) for col in (1, 2, 3))
+        if network and (visible or url):
+            social.append({"network": network, "visible": yes_no(visible), "url": url, "source": f"Helpful & Social Media Links!A{row}:C{row}"})
+
+    reg_sheet, reg_ws = worksheet_by_alias(wb, "registration types and pricing", "NEW Reg Types & Pricing", "Reg Types & Pricing")
+    reg_header, layout = choose_registration_layout(reg_ws)
+    tiers = tier_columns(reg_ws, reg_header, layout)
+    active_rows = []
+    for row in range(reg_header + 1, reg_ws.max_row + 1):
+        status = clean(reg_ws.cell(row, layout["active"]).value)
+        code = clean(reg_ws.cell(row, layout["registration_code"]).value)
+        name = clean(reg_ws.cell(row, layout.get("registration_name") or 0).value) if layout.get("registration_name") else None
+        if str(status or "").upper() not in {"ACTIVATE", "REQUIRED", "ACTIVE", "YES"} or not (code or name):
+            continue
+        fields = row_fields(reg_ws, reg_sheet, row, layout)
+        active_rows.append({"sourceRow": row, "fields": fields})
+
+    reg_types_by_key, admissions_by_key, prices = {}, {}, []
+    paths = {}
+    for item in active_rows:
+        row, fields = item["sourceRow"], item["fields"]
+        reg_code = fields.get("registration_code", {}).get("value")
+        reg_name = fields.get("registration_name", {}).get("value")
+        reg_key = str(reg_code or reg_name)
+        reg_fields = {key: value for key, value in fields.items() if key not in {"admission_code", "admission_name", "admission_description", "admission_additional_text", "badge_description"}}
+        existing = reg_types_by_key.setdefault(reg_key, {"matchReference": reg_code or reg_name, "sourceRows": [], "fields": reg_fields})
+        existing["sourceRows"].append(row)
+        path_ref = fields.get("registration_path", {}).get("value")
+        if path_ref:
+            paths.setdefault(str(path_ref), {"matchReference": path_ref, "registrationTypes": []})["registrationTypes"].append(reg_code or reg_name)
+        admission_code = fields.get("admission_code", {}).get("value")
+        admission_name = fields.get("admission_name", {}).get("value")
+        if admission_code or admission_name:
+            admission_key = str(admission_code or admission_name)
+            admission = admissions_by_key.setdefault(admission_key, {
+                "matchReference": admission_code or admission_name, "sourceRows": [],
+                "fields": {key: value for key, value in fields.items() if key in {"admission_code", "admission_name", "admission_description", "admission_additional_text", "badge_description"}},
+                "registrationTypes": [],
+            })
+            admission["sourceRows"].append(row)
+            admission["registrationTypes"].append(reg_code or reg_name)
+        tier_values = []
+        for column, label in tiers:
+            value = clean(reg_ws.cell(row, column).value)
+            if value is not None:
+                tier_values.append({"nameOrDateRange": label, "value": value, "source": source(reg_sheet, row, column)})
+        if tier_values:
+            prices.append({"registrationType": reg_code or reg_name, "admissionItem": admission_code or admission_name, "tiers": tier_values, "sourceRow": row})
+
+    discount_ws = wb["Discount Code Template"]
+    discount_headers = header_map(discount_ws, 3)
+    discount_columns = {
+        "name": matching_column(discount_headers, "name"), "code": matching_column(discount_headers, "discount code"),
+        "type": matching_column(discount_headers, "discount type"), "method": matching_column(discount_headers, "method"),
+        "amount_or_percentage": matching_column(discount_headers, "amount/percentage"),
+        "effective_from": matching_column(discount_headers, "effective from"), "effective_to": matching_column(discount_headers, "effective to"),
+        "capacity": matching_column(discount_headers, "capacity"), "stackable": matching_column(discount_headers, "stackable"),
+        "usable_by": matching_column(discount_headers, "can be used by"), "count_guests": matching_column(discount_headers, "counts guests"),
+        "active": matching_column(discount_headers, "active"), "internal_note": matching_column(discount_headers, "internal note"),
+        "admission_items": matching_column(discount_headers, "admission items"), "tracks": matching_column(discount_headers, "tracks"),
+        "sessions": matching_column(discount_headers, "sessions"),
+    }
+    discounts = populated_records(discount_ws, "Discount Code Template", 3, 4, discount_columns, required=("name", "code"))
+
+    optional_items = []
+    if "Optional Items" in wb.sheetnames:
+        optional_ws = wb["Optional Items"]
+        optional_headers = header_map(optional_ws, 2)
+        optional_columns = {re.sub(r"[^a-z0-9]+", "_", name).strip("_"): column for name, column in optional_headers.items()}
+        optional_items = populated_records(optional_ws, "Optional Items", 2, 3, optional_columns, required=("item_code", "item_title"))
+
+    sessions = []
+    if "Sessions" in wb.sheetnames:
+        session_ws = wb["Sessions"]
+        session_headers = header_map(session_ws, 1)
+        session_columns = {re.sub(r"[^a-z0-9]+", "_", name).strip("_"): column for name, column in session_headers.items()}
+        sessions = populated_records(session_ws, "Sessions", 1, 2, session_columns, required=("item_code_sess_xxx_in_sessionboard_or_whatever_code_you_want_to_use_if_not_using_sessionboard",))
+
+    group_discounts = []
+    if "Group_Volume Discounts" in wb.sheetnames:
+        group_ws = wb["Group_Volume Discounts"]
+        group_headers = header_map(group_ws, 2)
+        group_columns = {re.sub(r"[^a-z0-9]+", "_", name).strip("_"): column for name, column in group_headers.items()}
+        group_discounts = populated_records(group_ws, "Group_Volume Discounts", 2, 3, group_columns, required=("name",))
+
+    questions = question_records(wb["Show Questions"])
+    policies = []
+    if "Policies & Rules" in wb.sheetnames:
+        policy_ws = wb["Policies & Rules"]
+        for row in range(3, policy_ws.max_row + 1):
+            setting, value, notes = (clean(policy_ws.cell(row, col).value) for col in (1, 2, 3))
+            if setting and value is not None:
+                policies.append({"setting": setting, "value": value, "notes": notes, "source": f"Policies & Rules!A{row}:C{row}"})
+
+    integration_requirements = raw_rows(wb["Integrations"], "Integrations", 3, 18, range(1, 5)) if "Integrations" in wb.sheetnames else []
+    communication_requirements = raw_rows(wb["Communications"], "Communications", 3, 20, range(1, 5)) if "Communications" in wb.sheetnames else []
+    badge_requirements = raw_rows(wb["Badge & Ticket Layouts"], "Badge & Ticket Layouts", 3, 33) if "Badge & Ticket Layouts" in wb.sheetnames else []
+    scan_go_requirements = raw_rows(wb["Onsite Scan & Go Screen"], "Onsite Scan & Go Screen", 3, 11, range(5, 8)) if "Onsite Scan & Go Screen" in wb.sheetnames else []
+    approval_requirements = raw_rows(wb["Approvals"], "Approvals", 4, 24, range(1, 4)) if "Approvals" in wb.sheetnames else []
+    capability_gaps = []
+    if len(discounts) > 100:
+        capability_gaps.append({
+            "domain": "discounts_vouchers", "records": len(discounts),
+            "missingCapability": "Cvent bulk discount import or authenticated write API",
+            "reason": "Per-record browser creation is not a reliable full-RR bulk path.",
+        })
+    if communication_requirements:
+        capability_gaps.append({
+            "domain": "communications", "records": len(communication_requirements),
+            "missingCapability": "Cvent-specific draft communication editor that cannot activate, schedule, test, or send",
+            "reason": "The generic browser can edit event templates, but RR activation/scheduling requests cannot be executed under the no-communications safeguard.",
+        })
+    if approval_requirements and not any(record["values"].get("A") and record["values"].get("B") for record in approval_requirements):
+        capability_gaps.append({
+            "domain": "associations", "missingCapability": "none",
+            "reason": "The Approvals worksheet contains guidance text but no business-type association to configure.",
+        })
+
+    domains = {
+        "event_settings": {"fields": event_fields, "policies": policies},
+        "site_designer": {"footerLinks": links, "countdownMessages": countdown_messages, "socialLinks": social},
+        "registration_paths": {"items": list(paths.values())},
+        "registration_types": {"items": list(reg_types_by_key.values())},
+        "admission_items": {"items": list(admissions_by_key.values())},
+        "optional_items": {"items": optional_items},
+        "pricing": {"tierHeaders": [{"nameOrDateRange": label, "source": source(reg_sheet, reg_header, column)} for column, label in tiers], "items": prices},
+        "discounts_vouchers": {"discounts": discounts, "groupDiscounts": group_discounts},
+        "questions": {"items": questions},
+        "sessions": {"items": sessions},
+        "integrations": {"requirements": integration_requirements},
+        "communications": {"requirements": communication_requirements, "constraint": "Configure draft content/settings only; never activate, schedule, test, or send."},
+        "badges_onsite": {"badgeRequirements": badge_requirements, "scanAndGoText": scan_go_requirements},
+        "associations": {"approvalRequirements": approval_requirements},
+        "final_qa": {"checks": ["selected event identity unchanged", "event remains unpublished", "all RR-requested event configuration reread", "no unintended duplicates", "no communications sent", "no attendee/contact access"]},
     }
 
     def count_fields(item):
         if isinstance(item, dict):
-            if {"value", "scopeId"} <= set(item):
+            if "value" in item and "source" in item:
                 return 1
             return sum(count_fields(value) for value in item.values())
         if isinstance(item, list):
             return sum(count_fields(value) for value in item)
         return 0
 
-    def validate(item, path="domains"):
-        if isinstance(item, dict):
-            if "value" in item or "scopeId" in item:
-                assert {"value", "scopeId", "source"} <= set(item), path
-                assert item["scopeId"] in confirmed, (path, item["scopeId"])
-            else:
-                for key, value in item.items():
-                    validate(value, f"{path}.{key}")
-        elif isinstance(item, list):
-            for index, value in enumerate(item):
-                validate(value, f"{path}[{index}]")
-
-    result["counts"]["confirmedApplicableFields"] = count_fields(result["domains"])
-    validate(result["domains"])
+    result = {
+        "schemaVersion": 4,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "rr": {"path": str(RR), "sha256": hashlib.sha256(RR.read_bytes()).hexdigest(), "authority": "uploaded_rr"},
+        "target": TARGET,
+        "domains": domains,
+        "protected": [
+            "selected event identity", "publish/go live", "delete/archive", "communications",
+            "attendees/contacts", "account-global or reusable definitions",
+        ],
+        "capabilityGaps": capability_gaps,
+        "counts": {
+            "applicableFields": count_fields(domains),
+            "registrationTypeRecords": len(reg_types_by_key), "admissionRecords": len(admissions_by_key),
+            "pricingRecords": len(prices), "discountRecords": len(discounts),
+            "groupDiscountRecords": len(group_discounts), "questionRecords": len(questions),
+            "optionalItemRecords": len(optional_items), "sessionRecords": len(sessions),
+            "siteLinkRecords": len(links) + len(social), "integrationRequirementRows": len(integration_requirements),
+            "communicationRequirementRows": len(communication_requirements), "badgeOnsiteRequirementRows": len(badge_requirements) + len(scan_go_requirements),
+        },
+    }
     atomic_json(OUT, result)
-    print(json.dumps({"ok": True, "output": str(OUT), "counts": result["counts"], "identifiers": registry}, indent=2))
+    print(json.dumps({"ok": True, "output": str(OUT), "counts": result["counts"], "capabilityGaps": capability_gaps}, indent=2))
 finally:
-    wb_formula.close()
-    wb_values.close()
+    wb.close()

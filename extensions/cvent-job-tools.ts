@@ -17,9 +17,9 @@ const ALLOWED_KEYS = new Set([
   "Backspace", "Delete", "Home", "End", "PageUp", "PageDown", "Space",
 ]);
 const DOMAIN_NAMES = [
-  "event_basics", "theme_branding", "header_footer_body", "registration_paths",
-  "registration_types", "admission_items", "pricing_fees", "discounts",
-  "registration_questions", "terms_policies", "final_qa",
+  "event_settings", "site_designer", "registration_paths", "registration_types",
+  "admission_items", "optional_items", "pricing", "discounts_vouchers",
+  "questions", "sessions", "integrations", "communications", "badges_onsite", "associations", "final_qa",
 ] as const;
 const DOMAINS = new Set<string>(DOMAIN_NAMES);
 const JOB_STAGES = ["starting", "target_discovery", ...DOMAIN_NAMES] as const;
@@ -36,7 +36,7 @@ const ARTIFACTS: Record<string, string> = {
   browser_runtime: "browser-runtime.json",
 };
 const ALLOWED_TOOLS = new Set([
-  "cvent_prepare_rr", "cvent_expectations", "cvent_scope", "cvent_job_read",
+  "cvent_prepare_rr", "cvent_expectations", "cvent_job_read",
   "cvent_job_update", "cvent_record_domain", "cvent_browser",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
@@ -212,46 +212,21 @@ function hash(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
-async function verifiedScope(): Promise<any> {
-  const manifestPath = join(repoRoot, "scope", "intake-emerald-scope.json");
-  const workbookPath = join(repoRoot, "scope", "intake-emerald.xlsx");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  const actual = hash(await readFile(workbookPath));
-  if (!manifest.sourceSha256 || manifest.sourceSha256 !== actual) {
-    throw new Error("Forge Intake scope workbook and manifest do not match");
-  }
-  return manifest;
-}
-
-function collectScopeIds(value: unknown, found = new Set<string>()): Set<string> {
-  if (Array.isArray(value)) {
-    for (const child of value) collectScopeIds(child, found);
-  } else if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    if (typeof record.scopeId === "string") found.add(record.scopeId);
-    for (const child of Object.values(record)) collectScopeIds(child, found);
-  }
-  return found;
-}
-
 async function verifiedCompiledExpectations(): Promise<any> {
   const input = await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
   const expected = await readJson(join(jobDir, "expected-domains.json"), null);
   if (!expected) throw new Error("Write blocked: compile the current RR with cvent_prepare_rr first");
-  const manifest = await verifiedScope();
-  if (expected.rr?.sha256 !== hash(input) || expected.scope?.sourceSha256 !== manifest.sourceSha256 ||
+  if (expected.rr?.sha256 !== hash(input) || expected.rr?.authority !== "uploaded_rr" ||
       expected.target?.eventKey !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY") ||
+      expected.target?.eventId !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_ID") ||
       expected.target?.name !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME")) {
     throw new Error("Write blocked: compiled RR expectations are stale or belong to another target");
   }
   return expected;
 }
 
-async function assertCompiledExpectations(scopeIds: string[]): Promise<void> {
-  const expected = await verifiedCompiledExpectations();
-  const applicable = collectScopeIds(expected.domains);
-  const absent = scopeIds.filter((scopeId) => !applicable.has(scopeId));
-  if (absent.length) throw new Error(`Write blocked: scope IDs are not applicable in the compiled RR: ${absent.join(", ")}`);
+async function assertCompiledExpectations(): Promise<void> {
+  await verifiedCompiledExpectations();
 }
 
 function parseMarker(stdout: string, marker: string): any {
@@ -305,7 +280,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     if (["load", "domcontentloaded", "networkidle"].includes(input.loadState)) params.loadState = input.loadState;
   }
   params.intent = input.intent;
-  if (input.intent === "write") params.scopeIds = input.scopeIds;
+  if (input.rrSource) params.rrSource = cleanText(input.rrSource, 500);
   return params;
 }
 
@@ -423,15 +398,14 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_prepare_rr",
     label: "Prepare RR",
-    description: "Verify Forge Intake, inspect the fixed job RR workbook, and compile confirmed job-scoped expectations using approved server helpers. Takes no paths or commands.",
+    description: "Inspect the uploaded RR and compile its event-configuration requirements using fixed server helpers. Takes no paths or commands.",
     parameters: Type.Object({}),
     async execute(_id: string, _params: unknown, signal: AbortSignal) {
       return withQueue("job-files", async () => {
-        await verifiedScope();
         await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
         try {
           const existing = await verifiedCompiledExpectations();
-          await appendActivity(`RR preflight reverified ${existing.counts?.confirmedApplicableFields ?? 0} confirmed applicable fields`);
+          await appendActivity(`RR preflight reverified ${existing.counts?.applicableFields ?? 0} writable configuration fields`);
           return toolText({ ok: true, reusedPreflight: true, counts: existing.counts, identifiers: existing.identifierRegistry });
         } catch {
           // Missing or stale artifacts are rebuilt only by the same fixed approved helpers below.
@@ -442,7 +416,7 @@ export default function cventJobTools(pi: any) {
         await runFixed(python, [join(repoRoot, "inspect_rr.py"), join(jobDir, "input.xlsx"), join(jobDir, "input.inspection.json")], "prepare", signal, 180000);
         const compiled = await runFixed(python, [join(repoRoot, "rr_compiler.py")], "prepare", signal, 180000);
         const result = JSON.parse(compiled.stdout);
-        await appendActivity(`RR normalized to ${result.counts?.confirmedApplicableFields ?? 0} confirmed applicable fields`);
+        await appendActivity(`RR normalized to ${result.counts?.applicableFields ?? 0} writable configuration fields`);
         return toolText(result);
       });
     },
@@ -451,9 +425,9 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_expectations",
     label: "Read RR expectations",
-    description: "Read only normalized confirmed expectations for one approved domain, or summary/excluded/identifiers. Large record arrays are paged without rereading or narrowing the source workbook.",
+    description: "Read normalized requirements from the uploaded RR for one configuration domain, summary, protected actions, or capability gaps. Large record arrays are paged.",
     parameters: Type.Object({
-      section: Type.String({ description: "summary, excluded, identifiers, or an approved domain name" }),
+      section: Type.String({ description: "summary, protected, gaps, or a configuration domain name" }),
       offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10000 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 25 })),
     }),
@@ -462,32 +436,12 @@ export default function cventJobTools(pi: any) {
       if (!expected) throw new Error("Run cvent_prepare_rr first");
       const section = String(params.section);
       let value: any;
-      if (section === "summary") value = { rr: expected.rr, scope: expected.scope, target: expected.target, counts: expected.counts };
-      else if (section === "excluded") value = expected.excludedOrBlocked;
-      else if (section === "identifiers") value = expected.identifierRegistry;
+      if (section === "summary") value = { rr: expected.rr, target: expected.target, counts: expected.counts };
+      else if (section === "protected") value = expected.protected;
+      else if (section === "gaps") value = expected.capabilityGaps;
       else if (DOMAINS.has(section)) value = expected.domains?.[section];
       else throw new Error("Capability denied: unknown expectation section");
       return toolText(pageArrays(value, params.offset ?? 0, params.limit ?? 10));
-    },
-  });
-
-  pi.registerTool({
-    name: "cvent_scope",
-    label: "Read verified scope",
-    description: "Read hash-verified Forge Intake entries, filtered to supplied scope IDs or a section. This never reads arbitrary files.",
-    parameters: Type.Object({
-      scopeIds: Type.Optional(Type.Array(Type.String({ pattern: "^scope-[0-9]{3}$" }), { maxItems: 100 })),
-      section: Type.Optional(Type.String({ maxLength: 200 })),
-    }),
-    async execute(_id: string, params: any) {
-      const manifest = await verifiedScope();
-      const ids = new Set(params.scopeIds ?? []);
-      const section = cleanText(params.section ?? "", 200).toLowerCase();
-      let entries = manifest.entries;
-      if (ids.size) entries = entries.filter((entry: any) => ids.has(entry.id));
-      if (section) entries = entries.filter((entry: any) => String(entry.section ?? "").toLowerCase().includes(section));
-      if (!ids.size && !section) entries = entries.filter((entry: any) => entry.status === "confirmed");
-      return toolText({ authority: manifest.authority, sourceSha256: manifest.sourceSha256, counts: manifest.counts, entries });
     },
   });
 
@@ -684,11 +638,11 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_browser",
     label: "Cvent browser",
-    description: "Perform one validated, structurally bounded Ego operation in this job's canonical Steel browser: complete reads, navigation/waits, click/fill/type, select/check/key/search, hover/text-selection, or source-to-destination drag. Server-forced target identity, current event lease, write scope IDs, browser ownership, and Cvent-only navigation are enforced. There is no command, script, CDP payload, or path capability.",
+    description: "Read or configure the exact selected Cvent event in its canonical Steel browser. RR-driven writes are allowed by default; exact target identity, one-writer lease, protected-action blocks, uncertainty handling, and verification are enforced.",
     parameters: Type.Object({
       operation: Type.Union(BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
       intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
-      scopeIds: Type.Optional(Type.Array(Type.String({ pattern: "^scope-[0-9]{3}$" }), { maxItems: 100 })),
+      rrSource: Type.Optional(Type.String({ maxLength: 500, description: "Optional RR sheet/cell reference for the write audit" })),
       target: Type.Optional(Type.String({ maxLength: 4000 })),
       text: Type.Optional(Type.String({ maxLength: 20000 })),
       url: Type.Optional(Type.String({ maxLength: 8000 })),
@@ -715,9 +669,6 @@ export default function cventJobTools(pi: any) {
       if (operation === "press" && ["Backspace", "Delete"].includes(String(params.key)) && params.intent !== "write") throw new Error(`${params.key} requires write intent`);
       if (operation === "selectOption" && !["label", "value", undefined].includes(params.optionBy)) throw new Error("Capability denied: optionBy must be label or value");
       if (operation === "drag" && !params.destination) throw new Error("Capability denied: drag destination is required");
-      if (params.intent === "write" && (!Array.isArray(params.scopeIds) || params.scopeIds.length === 0)) {
-        throw new Error("Write blocked: confirmed Forge Intake scope IDs are required");
-      }
       return withQueue("browser", async () => {
         const write = params.intent === "write";
         await updateBrowserProgress(write ? `Validating scoped Cvent write: ${operation}` : `Reading Cvent browser: ${operation}`);
@@ -725,24 +676,27 @@ export default function cventJobTools(pi: any) {
           await assertSnapshotConsumed();
           const readback = await pendingWriteReadback();
           const readbackOperation = ["snapshotText", "controlInventory"].includes(operation);
-          if (readback && !readbackOperation) {
-            throw new Error("A fresh complete Cvent snapshot readback is required before another browser action");
+          if (readback && ["navigate", "openAuthorizedEvent", "scanEventList"].includes(operation)) {
+            throw new Error("Verify pending Cvent configuration changes before leaving the current page");
           }
-          if (write) await assertCompiledExpectations(params.scopeIds);
+          if (write) await assertCompiledExpectations();
           const input = browserParams(operation, params);
           const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
           const result = await invokeBrowser(operation, input, signal, timeout);
           const packaged = await saveLargeSnapshot(result);
           if (write) {
+            const pending = readback ?? {};
             await atomicJson(WRITE_READBACK_PENDING, {
-              operation, scopeIds: params.scopeIds, browserRuntimeId: result.browserRuntimeId,
-              targetId: result.targetId, requiredAt: new Date().toISOString(),
+              operations: [...(pending.operations ?? []), operation].slice(-100),
+              rrSources: [...(pending.rrSources ?? []), ...(params.rrSource ? [cleanText(params.rrSource, 500)] : [])].slice(-100),
+              browserRuntimeId: result.browserRuntimeId, targetId: result.targetId,
+              requiredAt: pending.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
             });
           } else if (readback && readbackOperation) {
             const transport = await pendingSnapshot();
             if (!transport || transport.complete === true) await clearWriteReadback();
           }
-          await updateBrowserProgress(write ? `Cvent write action dispatched; performing required readback` : `Cvent browser read complete: ${operation}`);
+          await updateBrowserProgress(write ? `Configuring selected Cvent event: ${operation}` : `Cvent browser read complete: ${operation}`);
           return toolText(packaged);
         } catch (error) {
           await updateBrowserProgress(`${write ? "Cvent write" : "Cvent browser read"} blocked safely during ${operation}`);
@@ -816,6 +770,10 @@ export default function cventJobTools(pi: any) {
     async execute(_id: string, params: any) {
       if (!["DRAFT_COMPLETE", "REVIEW_REQUIRED", "INCOMPLETE"].includes(params.status)) throw new Error("Capability denied: invalid final status");
       if (await pendingWriteReadback()) throw new Error("Final report blocked until the required Cvent write readback is complete");
+      if ([params.guardrails.published, params.guardrails.emailsSent, params.guardrails.deletes, params.guardrails.globalMutations].some((value) => value !== 0)) {
+        throw new Error("Final report blocked: protected actions must remain zero");
+      }
+      if (params.status === "DRAFT_COMPLETE" && params.unresolvedItems.length) throw new Error("DRAFT_COMPLETE cannot contain unresolved RR configuration items");
       return withQueue("job-files", async () => {
         const report = {
           status: params.status,
