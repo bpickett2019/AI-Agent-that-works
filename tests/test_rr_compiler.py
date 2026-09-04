@@ -38,8 +38,12 @@ class RRCompilerTests(unittest.TestCase):
             registration["T5"] = 10
             registration["U5"] = 20
 
-            workbook.create_sheet("Discount Code Template")
-            workbook.create_sheet("Show Questions")
+            discount = workbook.create_sheet("Discount Code Template")
+            for column, value in enumerate(["Name", "Discount Code", "Method", "Active"], 1):
+                discount.cell(3, column, value)
+            questions = workbook.create_sheet("Show Questions")
+            questions.cell(4, 1, "Question Text")
+            questions.cell(4, 2, "Question Appearance")
             workbook.save(job_dir / "input.xlsx")
             workbook.close()
 
@@ -98,6 +102,8 @@ class RRCompilerTests(unittest.TestCase):
                                             "Invitees", "No", "Yes", None, "FULL"], 1):
                 discounts.cell(4, column, value)
             questions = workbook.create_sheet("Show Questions")
+            question_headers = ["Page Displayed", "Demo Name", "Company or Individual", "Question Text", "Answer Code", "Answer Text", "Question Appearance", "Required for Registrant", "List Reg Types", "Determine Reg Type", "Trigger Question", "Included on QR Code", "Notes"]
+            for column, value in enumerate(question_headers, 1): questions.cell(4, column, value)
             questions.cell(5, 1, "Show Questions")
             questions.cell(5, 2, "TESTQ")
             questions.cell(5, 3, "Individual")
@@ -126,6 +132,36 @@ class RRCompilerTests(unittest.TestCase):
                 self.assertEqual(imported.active["D2"].value, "Subtract an amount")
             finally:
                 imported.close()
+
+    def test_semantic_extraction_survives_moved_rows_columns_and_slight_sheet_renames(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = Path(temporary)
+            workbook = Workbook(); event = workbook.active; event.title = "Event Info"
+            event["D5"] = "General Information"; event["I5"] = "Notes"
+            event["D7"] = "Event Location"; event["H7"] = "Moved Venue"
+            workbook.create_sheet("Helpful Social Links")
+            registration = workbook.create_sheet("Registration Types Pricing")
+            headers = ["REG TYPE NAME", "ADMISSION ITEM", "REG CODE", "ACTIVATE / NOT NEEDED", "ADMISSION ITEM CODE", "registration path", "Advance"]
+            for column, value in enumerate(headers, 3): registration.cell(15, column, value)
+            for column, value in enumerate(["Attendee", "Full", "ATT", "ACTIVATE", "FULL", "ATT-PATH", 25], 3): registration.cell(18, column, value)
+            discounts = workbook.create_sheet("Discount Codes 2026")
+            for column, value in enumerate(["Active", "Method", "Discount Code", "Amount/Percentage", "Name"], 4): discounts.cell(8, column, value)
+            for column, value in enumerate(["Yes", "Amount off", "SAVE", 10, "Save ten"], 4): discounts.cell(12, column, value)
+            questions = workbook.create_sheet("Questions Config")
+            for column, value in enumerate(["Question Appearance", "Question Text", "Demo Name", "Required"], 5): questions.cell(10, column, value)
+            for column, value in enumerate(["Single Select", "Moved question?", "MOVEDQ", "Yes"], 5): questions.cell(13, column, value)
+            workbook.save(job_dir / "input.xlsx"); workbook.close()
+            environment = os.environ.copy(); environment.update({"CVENT_JOB_DIR": str(job_dir), "CVENT_AUTHORIZED_EVENT_ID": "event-id"})
+            subprocess.run([sys.executable, str(ROOT / "rr_compiler.py")], cwd=ROOT, env=environment, check=True, capture_output=True)
+            subprocess.run([sys.executable, str(ROOT / "rr_validator.py")], cwd=ROOT, env=environment, check=True, capture_output=True)
+            expected = json.loads((job_dir / "expected-domains.json").read_text())
+            validation = json.loads((job_dir / "rr-validation.json").read_text())
+            self.assertEqual(expected["domains"]["event_settings"]["fields"]["event_location"]["value"], "Moved Venue")
+            self.assertEqual(expected["counts"]["registrationTypeRecords"], 1)
+            self.assertEqual(expected["counts"]["discountRecords"], 1)
+            self.assertEqual(expected["domains"]["questions"]["items"][0]["fields"]["internal_name"]["value"], "MOVEDQ")
+            self.assertEqual(validation["counts"]["AMBIGUOUS"], 0)
+            self.assertEqual(validation["counts"]["NOT_SUPPORTED_BY_RR"], 0)
 
 
 if __name__ == "__main__":

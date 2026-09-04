@@ -16,7 +16,7 @@ function readSnapshotCache(){
 function writeSnapshotCache(value){
   const temporary=`${snapshotCachePath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,snapshotCachePath);fs.chmodSync(snapshotCachePath,0o600);
 }
-if(snapshotCachePath&&operation!=='snapshotText'){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
+if(snapshotCachePath&&['click','activate','fill','type','navigate','selectOption','setChecked','press','drag','uploadDiscountImport','recover','openAuthorizedEvent'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
 if(!runtimePath||!operation){output('Explicit --runtime and --operation are required',false);process.exit(2)}
 const runtime=JSON.parse(fs.readFileSync(runtimePath,'utf8'));
 const cdpOrigin=new URL(runtime.cdpHttpOrigin);process.env.EGO_BROWSER_CDP_HOST=cdpOrigin.hostname;process.env.EGO_BROWSER_CDP_PORT=cdpOrigin.port;
@@ -55,6 +55,12 @@ try{
         if(identity.documentId===after.documentId&&identity.generation===after.generation&&identity.url===after.url)writeSnapshotCache({browserRuntimeId:runtime.browserRuntimeId,targetId:wanted,...after,savedAt:Date.now(),snapshot});
         result={snapshot,snapshotCacheHit:false};
       }
+      break;
+    }
+    case 'readTarget': {
+      const locator=ego.locator(params.target);
+      const optional=async(fn)=>{try{return await fn()}catch{return null}};
+      result={target:params.target,text:await optional(()=>locator.innerText()),value:await optional(()=>locator.inputValue()),checked:await optional(()=>locator.isChecked()),enabled:await optional(()=>locator.isEnabled()),visible:await optional(()=>locator.isVisible())};
       break;
     }
     case 'controlInventory': {

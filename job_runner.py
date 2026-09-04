@@ -18,6 +18,7 @@ from typing import Any
 from browser_gate import BrowserGate
 from browser_runtime import initialize as initialize_browser_runtime
 from control_store import ControlStore
+from performance_monitor import monitor as monitor_performance
 from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, event_by_id, job_dir, pi_model, pi_provider, slot_by_id
 
 
@@ -235,18 +236,29 @@ class JobRunner:
         inspection = directory / "input.inspection.json"
         environment = self.prepare_environment(job, slot_id)
         commands = (
-            [sys.executable, str(ROOT / "inspect_rr.py"), str(workbook), str(inspection)],
-            [sys.executable, str(ROOT / "rr_compiler.py")],
+            ("rr_load_inspection", [sys.executable, str(ROOT / "inspect_rr.py"), str(workbook), str(inspection)]),
+            ("rr_extraction", [sys.executable, str(ROOT / "rr_compiler.py")]),
+            ("rr_validation_and_planning", [sys.executable, str(ROOT / "rr_validator.py")]),
         )
         completed = None
-        for command_line in commands:
+        timings = []
+        preflight_started = time.monotonic()
+        for stage, command_line in commands:
+            started = time.monotonic()
             completed = subprocess.run(
                 command_line, cwd=ROOT, env=environment, text=True, capture_output=True, timeout=180,
             )
+            timings.append({"stage": stage, "durationMs": round((time.monotonic() - started) * 1000, 1)})
             if completed.returncode:
                 detail = (completed.stderr or completed.stdout).strip().splitlines()
                 raise RuntimeError("RR preflight failed: " + (detail[-1] if detail else "approved helper failed"))
         expected = read_json(directory / "expected-domains.json", {})
+        validation = read_json(directory / "rr-validation.json", {})
+        plan = read_json(directory / "configuration-plan.json", {})
+        atomic_json(directory / "preflight-performance.json", {
+            "stages": timings, "totalMs": round((time.monotonic() - preflight_started) * 1000, 1),
+            "validationCounts": validation.get("counts", {}),
+        })
         if (
             not expected
             or expected.get("rr", {}).get("sha256") != hashlib.sha256(workbook.read_bytes()).hexdigest()
@@ -254,6 +266,9 @@ class JobRunner:
             or expected.get("target", {}).get("eventId") != job["event_id"]
             or expected.get("target", {}).get("eventKey") != job["event_key"]
             or expected.get("target", {}).get("name") != job["event_name"]
+            or validation.get("rrSha256") != expected.get("rr", {}).get("sha256")
+            or plan.get("rrSha256") != expected.get("rr", {}).get("sha256")
+            or plan.get("target", {}).get("eventId") != job["event_id"]
         ):
             raise RuntimeError("RR preflight produced stale or mismatched expectations")
         return expected
@@ -310,6 +325,10 @@ class JobRunner:
 
     def _launch(self, job: dict[str, Any], active: ActiveJob) -> None:
         directory = job_dir(job["workspace_id"], job["id"])
+        threading.Thread(target=monitor_performance, args=(directory / "system-metrics.jsonl", active.stop_heartbeat, [
+            DATA_ROOT, directory, directory / "input.xlsx", browser_profile_dir(job["workspace_id"], active.slot_id),
+            browser_cache_dir(active.slot_id), Path("/tmp"),
+        ]), daemon=True).start()
         try:
             state = read_json(directory / "state.json", fresh_state(job))
             state.update({
@@ -409,6 +428,12 @@ class JobRunner:
             "pi_pid": None, "process_started_at": None, "worker_slot": None, "updated_at": now(),
         })
         atomic_json(directory / "state.json", state)
+        active.stop_heartbeat.set()
+        try:
+            subprocess.run([sys.executable, str(ROOT / "performance_report.py"), str(directory)], cwd=ROOT,
+                           env=self.prepare_environment(job, active.slot_id), capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
         append_log(directory, f"Released worker {active.slot_id} and event lease; job state is {finish_state}")
         self._remove_active(active)
 
@@ -467,8 +492,8 @@ class JobRunner:
     def pi_command(self, job: dict[str, Any], directory: Path, state: dict[str, Any], prompt: str) -> list[str]:
         sessions = directory / "pi-sessions"
         capability_tools = (
-            "cvent_prepare_rr,cvent_expectations,cvent_job_read,"
-            "cvent_job_update,cvent_record_domain,cvent_browser,cvent_login_handoff,"
+            "cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
+            "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_configure,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
         )
         command_line = [

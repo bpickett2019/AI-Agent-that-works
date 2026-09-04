@@ -5,12 +5,12 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
 const BROWSER_OPERATION_NAMES = [
-  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport",
 ];
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
-  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "navigate", "wait", "hover", "search", "selectText",]);
 const ALLOWED_KEYS = new Set([
   "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -34,10 +34,11 @@ const ARTIFACTS: Record<string, string> = {
   domain_results: "domain-results.json",
   inspection_summary: "input.inspection-summary.json",
   browser_runtime: "browser-runtime.json",
+  performance: "performance-summary.json",
 };
 const ALLOWED_TOOLS = new Set([
-  "cvent_prepare_rr", "cvent_expectations", "cvent_job_read",
-  "cvent_job_update", "cvent_record_domain", "cvent_browser",
+  "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
+  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_configure",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
@@ -46,6 +47,7 @@ const MAX_CHILD_OUTPUT = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-snapshot-pending.json");
 const WRITE_READBACK_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-write-readback-required.json");
+const PERFORMANCE_EVENTS = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "performance-events.jsonl");
 const queues = new Map<string, Promise<unknown>>();
 
 function requiredEnvironment(name: string): string {
@@ -191,6 +193,12 @@ async function assertSafeArtifactTarget(path: string): Promise<string> {
   return target;
 }
 
+async function appendPerformance(kind: string, startedMs: number, details: Record<string, unknown> = {}): Promise<void> {
+  const target = await assertSafeArtifactTarget(PERFORMANCE_EVENTS);
+  const payload = { timestamp: new Date().toISOString(), kind, durationMs: Math.max(0, Math.round((performance.now() - startedMs) * 10) / 10), ...details };
+  await appendFile(target, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
 async function appendActivity(message: string): Promise<void> {
   const safe = cleanText(message, 1200).replace(/[\r\n]+/g, " ");
   if (!safe) return;
@@ -215,11 +223,15 @@ function hash(buffer: Buffer): string {
 async function verifiedCompiledExpectations(): Promise<any> {
   const input = await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
   const expected = await readJson(join(jobDir, "expected-domains.json"), null);
-  if (!expected) throw new Error("Write blocked: compile the current RR with cvent_prepare_rr first");
+  const validation = await readJson(join(jobDir, "rr-validation.json"), null);
+  const plan = await readJson(join(jobDir, "configuration-plan.json"), null);
+  if (!expected || !validation || !plan) throw new Error("Write blocked: compile and independently validate the current RR with cvent_prepare_rr first");
   if (expected.rr?.sha256 !== hash(input) || expected.rr?.authority !== "uploaded_rr" ||
       expected.target?.eventKey !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY") ||
       expected.target?.eventId !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_ID") ||
-      expected.target?.name !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME")) {
+      expected.target?.name !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME") ||
+      validation.rrSha256 !== expected.rr?.sha256 || plan.rrSha256 !== expected.rr?.sha256 ||
+      plan.target?.eventId !== expected.target?.eventId) {
     throw new Error("Write blocked: compiled RR expectations are stale or belong to another target");
   }
   return expected;
@@ -238,6 +250,7 @@ function parseMarker(stdout: string, marker: string): any {
 }
 
 async function invokeBrowser(operation: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutSeconds = 90): Promise<any> {
+  const started = performance.now();
   await readJobFile(runtimePath, 1024 * 1024);
   const timeout = Math.max(1, Math.min(timeoutSeconds, operation === "recover" ? 300 : 180));
   const boundedParams = { ...params, timeoutSeconds: timeout };
@@ -245,7 +258,9 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
     join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
     "--operation", operation, "--params", JSON.stringify(boundedParams),
   ], "browser", signal, (timeout + (operation === "recover" ? 45 : 10)) * 1000);
-  return parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
+  const result = parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
+  await appendPerformance("browser_operation", started, { operation, intent: params.intent, navigation: ["navigate", "openAuthorizedEvent"].includes(operation), snapshot: operation === "snapshotText", fullSnapshot: operation === "snapshotText", responseBytes: Buffer.byteLength(JSON.stringify(result)) });
+  return result;
 }
 
 function browserParams(operation: string, input: any): Record<string, unknown> {
@@ -258,7 +273,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     params.maxScrolls = Math.max(1, Math.min(Number(input.maxScrolls ?? 30), 60));
   }
   if (operation === "scanEventList") params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
-  if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait", "uploadDiscountImport"].includes(operation) && input.target) {
+  if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait", "uploadDiscountImport", "readTarget"].includes(operation) && input.target) {
     params.target = cleanText(input.target, 4000);
     if (input.targetContext) params.targetContext = cleanText(input.targetContext, 1000);
     if (Number.isInteger(input.targetIndex)) params.targetIndex = Math.max(0, Math.min(Number(input.targetIndex), 20));
@@ -389,7 +404,31 @@ function pageArrays(value: any, offset: number, limit: number): any {
 const optionalStrings = Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 200 }));
 
 export default function cventJobTools(pi: any) {
-  pi.on("session_start", () => pi.setActiveTools([...ALLOWED_TOOLS]));
+  let turnStarted = 0;
+  let firstTokenRecorded = false;
+  const safeMetric = async (kind: string, started: number, details: Record<string, unknown> = {}) => {
+    try { await appendPerformance(kind, started, details); } catch { /* metrics never block configuration */ }
+  };
+  pi.on("session_start", async () => {
+    pi.setActiveTools([...ALLOWED_TOOLS]);
+    await safeMetric("pi_session_start", performance.now(), { pid: process.pid });
+  });
+  pi.on("turn_start", () => { turnStarted = performance.now(); firstTokenRecorded = false; });
+  pi.on("message_update", async (event: any) => {
+    if (!firstTokenRecorded && event.message?.role === "assistant") {
+      firstTokenRecorded = true;
+      await safeMetric("anthropic_first_token", turnStarted || performance.now());
+    }
+  });
+  pi.on("message_end", async (event: any) => {
+    if (event.message?.role !== "assistant") return;
+    const usage = event.message.usage ?? {};
+    await safeMetric("anthropic_response", turnStarted || performance.now(), {
+      inputTokens: usage.input ?? 0, outputTokens: usage.output ?? 0,
+      cacheReadTokens: usage.cacheRead ?? 0, cacheWriteTokens: usage.cacheWrite ?? 0,
+      totalTokens: usage.totalTokens ?? 0,
+    });
+  });
   pi.on("before_agent_start", () => pi.setActiveTools([...ALLOWED_TOOLS]));
   pi.on("tool_call", (event: any) => {
     if (!ALLOWED_TOOLS.has(event.toolName)) {
@@ -416,10 +455,14 @@ export default function cventJobTools(pi: any) {
         await assertSafeArtifactTarget(join(jobDir, "input.inspection.json"));
         await assertSafeArtifactTarget(join(jobDir, "input.inspection-summary.json"));
         await assertSafeArtifactTarget(join(jobDir, "expected-domains.json"));
+        await assertSafeArtifactTarget(join(jobDir, "rr-validation.json"));
+        await assertSafeArtifactTarget(join(jobDir, "configuration-plan.json"));
         await runFixed(python, [join(repoRoot, "inspect_rr.py"), join(jobDir, "input.xlsx"), join(jobDir, "input.inspection.json")], "prepare", signal, 180000);
         const compiled = await runFixed(python, [join(repoRoot, "rr_compiler.py")], "prepare", signal, 180000);
+        const validated = await runFixed(python, [join(repoRoot, "rr_validator.py")], "prepare", signal, 180000);
         const result = JSON.parse(compiled.stdout);
-        await appendActivity(`RR normalized to ${result.counts?.applicableFields ?? 0} writable configuration fields`);
+        result.validation = JSON.parse(validated.stdout).counts;
+        await appendActivity(`RR extracted and independently validated: ${result.counts?.applicableFields ?? 0} writable fields; ${result.validation?.AMBIGUOUS ?? 0} ambiguous`);
         return toolText(result);
       });
     },
@@ -445,6 +488,28 @@ export default function cventJobTools(pi: any) {
       else if (DOMAINS.has(section)) value = expected.domains?.[section];
       else throw new Error("Capability denied: unknown expectation section");
       return toolText(pageArrays(value, params.offset ?? 0, params.limit ?? 10));
+    },
+  });
+
+  pi.registerTool({
+    name: "cvent_plan",
+    label: "Read validated configuration plan",
+    description: "Read the complete pre-Cvent mission summary or one ordered section with RR source evidence and independent VERIFIED/AMBIGUOUS/NOT_SUPPORTED_BY_RR status.",
+    parameters: Type.Object({
+      section: Type.String({ description: "summary, mission, or a configuration domain name" }),
+      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 20000 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    }),
+    async execute(_id: string, params: any) {
+      await verifiedCompiledExpectations();
+      const plan = await readJson(join(jobDir, "configuration-plan.json"), null);
+      const validation = await readJson(join(jobDir, "rr-validation.json"), null);
+      const section = String(params.section);
+      if (section === "summary") return toolText({ counts: validation.counts, target: plan.target, executionRule: plan.executionRule });
+      if (section === "mission") return toolText(plan.mission);
+      if (!DOMAINS.has(section)) throw new Error("Capability denied: unknown plan section");
+      const items = validation.items.filter((item: any) => item.domain === section);
+      return toolText(pageArrays(items, params.offset ?? 0, params.limit ?? 25));
     },
   });
 
@@ -521,6 +586,7 @@ export default function cventJobTools(pi: any) {
         if (params.reviewRequired) state.review_required = params.reviewRequired.map((item: unknown) => cleanText(item, 2000));
         state.updated_at = new Date().toISOString();
         await atomicJson(path, state);
+        await appendPerformance("stage_marker", performance.now(), { stage: state.current_stage, action: state.current_action, status: state.status });
         if (params.log) await appendActivity(params.log);
         return toolText({ ok: true, status: state.status, stage: state.current_stage, action: state.current_action });
       });
@@ -560,7 +626,47 @@ export default function cventJobTools(pi: any) {
         };
         document.updatedAt = new Date().toISOString();
         await atomicJson(path, document);
+        await appendPerformance("domain_result", performance.now(), { domain: params.domain, status: params.status });
         return toolText({ ok: true, domain: params.domain, status: params.status });
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "cvent_verify_domain",
+    label: "Record RR versus Cvent verification",
+    description: "Account for every independently validated RR item in one domain after fresh Cvent readback. All VERIFIED items become MATCH unless explicitly listed as NOT_CONFIGURED, AMBIGUOUS, or PROHIBITED.",
+    parameters: Type.Object({
+      domain: literalUnion(DOMAIN_NAMES),
+      cventEvidence: Type.Array(Type.String({ maxLength: 3000 }), { minItems: 1, maxItems: 100 }),
+      exceptions: Type.Array(Type.Object({
+        itemId: Type.String({ pattern: "^[0-9a-f]{20}$" }),
+        status: Type.Union([Type.Literal("NOT_CONFIGURED"), Type.Literal("AMBIGUOUS"), Type.Literal("PROHIBITED")]),
+        reason: Type.String({ maxLength: 2000 }),
+      }), { maxItems: 500 }),
+    }),
+    async execute(_id: string, params: any) {
+      if (!DOMAINS.has(params.domain)) throw new Error("Capability denied: unknown domain");
+      return withQueue("job-files", async () => {
+        const validation = await readJson(join(jobDir, "rr-validation.json"), null);
+        if (!validation) throw new Error("Run cvent_prepare_rr first");
+        const domainItems = validation.items.filter((item: any) => item.domain === params.domain);
+        const exceptions = new Map(params.exceptions.map((item: any) => [item.itemId, item]));
+        for (const id of exceptions.keys()) if (!domainItems.some((item: any) => item.itemId === id)) throw new Error("Verification exception does not belong to this domain");
+        const document = await readJson(join(jobDir, "final-verification.json"), { schemaVersion: 1, domains: {} });
+        document.domains[params.domain] = {
+          verifiedAt: new Date().toISOString(), cventEvidence: params.cventEvidence,
+          items: domainItems.map((item: any) => {
+            const exception: any = exceptions.get(item.itemId);
+            let status = exception?.status ?? (item.status === "VERIFIED" ? "MATCH" : "AMBIGUOUS");
+            return { itemId: item.itemId, rrStatus: item.status, status, ...(exception ? { reason: exception.reason } : {}) };
+          }),
+        };
+        document.updatedAt = new Date().toISOString();
+        await atomicJson(join(jobDir, "final-verification.json"), document);
+        const counts: Record<string, number> = {};
+        for (const item of document.domains[params.domain].items) counts[item.status] = (counts[item.status] ?? 0) + 1;
+        return toolText({ ok: true, domain: params.domain, counts });
       });
     },
   });
@@ -680,7 +786,7 @@ export default function cventJobTools(pi: any) {
         try {
           await assertSnapshotConsumed();
           const readback = await pendingWriteReadback();
-          const readbackOperation = ["snapshotText", "controlInventory"].includes(operation);
+          const readbackOperation = ["snapshotText", "readTarget", "controlInventory"].includes(operation);
           if (readback && ["navigate", "openAuthorizedEvent", "scanEventList"].includes(operation)) {
             throw new Error("Verify pending Cvent configuration changes before leaving the current page");
           }
@@ -707,6 +813,69 @@ export default function cventJobTools(pi: any) {
           await updateBrowserProgress(`${write ? "Cvent write" : "Cvent browser read"} blocked safely during ${operation}`);
           throw error;
         }
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "cvent_configure",
+    label: "Run bounded Cvent procedure",
+    description: "Execute up to 50 planned operations on one known Cvent page, stop on the first failure without retrying uncertain writes, then capture one fresh verification snapshot.",
+    parameters: Type.Object({
+      procedure: Type.String({ maxLength: 120 }),
+      rrSource: Type.String({ maxLength: 500 }),
+      steps: Type.Array(Type.Object({
+        operation: Type.Union(["click", "activate", "fill", "type", "selectOption", "setChecked", "press", "wait", "uploadDiscountImport"].map((name) => Type.Literal(name))),
+        target: Type.Optional(Type.String({ maxLength: 4000 })),
+        targetContext: Type.Optional(Type.String({ maxLength: 1000 })),
+        targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
+        text: Type.Optional(Type.String({ maxLength: 20000 })),
+        option: Type.Optional(Type.String({ maxLength: 2000 })),
+        optionBy: Type.Optional(Type.Union([Type.Literal("label"), Type.Literal("value")])),
+        checked: Type.Optional(Type.Boolean()),
+        key: Type.Optional(Type.String({ maxLength: 40 })),
+        ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000 })),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 180 })),
+      }), { minItems: 1, maxItems: 50 }),
+    }),
+    async execute(_id: string, params: any, signal: AbortSignal) {
+      return withQueue("browser", async () => {
+        await assertSnapshotConsumed();
+        if (await pendingWriteReadback()) throw new Error("Complete the pending Cvent write readback before starting another procedure");
+        await assertCompiledExpectations();
+        const procedure = cleanText(params.procedure, 120);
+        const rrSource = cleanText(params.rrSource, 500);
+        const results: any[] = [];
+        await updateBrowserProgress(`Running bounded Cvent procedure: ${procedure}`);
+        for (let index = 0; index < params.steps.length; index += 1) {
+          const step = params.steps[index];
+          const operation = String(step.operation);
+          if (operation === "press" && !ALLOWED_KEYS.has(String(step.key))) throw new Error(`Procedure step ${index + 1}: keyboard key is not approved`);
+          const write = operation !== "wait";
+          const input = browserParams(operation, { ...step, intent: write ? "write" : "read", rrSource });
+          try {
+            const result = await invokeBrowser(operation, input, signal, Number(step.timeoutSeconds ?? 90));
+            results.push({ step: index + 1, operation, ok: true, url: result.url, title: result.title });
+            if (write) {
+              const pending = await pendingWriteReadback();
+              await atomicJson(WRITE_READBACK_PENDING, {
+                operations: [...(pending?.operations ?? []), operation].slice(-100), rrSources: [rrSource],
+                browserRuntimeId: result.browserRuntimeId, targetId: result.targetId,
+                requiredAt: pending?.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(), procedure,
+              });
+            }
+          } catch (error) {
+            await updateBrowserProgress(`Bounded procedure ${procedure} stopped safely at step ${index + 1}`);
+            throw error;
+          }
+        }
+        const verification = await invokeBrowser("snapshotText", browserParams("snapshotText", { intent: "read" }), signal, 90);
+        const packaged = await saveLargeSnapshot(verification);
+        const transport = await pendingSnapshot();
+        if (!transport || transport.complete === true) await clearWriteReadback();
+        await appendActivity(`Completed bounded Cvent procedure ${procedure}: ${results.length} operations plus one verification readback`);
+        await updateBrowserProgress(`Verified bounded Cvent procedure: ${procedure}`);
+        return toolText({ ok: true, procedure, operations: results, verification: packaged });
       });
     },
   });
@@ -780,11 +949,27 @@ export default function cventJobTools(pi: any) {
       }
       if (params.status === "DRAFT_COMPLETE" && params.unresolvedItems.length) throw new Error("DRAFT_COMPLETE cannot contain unresolved RR configuration items");
       return withQueue("job-files", async () => {
+        const validation = await readJson(join(jobDir, "rr-validation.json"), { items: [] });
+        const verification = await readJson(join(jobDir, "final-verification.json"), { schemaVersion: 1, domains: {} });
+        const recorded = new Map<string, any>();
+        for (const domain of Object.values(verification.domains ?? {}) as any[]) for (const item of domain.items ?? []) recorded.set(item.itemId, item);
+        for (const rrItem of validation.items ?? []) if (!recorded.has(rrItem.itemId)) recorded.set(rrItem.itemId, {
+          itemId: rrItem.itemId, rrStatus: rrItem.status, status: rrItem.status === "AMBIGUOUS" ? "AMBIGUOUS" : "NOT_CONFIGURED",
+          reason: "Domain was not verified before the job ended",
+        });
+        const accuracy: Record<string, number> = { MATCH: 0, NOT_CONFIGURED: 0, AMBIGUOUS: 0, PROHIBITED: 0 };
+        for (const item of recorded.values()) accuracy[item.status] = (accuracy[item.status] ?? 0) + 1;
+        verification.finalItems = [...recorded.values()]; verification.counts = accuracy; verification.updatedAt = new Date().toISOString();
+        await atomicJson(join(jobDir, "final-verification.json"), verification);
+        if (params.status === "DRAFT_COMPLETE" && (accuracy.NOT_CONFIGURED || accuracy.AMBIGUOUS || accuracy.PROHIBITED)) {
+          throw new Error("DRAFT_COMPLETE requires every RR item to be MATCH");
+        }
         const report = {
           status: params.status,
           unresolved_items: params.unresolvedItems,
           real_reads: params.realReads,
           real_writes: params.realWrites,
+          accuracy,
           guardrails: {
             published: params.guardrails.published,
             emails_sent: params.guardrails.emailsSent,

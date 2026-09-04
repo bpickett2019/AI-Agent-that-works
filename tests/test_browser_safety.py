@@ -300,7 +300,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('cvent_execute',extension)
         self.assertNotIn('cvent_run_js',extension)
         self.assertNotIn('cvent_raw_cdp',extension)
-        for operation in ('recover','authStatus','openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag','uploadDiscountImport'):
+        for operation in ('recover','authStatus','openAuthorizedEvent','readTarget','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag','uploadDiscountImport'):
             self.assertIn(f'"{operation}"',extension)
         self.assertIn('Snapshot chunks must be read exactly once in order',extension)
         self.assertIn('Snapshot worker/browser/job identity mismatch',extension)
@@ -317,6 +317,9 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('fallbackUsed',EGO_DIRECT)
         self.assertIn("ego.setInputFiles(params.target,params.filePath)",EGO_DIRECT)
         self.assertIn('params.artifact = "discount-import.xlsx"',extension)
+        self.assertIn('name: "cvent_configure"',extension)
+        self.assertIn('name: "cvent_verify_domain"',extension)
+        self.assertIn('DRAFT_COMPLETE requires every RR item to be MATCH',extension)
         self.assertNotIn('name: "bash"',extension)
         self.assertNotIn('name: "read"',extension)
         self.assertIn('name: "cvent_login_handoff"',extension)

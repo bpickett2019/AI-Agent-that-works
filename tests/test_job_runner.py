@@ -39,8 +39,8 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("read", tools)
         self.assertNotIn("bash", tools)
         self.assertEqual(tools, {
-            "cvent_prepare_rr", "cvent_expectations", "cvent_job_read",
-            "cvent_job_update", "cvent_record_domain", "cvent_browser", "cvent_login_handoff",
+            "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
+            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_configure", "cvent_login_handoff",
             "cvent_snapshot_chunk", "cvent_finish",
         })
         self.assertEqual(command[-1], "job prompt")
@@ -96,6 +96,10 @@ class JobRunnerConfigurationTests(unittest.TestCase):
             commands.append(command)
             if command[1].endswith("rr_compiler.py"):
                 (self.directory / "expected-domains.json").write_text(json.dumps(expected))
+            if command[1].endswith("rr_validator.py"):
+                rr_hash = expected["rr"]["sha256"]
+                (self.directory / "rr-validation.json").write_text(json.dumps({"rrSha256": rr_hash, "counts": {"VERIFIED": 1}}))
+                (self.directory / "configuration-plan.json").write_text(json.dumps({"rrSha256": rr_hash, "target": expected["target"]}))
             return subprocess.CompletedProcess(command, 0, "{}", "")
 
         with patch("job_runner.job_dir", return_value=self.directory), \
@@ -105,6 +109,9 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertEqual(result, expected)
         self.assertTrue(commands[0][1].endswith("inspect_rr.py"))
         self.assertTrue(commands[1][1].endswith("rr_compiler.py"))
+        self.assertTrue(commands[2][1].endswith("rr_validator.py"))
+        performance = json.loads((self.directory / "preflight-performance.json").read_text())
+        self.assertEqual([item["stage"] for item in performance["stages"]], ["rr_load_inspection", "rr_extraction", "rr_validation_and_planning"])
 
     def test_pi_config_bounds_429_retry_behavior(self):
         self.runner._write_pi_settings(self.directory)
