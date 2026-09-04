@@ -6,10 +6,11 @@ from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
 from browser_gate import action
-from browser_runtime import load,local_probe
+from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
+from runtime_config import browser_auth_metadata_path, browser_profile_dir
 from scope_manifest import SCOPE_MANIFEST as DEFAULT_SCOPE_MANIFEST, SCOPE_WORKBOOK as DEFAULT_SCOPE_WORKBOOK, load_manifest as load_scope_manifest
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'));SCOPE_MANIFEST=DEFAULT_SCOPE_MANIFEST;SCOPE_WORKBOOK=DEFAULT_SCOPE_WORKBOOK
-EGO={'probe','recover','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
+EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag'}
 INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
 def event_key(url):
     try:
@@ -86,6 +87,24 @@ def guard(runtime,operation,params):
         if re.search(r'/(account|organization|admin|global)(/|$)',parsed.path,re.I):raise RuntimeError('Navigation to account-global Cvent settings is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
     return current
+def authenticated_profile_status(runtime):
+    current=local_probe(runtime);slot=int(runtime.get('workerSlot',0));workspace=os.environ.get('CVENT_WORKSPACE_ID','')
+    expected=browser_profile_dir(workspace,slot) if workspace and slot else None
+    path=browser_auth_metadata_path(workspace,slot) if workspace and slot else None
+    try:metadata=json.loads(path.read_text()) if path else {}
+    except Exception:metadata={}
+    profile_match=bool(expected and Path(runtime.get('profilePath','')).resolve()==expected.resolve() and expected.is_dir())
+    host=(urlparse(current.get('url','')).hostname or '').lower();url=current.get('url','')
+    page=select_page(browser_pages(runtime['cdpHttpOrigin']),runtime['targetBrowserIdentity']['targetId'])
+    organization='';ui={}
+    if page:
+        cookies=browser_command(page['webSocketDebuggerUrl'],'Network.getAllCookies',{},runtime['cdpHttpOrigin']).get('cookies',[])
+        organization=next((str(c.get('value','')) for c in cookies if c.get('name')=='org-id' and str(c.get('domain','')).endswith('cvent.com')),'')
+        ui=browser_command(page['webSocketDebuggerUrl'],'Runtime.evaluate',{'expression':"(() => { const text=(document.body?.innerText||'').slice(0,50000); return {ready:document.readyState,hasUi:/(?:event management|my events|event details|registration|cvent)/i.test(text),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(text)} })()",'returnByValue':True},runtime['cdpHttpOrigin']).get('result',{}).get('value',{})
+    context_match=bool(organization and metadata.get('organizationId')==organization)
+    authenticated=bool(metadata.get('authenticated') is True and metadata.get('workerSlot')==slot and profile_match and context_match and host=='app.cvent.com' and not re.search(r'(?:login|signin|authenticate|sso)',url,re.I) and ui.get('ready')=='complete' and ui.get('hasUi') and not ui.get('hasLogin'))
+    return {'ok':True,'operation':'authStatus','authenticated':authenticated,'persistedProfile':bool(metadata),'workerSlot':slot,'profileMatch':profile_match,'accountContextMatch':context_match,'loginRequired':not authenticated}
+
 def recover_browser(runtime_path,runtime,tool,params):
     deadline=time.monotonic()+max(10,min(int(params.get('timeoutSeconds',240)),300));last='renderer did not respond'
     while time.monotonic()<deadline:
@@ -113,6 +132,8 @@ def run_direct(runtime_path,runtime,tool,operation,params):
     if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
     with action(runtime['browserRuntimeId'],'PI_EGO'):
         current=guard(runtime,operation,params)
+        if operation=='authStatus':
+            return {'tool':'ego','router':'ego',**authenticated_profile_status(runtime)}
         if operation=='authorizeTarget':
             probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','snapshotText','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=90);observed=child_result(probe)
             info=local_probe(runtime);key=event_key(info.get('url',''))

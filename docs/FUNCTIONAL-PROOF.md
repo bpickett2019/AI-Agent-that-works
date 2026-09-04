@@ -218,7 +218,7 @@ Exactly **two additional** explicitly authorized disposable Draft/unpublished ev
 - no production attendees/contacts/communications;
 - disposable test data and permission to reset between tests.
 
-Each worker profile needs one completed Microsoft SSO/MFA login, `SAVE LOGIN INFO`, authenticated organization cookie, and returned agent control. Three concurrent acceptance jobs require three independently persisted job profiles. CAPTCHA/conditional-access prompts remain human-only.
+Each worker profile needs one completed Microsoft SSO/MFA login and returned agent control. `RETURN TO AGENT` performs a fresh read-only Cvent authentication check and records safe slot-scoped profile metadata; the dedicated Chromium user-data directory supplies persistence without cookie copying. Three concurrent acceptance jobs require three independently persisted slot profiles. CAPTCHA/conditional-access prompts remain human-only.
 
 ## Ready-to-run live acceptance plan
 

@@ -96,17 +96,20 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(len(first), 64)
         self.assertEqual((Path(self.temp.name) / ".development-session-secret").stat().st_mode & 0o777, 0o600)
 
-    def test_user_save_login_return_to_agent_keeps_valid_csrf(self):
+    def test_return_to_agent_verifies_and_persists_slot_profile_automatically(self):
         with TestClient(cvent_app.app) as client:
             me = client.get("/api/me").json()
             headers = {"X-CSRF-Token": me["csrf"]}
             user = self.store.ensure_user("dev:user-one", "one@example.test", "User One", False)
             job = self.make_job(user, "handoff")
             directory = Path(self.temp.name) / "handoff"
+            profile = Path(self.temp.name) / "browser-profiles" / "slot-1" / "chromium-profile"
+            metadata_path = profile.parent / "auth-profile.json"
+            profile.mkdir(parents=True)
             gate = BrowserGate(directory);gate.initialize()
             runtime = {
-                "browserRuntimeId": "runtime-test", "providerSessionId": "steel-test",
-                "cdpHttpOrigin": "http://127.0.0.1:9334",
+                "browserRuntimeId": "runtime-test", "providerSessionId": "steel-test", "workerSlot": 1,
+                "profilePath": str(profile), "cdpHttpOrigin": "http://127.0.0.1:9334",
                 "targetBrowserIdentity": {"targetId": "target-test"},
             }
             process = SimpleNamespace(pid=98765, poll=lambda: None)
@@ -116,25 +119,67 @@ class AuthorizationTests(unittest.TestCase):
                 {"name": "org-id", "value": "organization-test", "domain": ".cvent.com", "session": False},
                 {"name": "ESTSAUTHPERSISTENT", "value": "redacted", "domain": ".login.microsoftonline.com", "session": False},
             ]}
+            ui = {"result": {"value": {"ready": "complete", "title": "Events", "hasUi": True, "hasLogin": False}}}
             with patch.object(cvent_app, "directory_for", return_value=directory), \
                  patch.object(cvent_app, "active_job", return_value=active), \
+                 patch.object(cvent_app, "browser_profile_dir", return_value=profile), \
+                 patch.object(cvent_app, "browser_auth_metadata_path", return_value=metadata_path), \
                  patch.object(cvent_app, "load_browser_runtime", return_value=runtime), \
                  patch.object(cvent_app, "browser_pages", return_value=[page]), \
                  patch.object(cvent_app, "select_page", return_value=page), \
                  patch.object(cvent_app, "local_probe", return_value={"url": "https://app.cvent.com/Subscribers/Events2/EventSelection", "title": "Events", "marker": "runtime-test", "targetId": "target-test"}), \
-                 patch.object(cvent_app, "browser_command", return_value=cookies), \
-                 patch.object(cvent_app, "tool_probe", side_effect=[
-                     {"ok": True, "snapshot": "authenticated"}, {"ok": True, "page": {"url": "https://app.cvent.com/Subscribers/Events2/EventSelection"}},
-                 ]), patch.object(cvent_app.os, "killpg"):
+                 patch.object(cvent_app, "browser_command", side_effect=[cookies, ui]), \
+                 patch.object(cvent_app.os, "killpg"):
                 take = client.post(f"/api/browser/take-control?job_id={job['id']}", headers=headers)
                 self.assertEqual(take.status_code, 200)
-                self.assertEqual(gate.read()["ownership"], "USER")
-                saved = client.post(f"/api/auth-settings?job_id={job['id']}", headers=headers)
-                self.assertEqual(saved.status_code, 200)
                 returned = client.post(f"/api/browser/return-to-agent?job_id={job['id']}", headers=headers)
                 self.assertEqual(returned.status_code, 200)
+                self.assertTrue(returned.json()["verified"])
                 self.assertEqual(gate.read()["ownership"], "AGENT")
+                persisted = json.loads(metadata_path.read_text())
+                self.assertEqual(persisted["workerSlot"], 1)
+                self.assertTrue(persisted["authenticated"])
+                self.assertEqual(persisted["profilePath"], str(profile))
+                self.assertFalse(set(persisted) & {"password", "otp", "mfa", "cookies", "token"})
+                self.assertTrue((directory / "auth-settings.json").exists())
                 self.assertNotEqual(client.post("/api/start", headers=headers).status_code, 403)
+
+    def test_incomplete_login_keeps_user_control_and_persists_nothing(self):
+        with TestClient(cvent_app.app) as client:
+            me = client.get("/api/me").json()
+            user = self.store.ensure_user("dev:user-one", "one@example.test", "User One", False)
+            job = self.make_job(user, "incomplete-login")
+            directory = Path(self.temp.name) / "incomplete-login"
+            metadata_path = Path(self.temp.name) / "slot-1" / "auth-profile.json"
+            gate = BrowserGate(directory); gate.initialize()
+            value = gate.read(); value.update({"ownership": "USER", "desiredOwnership": "USER"}); gate.write(value)
+            active = SimpleNamespace(slot_id=1, process=SimpleNamespace(pid=98765, poll=lambda: None))
+            with patch.object(cvent_app, "directory_for", return_value=directory), \
+                 patch.object(cvent_app, "active_job", return_value=active), \
+                 patch.object(cvent_app, "browser_auth_metadata_path", return_value=metadata_path), \
+                 patch.object(cvent_app, "verify_authenticated_cvent", side_effect=RuntimeError("not authenticated")):
+                response = client.post(f"/api/browser/return-to-agent?job_id={job['id']}",
+                                       headers={"X-CSRF-Token": me["csrf"]})
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["detail"], "Cvent login is not complete. Finish SSO/MFA before returning control.")
+            self.assertEqual(gate.read()["ownership"], "USER")
+            self.assertFalse(metadata_path.exists())
+
+    def test_reset_login_clears_only_selected_slot(self):
+        with TestClient(cvent_app.app) as client:
+            me = client.get("/api/me").json()
+            roots = {}
+            for slot in (1, 2):
+                profile = Path(self.temp.name) / "profiles" / f"slot-{slot}" / "chromium-profile"
+                profile.mkdir(parents=True)
+                (profile / "state").write_text("isolated")
+                roots[slot] = profile
+            with patch.object(cvent_app, "browser_profile_dir", side_effect=lambda _workspace, slot: roots[slot]):
+                response = client.post("/api/browser/reset-login", json={"worker_slot": 1},
+                                       headers={"X-CSRF-Token": me["csrf"]})
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(roots[1].parent.exists())
+            self.assertTrue(roots[2].exists())
 
     def test_return_to_agent_clears_stale_user_gate_after_login_process_exits(self):
         with TestClient(cvent_app.app) as client:

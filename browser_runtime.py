@@ -117,6 +117,7 @@ def initialize(job_dir=None, slot_id=None, authorized_name=None, authorized_even
         "steelWorkspaceId": current.name,
         "providerSessionId": slot.container_name,
         "workerSlot": slot.slot_id,
+        "profilePath": str(Path(os.environ.get("CVENT_BROWSER_PROFILE_DIR", current / "chromium-profile")).resolve()),
         "apiOrigin": api_origin,
         "cdpEndpoint": browser_ws,
         "cdpHttpOrigin": cdp_http,

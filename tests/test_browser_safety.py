@@ -1,4 +1,4 @@
-import json,subprocess,tempfile,unittest
+import json,os,subprocess,tempfile,unittest
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
@@ -93,6 +93,15 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn("`${prettyStage(last)} complete`",HTML)
         self.assertIn("completed.length>knownCompleted",HTML)
         self.assertIn("classList.toggle('is-complete',done)",HTML)
+    def test_login_is_one_continuous_return_to_agent_workflow(self):
+        self.assertNotIn('id="save-auth"', HTML)
+        self.assertNotIn('SAVE LOGIN INFO', HTML)
+        self.assertIn('id="reset-login"', HTML)
+        self.assertIn('RESET CVENT LOGIN', HTML)
+        self.assertIn('Forge verifies before persisting', HTML)
+        self.assertIn("'/api/browser/reset-login'", HTML)
+        self.assertIn('profilePersisted: true', (ROOT/'extensions/cvent-job-tools.ts').read_text())
+
     def test_operator_errors_are_actionable_and_do_not_lead_with_stack_traces(self):
         for text in (
             'Anthropic is unavailable',
@@ -215,6 +224,26 @@ class BrowserTargetSafetyTests(unittest.TestCase):
                     'intent':'read','eventName':self.runtime['authorizedEventName'],'eventKey':'locked',
                 })
 
+    def test_auth_status_verifies_slot_profile_without_exposing_cookie_values(self):
+        profile=self.base/'browser-profiles'/'slot-1'/'chromium-profile';profile.mkdir(parents=True)
+        metadata=profile.parent/'auth-profile.json'
+        metadata.write_text(json.dumps({'authenticated':True,'workerSlot':1,'organizationId':'org-private'}))
+        runtime={**self.runtime,'workerSlot':1,'profilePath':str(profile),'cdpHttpOrigin':'http://127.0.0.1:9334','targetBrowserIdentity':{'targetId':'target'}}
+        page={'id':'target','webSocketDebuggerUrl':'ws://127.0.0.1/devtools/page/target'}
+        cookies={'cookies':[{'name':'org-id','value':'org-private','domain':'.cvent.com'}]}
+        ui={'result':{'value':{'ready':'complete','hasUi':True,'hasLogin':False}}}
+        with patch.dict(os.environ,{'CVENT_WORKSPACE_ID':'workspace-one'}), \
+             patch.object(browser_tool,'browser_profile_dir',return_value=profile), \
+             patch.object(browser_tool,'browser_auth_metadata_path',return_value=metadata), \
+             patch.object(browser_tool,'local_probe',return_value={'url':'https://app.cvent.com/Subscribers/Events2/EventSelection','title':'Events'}), \
+             patch.object(browser_tool,'browser_pages',return_value=[page]), \
+             patch.object(browser_tool,'select_page',return_value=page), \
+             patch.object(browser_tool,'browser_command',side_effect=[cookies,ui]):
+            result=browser_tool.authenticated_profile_status(runtime)
+        self.assertTrue(result['authenticated'])
+        self.assertTrue(result['accountContextMatch'])
+        self.assertNotIn('org-private',json.dumps(result))
+
     def test_navigation_fails_closed(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/subscribers/events2/EventSelection'}
         with self.assertRaisesRegex(RuntimeError,'non-authorized'):
@@ -247,7 +276,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('cvent_execute',extension)
         self.assertNotIn('cvent_run_js',extension)
         self.assertNotIn('cvent_raw_cdp',extension)
-        for operation in ('recover','openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag'):
+        for operation in ('recover','authStatus','openAuthorizedEvent','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag'):
             self.assertIn(f'"{operation}"',extension)
         self.assertIn('Snapshot chunks must be read exactly once in order',extension)
         self.assertIn('Snapshot worker/browser/job identity mismatch',extension)

@@ -79,6 +79,11 @@ def browser_cache_dir(workspace_id: str, slot_id: int) -> Path:
     return workspace_dir(workspace_id) / "browser-profiles" / f"slot-{slot.slot_id}" / "steel-cache"
 
 
+def browser_auth_metadata_path(workspace_id: str, slot_id: int) -> Path:
+    slot = slot_by_id(slot_id)
+    return workspace_dir(workspace_id) / "browser-profiles" / f"slot-{slot.slot_id}" / "auth-profile.json"
+
+
 def slot_by_id(slot_id: int) -> WorkerSlot:
     try:
         return next(slot for slot in WORKER_SLOTS if slot.slot_id == slot_id)

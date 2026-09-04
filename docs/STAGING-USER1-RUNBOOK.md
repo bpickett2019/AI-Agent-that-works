@@ -55,11 +55,11 @@ IP on port 8877. Do not forward ports 3005-3007 or 9334-9336.
 7. Complete Microsoft/Cvent SSO and MFA yourself. Never send credentials or MFA
    codes to the agent or operator.
 8. Confirm the browser shows the expected authenticated Cvent account.
-9. Click **SAVE LOGIN INFO**.
-10. Click **RETURN TO AGENT**.
-11. Monitor status. Stop immediately if Forge instructs you not to retry or the
+9. Click **RETURN TO AGENT**. Forge performs a fresh read-only authentication
+   check and persists only this USER slot's browser profile automatically.
+10. Monitor status. Stop immediately if Forge instructs you not to retry or the
     visible event/account is not the approved target.
-12. A pass requires **BUILD COMPLETED · FINAL READBACK PASSED**. Opening the event
+11. A pass requires **BUILD COMPLETED · FINAL READBACK PASSED**. Opening the event
     is not completion.
 
 The first operator acceptance build and zero-write idempotent rerun must pass

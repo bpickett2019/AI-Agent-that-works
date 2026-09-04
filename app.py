@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import signal
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,10 +20,10 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from auth import EntraAuth, Identity
 from browser_gate import BrowserGate
-from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page, tool_probe
+from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page
 from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
-from runtime_config import DATA_ROOT, ROOT, authorized_events, browser_profile_dir, job_dir, validate_production_environment
+from runtime_config import DATA_ROOT, ROOT, authorized_events, browser_auth_metadata_path, browser_profile_dir, job_dir, validate_production_environment
 from scope_manifest import load_manifest as load_scope_manifest
 from workbook_ops import info as workbook_info_data, sheet as workbook_sheet_data, update as update_workbook_data
 
@@ -94,6 +95,84 @@ def directory_for(job: dict) -> Path:
 
 def active_job(job: dict):
     return runner.active(job["id"])
+
+
+def verified_auth_metadata(job: dict, slot_id: int) -> dict:
+    path = browser_auth_metadata_path(job["workspace_id"], slot_id)
+    metadata = read_json(path, {})
+    expected_profile = browser_profile_dir(job["workspace_id"], slot_id)
+    if (
+        metadata.get("authenticated") is True
+        and metadata.get("workerSlot") == slot_id
+        and metadata.get("profilePath") == str(expected_profile)
+        and expected_profile.exists()
+    ):
+        return metadata
+    return {}
+
+
+def verify_authenticated_cvent(job: dict, active, directory: Path) -> tuple[dict, dict]:
+    runtime = load_browser_runtime(directory / "browser-runtime.json")
+    slot_id = int(active.slot_id)
+    expected_profile = browser_profile_dir(job["workspace_id"], slot_id)
+    if int(runtime.get("workerSlot", 0)) != slot_id:
+        raise RuntimeError("Browser runtime does not belong to this worker slot")
+    if Path(runtime.get("profilePath", "")).resolve() != expected_profile.resolve():
+        raise RuntimeError("Browser profile does not belong to this worker slot")
+    if not expected_profile.is_dir():
+        raise RuntimeError("Worker browser profile is unavailable")
+    viewer = local_probe(runtime)
+    page_url = str(viewer.get("url", ""))
+    host = (urlparse(page_url).hostname or "").lower()
+    if host != "app.cvent.com" or re.search(r"(?:login|signin|authenticate|sso)", page_url, re.I):
+        raise RuntimeError("Browser is not on the authenticated Cvent application origin")
+    page = select_page(browser_pages(runtime["cdpHttpOrigin"]), runtime["targetBrowserIdentity"]["targetId"])
+    if not page:
+        raise RuntimeError("Authenticated Cvent page is unavailable")
+    cookies = browser_command(page["webSocketDebuggerUrl"], "Network.getAllCookies", {}, runtime["cdpHttpOrigin"]).get("cookies", [])
+    organization_id = next((str(cookie.get("value", "")) for cookie in cookies
+                            if cookie.get("name") == "org-id" and str(cookie.get("domain", "")).endswith("cvent.com")), "")
+    ui = browser_command(
+        page["webSocketDebuggerUrl"], "Runtime.evaluate",
+        {"expression": "(() => { const text=(document.body?.innerText||'').slice(0,50000); return {ready:document.readyState,title:document.title,hasUi:/(?:event management|my events|event details|registration|cvent)/i.test(text),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(text)} })()", "returnByValue": True},
+        runtime["cdpHttpOrigin"],
+    ).get("result", {}).get("value", {})
+    if not organization_id or ui.get("ready") != "complete" or not ui.get("hasUi") or ui.get("hasLogin"):
+        raise RuntimeError("Cvent UI does not prove a completed authenticated session")
+    prior = read_json(browser_auth_metadata_path(job["workspace_id"], slot_id), {})
+    if prior.get("organizationId") and prior["organizationId"] != organization_id:
+        raise RuntimeError("Cvent account context differs from this slot's saved login")
+    timestamp = now()
+    metadata = {
+        "schemaVersion": 1,
+        "workerSlot": slot_id,
+        "profileId": f"{job['workspace_id']}:slot-{slot_id}",
+        "profilePath": str(expected_profile),
+        "createdAt": prior.get("createdAt") or timestamp,
+        "lastVerifiedAt": timestamp,
+        "authenticated": True,
+        "organizationId": organization_id,
+        "authenticatedOrigin": "https://app.cvent.com",
+        "browserRuntimeId": runtime["browserRuntimeId"],
+        "microsoftSsoPersistent": any(cookie.get("name") == "ESTSAUTHPERSISTENT" for cookie in cookies),
+    }
+    evidence = {"browserRuntimeId": runtime["browserRuntimeId"], "viewer": viewer,
+                "uiVerified": True, "inspectedAt": timestamp}
+    return metadata, evidence
+
+
+def persist_authenticated_cvent(job: dict, directory: Path, metadata: dict) -> None:
+    slot_path = browser_auth_metadata_path(job["workspace_id"], int(metadata["workerSlot"]))
+    atomic_json(slot_path, metadata)
+    os.chmod(slot_path, 0o600)
+    # The bounded agent sees only a redacted job-scoped proof. The internal
+    # account-context identifier remains in slot metadata for wrong-account
+    # detection and is not exposed through agent tools or the product API.
+    job_metadata = {key: value for key, value in metadata.items() if key != "organizationId"}
+    job_metadata["accountContextVerified"] = True
+    job_path = directory / "auth-settings.json"
+    atomic_json(job_path, job_metadata)
+    os.chmod(job_path, 0o600)
 
 
 def safe_job(job: dict, include_owner: bool = False) -> dict:
@@ -246,15 +325,15 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     state["agent_session_saved"] = bool(state.get("pi_session"))
     state["browser"] = {"running": bool(active), "worker_slot": active.slot_id if active else None,
                         "viewer_url": f"/api/jobs/{job['id']}/viewer" if active else None}
-    saved_auth = read_json(directory / "auth-settings.json", {})
+    profile_slot = int((active.slot_id if active else None) or job.get("slot_id") or job.get("preferred_slot") or 1)
+    saved_auth = verified_auth_metadata(job, profile_slot)
     state["auth_settings"] = {
-        "organization_id": saved_auth.get("organization_id", ""),
-        "authenticated_at": saved_auth.get("authenticated_at"),
-        "cookies_saved": bool(saved_auth.get("authenticated_at") and saved_auth.get("profile_slot") and
-                              browser_profile_dir(job["workspace_id"], int(saved_auth["profile_slot"])).exists()),
-        "microsoft_sso_persistent": bool(saved_auth.get("microsoft_sso_persistent")),
-        "cvent_cookie_count": saved_auth.get("cvent_cookie_count", 0),
-        "microsoft_cookie_count": saved_auth.get("microsoft_cookie_count", 0),
+        "verified": bool(saved_auth),
+        "worker_slot": profile_slot,
+        "last_verified_at": saved_auth.get("lastVerifiedAt"),
+        "cookies_saved": bool(saved_auth),
+        "microsoft_sso_persistent": bool(saved_auth.get("microsoftSsoPersistent")),
+        "display": f"USER {profile_slot} · Cvent login verified" if saved_auth else f"USER {profile_slot} · Cvent login required",
     }
     workbook = directory / "input.xlsx"
     state["rr_version"] = str(workbook.stat().st_mtime_ns) if workbook.exists() else None
@@ -342,40 +421,17 @@ def update_workbook(request: Request, payload: dict, job_id: str | None = None):
 
 @app.post("/api/auth-settings")
 def save_auth_settings(request: Request, job_id: str | None = None):
+    """Compatibility endpoint; normal UX persists automatically on Return."""
     identity = current_user(request, mutate=True)
-    job = authorize_job(identity, job_id)
-    _, active = require_active(identity, job["id"])
+    job, active = require_active(identity, authorize_job(identity, job_id)["id"])
     directory = directory_for(job)
-    runtime = load_browser_runtime(directory / "browser-runtime.json")
-    page = select_page(browser_pages(runtime["cdpHttpOrigin"]), runtime["targetBrowserIdentity"]["targetId"])
-    if not page:
-        raise HTTPException(409, "No Cvent page is open in this job's Steel browser")
-    live = local_probe(runtime)
-    host = (urlparse(live.get("url", "")).hostname or "").lower()
-    if not host.endswith("cvent.com") or "login" in live.get("url", "").lower():
-        raise HTTPException(409, "Finish Cvent Microsoft SSO before saving login status")
-    reply = browser_command(page["webSocketDebuggerUrl"], "Network.getAllCookies", {}, runtime["cdpHttpOrigin"])
-    cookies = reply.get("cookies", [])
-    organization_id = next((cookie.get("value", "") for cookie in cookies
-                            if cookie.get("name") == "org-id" and cookie.get("domain", "").endswith("cvent.com")), "")
-    if not organization_id:
-        raise HTTPException(409, "Authenticated Cvent organization cookie was not found")
-    facts = {
-        "organization_id": organization_id,
-        "microsoft_sso_persistent": any(cookie.get("name") == "ESTSAUTHPERSISTENT" for cookie in cookies),
-        "cvent_cookie_count": sum(cookie.get("domain", "").endswith("cvent.com") for cookie in cookies),
-        "microsoft_cookie_count": sum("microsoftonline.com" in cookie.get("domain", "") for cookie in cookies),
-        "cvent_session_cookie_count": sum(
-            cookie.get("domain", "").endswith("cvent.com") and cookie.get("session") is True for cookie in cookies
-        ),
-        "profile_slot": active.slot_id,
-        "authenticated_at": now(),
-    }
-    path = directory / "auth-settings.json"
-    atomic_json(path, facts)
-    os.chmod(path, 0o600)
-    store.audit(identity["subject"], "cvent_login.confirmed", job["id"], {"organization_id": organization_id})
-    return {"ok": True, **facts}
+    try:
+        metadata, _ = verify_authenticated_cvent(job, active, directory)
+    except Exception as exc:
+        raise HTTPException(409, "Cvent login is not complete. Finish SSO/MFA before returning control.") from exc
+    persist_authenticated_cvent(job, directory, metadata)
+    store.audit(identity["subject"], "cvent_login.verified", job["id"], {"worker_slot": active.slot_id})
+    return {"ok": True, "verified": True, "worker_slot": active.slot_id}
 
 
 @app.post("/api/start")
@@ -587,22 +643,19 @@ def return_to_agent(request: Request, job_id: str | None = None):
             store.audit(identity["subject"], "browser.return_stale_control", job["id"], {})
             return {"ok": True, "staleReset": True, "gate": gate.read(), "instruction": "Continue to acquire a fresh isolated browser runtime"}
         raise HTTPException(409, "CVENT Agent is not actively running")
-    runtime_path = directory / "browser-runtime.json"
-    runtime = load_browser_runtime(runtime_path)
     gate.shield_agent()
     with gate.lock_file():
         try:
-            viewer = local_probe(runtime)
-            ego = tool_probe(runtime, ["node", "ego_direct.mjs", "--runtime", str(runtime_path), "--operation", "snapshotText", "--params", "{}"])
-            ego_page = tool_probe(runtime, ["node", "ego_direct.mjs", "--runtime", str(runtime_path), "--operation", "pageInfo", "--params", "{}"])
-            if not ego.get("ok") or not ego_page.get("ok"):
-                raise RuntimeError("Fresh Ego browser read failed")
+            metadata, state = verify_authenticated_cvent(job, active, directory)
             lock = read_json(directory / "authorized-target.json", {})
             if lock and (lock.get("event_id") != job["event_id"] or lock.get("event_key") != job["event_key"]):
-                raise RuntimeError("Human left the authorized Cvent event; CVENT Agent remains paused")
-            state = {"browserRuntimeId": runtime["browserRuntimeId"], "viewer": viewer, "ego": ego,
-                     "egoPage": ego_page, "inspectedAt": now()}
+                raise RuntimeError("Human left the authorized Cvent event")
+            persist_authenticated_cvent(job, directory, metadata)
             atomic_json(directory / "human-handoff-state.json", state)
+            job_state = read_json(directory / "state.json", {})
+            job_state.update({"current_action": "Cvent login verified and persisted for this worker; resuming agent",
+                              "updated_at": now()})
+            atomic_json(directory / "state.json", job_state)
             value = gate.read()
             value.update({
                 "ownership": "AGENT", "desiredOwnership": "AGENT", "activeActor": "NONE",
@@ -610,13 +663,44 @@ def return_to_agent(request: Request, job_id: str | None = None):
             })
             gate.write(value)
             os.killpg(active.process.pid, signal.SIGCONT)
-        except Exception:
+        except Exception as exc:
             value = gate.read()
             value.update({
-                "ownership": "NONE", "desiredOwnership": "AGENT", "activeActor": "NONE",
-                "automationOwner": "NONE", "transition": "RETURN_BLOCKED", "agentPaused": True,
+                "ownership": "USER", "desiredOwnership": "USER", "activeActor": "USER",
+                "automationOwner": "USER", "transition": None, "agentPaused": True,
+                "pausedPids": [active.process.pid],
             })
             gate.write(value)
-            raise
-    store.audit(identity["subject"], "browser.return_to_agent", job["id"], {})
-    return {"ok": True, "gate": gate.read(), "state": state}
+            store.audit(identity["subject"], "browser.return_rejected", job["id"],
+                        {"worker_slot": active.slot_id, "reason": type(exc).__name__})
+            raise HTTPException(409, "Cvent login is not complete. Finish SSO/MFA before returning control.") from exc
+    store.audit(identity["subject"], "browser.return_to_agent", job["id"],
+                {"worker_slot": active.slot_id, "profile_verified": True})
+    return {"ok": True, "verified": True, "worker_slot": active.slot_id, "gate": gate.read()}
+
+
+@app.post("/api/browser/reset-login")
+def reset_cvent_login(request: Request, payload: dict):
+    identity = current_user(request, mutate=True)
+    try:
+        slot_id = int(payload.get("worker_slot"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Worker profile must be 1, 2, or 3") from exc
+    if slot_id not in range(1, store.slots + 1):
+        raise HTTPException(400, "Worker profile must be 1, 2, or 3")
+    for job in store.list_jobs(identity["subject"], limit=1000):
+        active = active_job(job)
+        if active and active.slot_id == slot_id:
+            attempted = runner._mutation_attempted(directory_for(job))
+            runner.stop(job["id"], identity["subject"], uncertain=attempted)
+            for _ in range(300):
+                if not active_job(job):
+                    break
+                time.sleep(0.1)
+            if active_job(job):
+                raise HTTPException(409, "USER slot did not stop safely; login was not reset")
+    slot_root = browser_profile_dir(identity["workspace_id"], slot_id).parent
+    if slot_root.exists():
+        shutil.rmtree(slot_root)
+    store.audit(identity["subject"], "cvent_login.reset", None, {"worker_slot": slot_id})
+    return {"ok": True, "worker_slot": slot_id, "instruction": "Fresh human Cvent SSO/MFA is required"}

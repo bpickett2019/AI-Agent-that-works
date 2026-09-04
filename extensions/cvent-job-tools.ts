@@ -5,12 +5,12 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
 const BROWSER_OPERATION_NAMES = [
-  "probe", "recover", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover",  "selectOption", "setChecked", "press", "search", "selectText", "drag",
 ];
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
-  "probe", "recover", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "navigate", "wait", "hover", "search", "selectText",]);
 const ALLOWED_KEYS = new Set([
   "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -562,9 +562,11 @@ export default function cventJobTools(pi: any) {
           pageTitle = String(pageResult?.page?.title ?? "");
           try { host = new URL(pageUrl).hostname.toLowerCase(); } catch { host = ""; }
         }
-        const needsLogin = host.includes("microsoftonline.com") || host.includes("login.windows.net") || host.includes("login.live.com") || /(?:login|sign.?in|sso|authenticate)/i.test(`${pageUrl} ${pageTitle}`);
-        if (!needsLogin) {
-          return toolText({ ok: true, loginRequired: false, url: pageUrl, instruction: "The browser is not on a login page; fresh-read a complete snapshot and continue." });
+        const auth = await invokeBrowser("authStatus", { intent: "read" }, signal, 45);
+        if (auth.authenticated === true && auth.workerSlot === Number(requiredEnvironment("CVENT_WORKER_SLOT"))) {
+          await appendActivity("Cvent login already active; verified this worker's isolated persisted profile");
+          return toolText({ ok: true, loginRequired: false, persistedProfileReused: true,
+            instruction: "Cvent login already active in this worker's isolated profile; fresh-read a complete snapshot and continue." });
         }
 
         const gatePath = join(jobDir, "browser-gate.json");
@@ -576,7 +578,7 @@ export default function cventJobTools(pi: any) {
         const state = await readJson(statePath, {});
         state.status = "login_required";
         state.current_stage = "login_required";
-        state.current_action = "Complete Cvent SSO/MFA in the browser, save login info, then return control to the agent";
+        state.current_action = "Complete Cvent SSO/MFA in the browser, then return control to the agent";
         state.updated_at = new Date().toISOString();
         await atomicJson(statePath, state);
         gate.ownership = "USER";
@@ -590,7 +592,7 @@ export default function cventJobTools(pi: any) {
         await atomicJson(gatePath, gate);
         await appendActivity("Cvent login required; browser control handed to user for SSO/MFA");
 
-        const deadline = Date.now() + 30 * 60 * 1000;
+        const deadline = Date.now() + 60 * 60 * 1000;
         while (Date.now() < deadline) {
           if (signal?.aborted) throw new Error("Login handoff cancelled");
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
@@ -602,12 +604,13 @@ export default function cventJobTools(pi: any) {
             resumed.current_action = "Verifying Cvent login and resuming exact-event discovery";
             resumed.updated_at = new Date().toISOString();
             await atomicJson(statePath, resumed);
-            await appendActivity("User returned browser control; verifying Cvent login before resuming");
-            return toolText({ ok: true, resumed: true, instruction: "Fresh-read pageInfo and a complete snapshot before continuing." });
+            await appendActivity("User returned browser control; authenticated slot profile verified and persisted automatically");
+            return toolText({ ok: true, resumed: true, profilePersisted: true,
+              instruction: "Forge verified and persisted this slot's Cvent login. Fresh-read pageInfo and a complete snapshot before continuing." });
           }
           if (current.ownership === "NONE") throw new Error("Browser return was blocked; human review is required");
         }
-        throw new Error("Cvent login handoff timed out after 30 minutes");
+        throw new Error("Cvent login handoff timed out after 60 minutes");
       });
     },
   });
