@@ -327,7 +327,7 @@ class JobRunner:
         directory = job_dir(job["workspace_id"], job["id"])
         threading.Thread(target=monitor_performance, args=(directory / "system-metrics.jsonl", active.stop_heartbeat, [
             DATA_ROOT, directory, directory / "input.xlsx", browser_profile_dir(job["workspace_id"], active.slot_id),
-            browser_cache_dir(active.slot_id), Path("/tmp"),
+            browser_cache_dir(job["workspace_id"], active.slot_id), Path("/tmp"),
         ]), daemon=True).start()
         try:
             state = read_json(directory / "state.json", fresh_state(job))

@@ -415,7 +415,11 @@ try:
         existing["sourceRows"].append(row)
         path_ref = fields.get("registration_path", {}).get("value")
         if path_ref:
-            paths.setdefault(str(path_ref), {"matchReference": path_ref, "registrationTypes": []})["registrationTypes"].append(reg_code or reg_name)
+            path = paths.setdefault(str(path_ref), {"matchReference": path_ref, "registrationTypes": [], "sourceEvidence": []})
+            path["registrationTypes"].append(reg_code or reg_name)
+            evidence_columns = [layout["registration_path"], layout.get("registration_code") or layout.get("registration_name")]
+            evidence_range = f"{reg_sheet}!{get_column_letter(min(evidence_columns))}{row}:{get_column_letter(max(evidence_columns))}{row}"
+            path["sourceEvidence"].append(field({"path": path_ref, "registrationType": reg_code or reg_name}, evidence_range))
         admission_code = fields.get("admission_code", {}).get("value")
         admission_name = fields.get("admission_name", {}).get("value")
         if admission_code or admission_name:
