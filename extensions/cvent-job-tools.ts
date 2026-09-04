@@ -212,6 +212,32 @@ async function verifiedScope(): Promise<any> {
   return manifest;
 }
 
+function collectScopeIds(value: unknown, found = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const child of value) collectScopeIds(child, found);
+  } else if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.scopeId === "string") found.add(record.scopeId);
+    for (const child of Object.values(record)) collectScopeIds(child, found);
+  }
+  return found;
+}
+
+async function assertCompiledExpectations(scopeIds: string[]): Promise<void> {
+  const input = await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
+  const expected = await readJson(join(jobDir, "expected-domains.json"), null);
+  if (!expected) throw new Error("Write blocked: compile the current RR with cvent_prepare_rr first");
+  const manifest = await verifiedScope();
+  if (expected.rr?.sha256 !== hash(input) || expected.scope?.sourceSha256 !== manifest.sourceSha256 ||
+      expected.target?.eventKey !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY") ||
+      expected.target?.name !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME")) {
+    throw new Error("Write blocked: compiled RR expectations are stale or belong to another target");
+  }
+  const applicable = collectScopeIds(expected.domains);
+  const absent = scopeIds.filter((scopeId) => !applicable.has(scopeId));
+  if (absent.length) throw new Error(`Write blocked: scope IDs are not applicable in the compiled RR: ${absent.join(", ")}`);
+}
+
 function parseMarker(stdout: string, marker: string): any {
   const line = stdout.split(/\r?\n/).reverse().find((item) => item.startsWith(marker));
   if (!line) throw new Error("Approved helper returned no structured result");
@@ -657,6 +683,7 @@ export default function cventJobTools(pi: any) {
       }
       return withQueue("browser", async () => {
         await assertSnapshotConsumed();
+        if (params.intent === "write") await assertCompiledExpectations(params.scopeIds);
         const input = browserParams(operation, params);
         const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
         const result = await invokeBrowser(operation, input, signal, timeout);
