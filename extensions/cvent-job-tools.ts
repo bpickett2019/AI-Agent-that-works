@@ -16,11 +16,14 @@ const ALLOWED_KEYS = new Set([
   "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
   "Backspace", "Delete", "Home", "End", "PageUp", "PageDown", "Space",
 ]);
-const DOMAINS = new Set([
+const DOMAIN_NAMES = [
   "event_basics", "theme_branding", "header_footer_body", "registration_paths",
   "registration_types", "admission_items", "pricing_fees", "discounts",
   "registration_questions", "terms_policies", "final_qa",
-]);
+] as const;
+const DOMAINS = new Set<string>(DOMAIN_NAMES);
+const JOB_STAGES = ["starting", "target_discovery", ...DOMAIN_NAMES] as const;
+const literalUnion = (values: readonly string[]) => Type.Union(values.map((value) => Type.Literal(value)) as any);
 const ARTIFACTS: Record<string, string> = {
   state: "state.json",
   auth_metadata: "auth-settings.json",
@@ -473,8 +476,8 @@ export default function cventJobTools(pi: any) {
     label: "Update job progress",
     description: "Atomically update only approved progress fields in this job's state and append one safe product-facing log message. Cannot select paths or execute commands.",
     parameters: Type.Object({
-      status: Type.Optional(Type.String({ maxLength: 40 })),
-      stage: Type.Optional(Type.String({ maxLength: 80 })),
+      status: Type.Optional(literalUnion(["running", "login_required", "review_required"])),
+      stage: Type.Optional(literalUnion(JOB_STAGES)),
       action: Type.Optional(Type.String({ maxLength: 1200 })),
       completed: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 20 })),
       pending: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 20 })),
@@ -509,8 +512,8 @@ export default function cventJobTools(pi: any) {
     label: "Record domain result",
     description: "Atomically record factual job-scoped results for one approved domain. This cannot write arbitrary files.",
     parameters: Type.Object({
-      domain: Type.String(),
-      status: Type.String({ maxLength: 40 }),
+      domain: literalUnion(DOMAIN_NAMES),
+      status: literalUnion(["in_progress", "completed", "review_required", "incomplete"]),
       created: optionalStrings,
       updated: optionalStrings,
       alreadyCorrect: optionalStrings,

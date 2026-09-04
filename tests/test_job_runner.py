@@ -93,6 +93,28 @@ class JobRunnerConfigurationTests(unittest.TestCase):
             "failed_prewrite",
         )
 
+    def test_failed_prewrite_retry_uses_a_fresh_session_only_without_write_evidence(self):
+        job = {**self.job, "state": "failed_prewrite", "uncertain": 0, "original_filename": "rr.xlsx"}
+        (self.directory / "state.json").write_text(json.dumps({
+            "status": "failed_prewrite", "resume_requested": True,
+            "pi_session": "old-session", "completed": ["event_basics"],
+        }))
+        with patch.object(self.runner.store, "get_job", return_value=job), \
+             patch("job_runner.job_dir", return_value=self.directory), \
+             patch.object(self.runner, "start") as start:
+            self.runner.retry_prewrite(job["id"], "operator")
+        state = json.loads((self.directory / "state.json").read_text())
+        self.assertFalse(state["resume_requested"])
+        self.assertIsNone(state["pi_session"])
+        self.assertEqual(state["completed"], [])
+        start.assert_called_once_with(job["id"], "operator")
+
+        (self.directory / "scope-write-audit.jsonl").write_text("attempted\n")
+        with patch.object(self.runner.store, "get_job", return_value=job), \
+             patch("job_runner.job_dir", return_value=self.directory):
+            with self.assertRaisesRegex(ValueError, "mutation evidence"):
+                self.runner.retry_prewrite(job["id"], "operator")
+
     def test_prompt_has_job_paths_and_no_unresolved_placeholders(self):
         prompt = self.runner.render_prompt(self.job, self.directory, {})
         self.assertIn(str(self.directory.resolve()), prompt)

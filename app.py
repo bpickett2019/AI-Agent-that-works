@@ -470,7 +470,10 @@ def continue_job(request: Request, job_id: str | None = None):
         # return. Reset only that stale gate before acquiring a fresh worker.
         gate.initialize()
     try:
-        runner.resume(job["id"], identity["subject"])
+        if job["state"] == "failed_prewrite":
+            runner.retry_prewrite(job["id"], identity["subject"])
+        else:
+            runner.resume(job["id"], identity["subject"])
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "job_id": job["id"], "state": "starting"}

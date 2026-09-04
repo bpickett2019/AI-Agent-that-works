@@ -391,6 +391,23 @@ class JobRunner:
         atomic_json(directory / "state.json", state)
         self.start(job_id, actor)
 
+    def retry_prewrite(self, job_id: str, actor: str) -> None:
+        """Start a fresh agent session after a proven zero-write failure."""
+        job = self.store.get_job(job_id)
+        if not job or job["state"] != "failed_prewrite" or job.get("uncertain"):
+            raise ValueError("Only a certain failed-prewrite job can receive a fresh retry")
+        directory = job_dir(job["workspace_id"], job_id)
+        if self._mutation_attempted(directory):
+            raise ValueError("Fresh retry blocked because Cvent mutation evidence exists")
+        state = read_json(directory / "state.json", fresh_state(job))
+        state["resume_requested"] = False
+        state["pi_session"] = None
+        state["completed"] = []
+        state["current_stage"] = "starting"
+        state["current_action"] = "Starting fresh preflight after a verified zero-write failure"
+        atomic_json(directory / "state.json", state)
+        self.start(job_id, actor)
+
     def active(self, job_id: str) -> ActiveJob | None:
         with self._lock:
             return self._active.get(job_id)

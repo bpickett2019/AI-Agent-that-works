@@ -297,6 +297,25 @@ class AuthorizationTests(unittest.TestCase):
             self.assertEqual(gate.read()["ownership"], "AGENT")
             resume.assert_called_once_with(job["id"], "dev:user-one")
 
+    def test_continue_retries_failed_prewrite_with_a_fresh_agent_session(self):
+        with TestClient(cvent_app.app) as client:
+            me = client.get("/api/me").json()
+            user = self.store.ensure_user("dev:user-one", "one@example.test", "User One", False)
+            job = self.make_job(user, "fresh-prewrite")
+            self.store.finish(job["id"], None, "failed_prewrite")
+            directory = Path(self.temp.name) / "fresh-prewrite"
+            BrowserGate(directory).initialize()
+            with patch.object(cvent_app, "directory_for", return_value=directory), \
+                 patch.object(cvent_app.runner, "retry_prewrite") as retry, \
+                 patch.object(cvent_app.runner, "resume") as resume:
+                response = client.post(
+                    f"/api/continue?job_id={job['id']}",
+                    headers={"X-CSRF-Token": me["csrf"]},
+                )
+            self.assertEqual(response.status_code, 200)
+            retry.assert_called_once_with(job["id"], "dev:user-one")
+            resume.assert_not_called()
+
     def test_start_returns_immediate_409_for_busy_event_or_capacity(self):
         with TestClient(cvent_app.app) as client:
             me = client.get("/api/me").json()
