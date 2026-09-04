@@ -250,6 +250,8 @@ class JobRunner:
         if (
             not expected
             or expected.get("rr", {}).get("sha256") != hashlib.sha256(workbook.read_bytes()).hexdigest()
+            or expected.get("rr", {}).get("authority") != "uploaded_rr"
+            or expected.get("target", {}).get("eventId") != job["event_id"]
             or expected.get("target", {}).get("eventKey") != job["event_key"]
             or expected.get("target", {}).get("name") != job["event_name"]
         ):

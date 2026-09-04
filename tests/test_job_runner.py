@@ -86,8 +86,8 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         workbook = self.directory / "input.xlsx"
         workbook.write_bytes(b"test-workbook")
         expected = {
-            "rr": {"sha256": hashlib.sha256(workbook.read_bytes()).hexdigest()},
-            "target": {"eventKey": self.job["event_key"], "name": self.job["event_name"]},
+            "rr": {"sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(), "authority": "uploaded_rr"},
+            "target": {"eventId": self.job["event_id"], "eventKey": self.job["event_key"], "name": self.job["event_name"]},
             "counts": {"applicableFields": 1},
         }
         commands = []
