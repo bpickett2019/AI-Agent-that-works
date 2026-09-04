@@ -287,6 +287,9 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('await invokeBrowser("pageInfo"',extension)
         ui=(ROOT/'templates/index.html').read_text()
         self.assertIn("removeAttribute('srcdoc')",ui)
+        self.assertIn('id="browser-error"',ui)
+        self.assertIn("$('browser-error').textContent=e.message",ui)
+        self.assertIn('fixConnectionLabel',APP)
         self.assertIn('Immediately call `cvent_login_handoff`',PROMPT)
         self.assertIn('while the user signs in and returns control',SKILL)
     def test_ego_scroll_search_precedes_advanced_search(self):

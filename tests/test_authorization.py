@@ -48,6 +48,19 @@ class EntraAuthorizationTests(unittest.TestCase):
             auth = EntraAuth()
             self.assertTrue(auth.restricted_staging)
             self.assertFalse(auth.admin_users)
+            with self.assertRaisesRegex(Exception, "requires an existing signed session"):
+                auth.identity(SimpleNamespace(session={}, scope={"type": "websocket"}))
+            signed = {
+                "identity": {
+                    "subject": "dev:temporary-tester",
+                    "email": "",
+                    "display_name": "Temporary tester",
+                    "roles": ["Cvent.Agent.User"],
+                    "is_admin": False,
+                }
+            }
+            identity = auth.identity(SimpleNamespace(session=signed, scope={"type": "websocket"}))
+            self.assertFalse(identity.is_admin)
 
     def test_verified_tenant_user_needs_no_manual_role_assignment(self):
         identity = self.auth().identity_from_claims({

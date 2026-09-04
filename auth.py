@@ -158,6 +158,8 @@ class EntraAuth:
         if self.environment == "development" and os.environ.get("CVENT_DEV_AUTH_SUBJECT"):
             if self.restricted_staging:
                 restricted_staging_access()  # Fail closed after the temporary window expires.
+                if request.scope.get("type") == "websocket":
+                    raise HTTPException(401, "Restricted staging WebSocket requires an existing signed session")
             is_admin = False if self.restricted_staging else os.environ.get("CVENT_DEV_AUTH_ADMIN", "0") == "1"
             identity = Identity(
                 subject="dev:" + os.environ["CVENT_DEV_AUTH_SUBJECT"],
