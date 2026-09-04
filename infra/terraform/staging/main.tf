@@ -175,7 +175,7 @@ resource "azurerm_key_vault" "app" {
   access_policy {
     tenant_id          = var.tenant_id
     object_id          = azurerm_linux_virtual_machine.app.identity[0].principal_id
-    secret_permissions = ["Get", "List"]
+    secret_permissions = ["Get"]
   }
 }
 
