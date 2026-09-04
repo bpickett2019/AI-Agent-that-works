@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { open, readFile, realpath, rename, mkdir, appendFile, lstat } from "node:fs/promises";
+import { open, readFile, realpath, rename, mkdir, appendFile, lstat, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
@@ -45,6 +45,7 @@ const SNAPSHOT_CHUNK_BYTES = 36 * 1024;
 const MAX_CHILD_OUTPUT = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-snapshot-pending.json");
+const WRITE_READBACK_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-write-readback-required.json");
 const queues = new Map<string, Promise<unknown>>();
 
 function requiredEnvironment(name: string): string {
@@ -197,6 +198,16 @@ async function appendActivity(message: string): Promise<void> {
   await appendFile(target, `${new Date().toISOString()}  ${safe}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
+async function updateBrowserProgress(action: string): Promise<void> {
+  return withQueue("job-files", async () => {
+    const path = join(jobDir, "state.json");
+    const state = await readJson(path, {});
+    state.current_action = cleanText(action, 1200);
+    state.updated_at = new Date().toISOString();
+    await atomicJson(path, state);
+  });
+}
+
 function hash(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -223,7 +234,7 @@ function collectScopeIds(value: unknown, found = new Set<string>()): Set<string>
   return found;
 }
 
-async function assertCompiledExpectations(scopeIds: string[]): Promise<void> {
+async function verifiedCompiledExpectations(): Promise<any> {
   const input = await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
   const expected = await readJson(join(jobDir, "expected-domains.json"), null);
   if (!expected) throw new Error("Write blocked: compile the current RR with cvent_prepare_rr first");
@@ -233,6 +244,11 @@ async function assertCompiledExpectations(scopeIds: string[]): Promise<void> {
       expected.target?.name !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME")) {
     throw new Error("Write blocked: compiled RR expectations are stale or belong to another target");
   }
+  return expected;
+}
+
+async function assertCompiledExpectations(scopeIds: string[]): Promise<void> {
+  const expected = await verifiedCompiledExpectations();
   const applicable = collectScopeIds(expected.domains);
   const absent = scopeIds.filter((scopeId) => !applicable.has(scopeId));
   if (absent.length) throw new Error(`Write blocked: scope IDs are not applicable in the compiled RR: ${absent.join(", ")}`);
@@ -313,6 +329,20 @@ function utf8Chunks(text: string, maxBytes: number): string[] {
 
 async function pendingSnapshot(): Promise<any> {
   return readJson(SNAPSHOT_PENDING, null);
+}
+
+async function pendingWriteReadback(): Promise<any> {
+  return readJson(WRITE_READBACK_PENDING, null);
+}
+
+async function clearWriteReadback(): Promise<void> {
+  try {
+    const info = await lstat(WRITE_READBACK_PENDING);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Write readback marker is not a regular job artifact");
+    await unlink(WRITE_READBACK_PENDING);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 async function assertSnapshotConsumed(): Promise<void> {
@@ -399,6 +429,13 @@ export default function cventJobTools(pi: any) {
       return withQueue("job-files", async () => {
         await verifiedScope();
         await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
+        try {
+          const existing = await verifiedCompiledExpectations();
+          await appendActivity(`RR preflight reverified ${existing.counts?.confirmedApplicableFields ?? 0} confirmed applicable fields`);
+          return toolText({ ok: true, reusedPreflight: true, counts: existing.counts, identifiers: existing.identifierRegistry });
+        } catch {
+          // Missing or stale artifacts are rebuilt only by the same fixed approved helpers below.
+        }
         await assertSafeArtifactTarget(join(jobDir, "input.inspection.json"));
         await assertSafeArtifactTarget(join(jobDir, "input.inspection-summary.json"));
         await assertSafeArtifactTarget(join(jobDir, "expected-domains.json"));
@@ -682,12 +719,35 @@ export default function cventJobTools(pi: any) {
         throw new Error("Write blocked: confirmed Forge Intake scope IDs are required");
       }
       return withQueue("browser", async () => {
-        await assertSnapshotConsumed();
-        if (params.intent === "write") await assertCompiledExpectations(params.scopeIds);
-        const input = browserParams(operation, params);
-        const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
-        const result = await invokeBrowser(operation, input, signal, timeout);
-        return toolText(await saveLargeSnapshot(result));
+        const write = params.intent === "write";
+        await updateBrowserProgress(write ? `Validating scoped Cvent write: ${operation}` : `Reading Cvent browser: ${operation}`);
+        try {
+          await assertSnapshotConsumed();
+          const readback = await pendingWriteReadback();
+          const readbackOperation = ["snapshotText", "controlInventory"].includes(operation);
+          if (readback && !readbackOperation) {
+            throw new Error("A fresh complete Cvent snapshot readback is required before another browser action");
+          }
+          if (write) await assertCompiledExpectations(params.scopeIds);
+          const input = browserParams(operation, params);
+          const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
+          const result = await invokeBrowser(operation, input, signal, timeout);
+          const packaged = await saveLargeSnapshot(result);
+          if (write) {
+            await atomicJson(WRITE_READBACK_PENDING, {
+              operation, scopeIds: params.scopeIds, browserRuntimeId: result.browserRuntimeId,
+              targetId: result.targetId, requiredAt: new Date().toISOString(),
+            });
+          } else if (readback && readbackOperation) {
+            const transport = await pendingSnapshot();
+            if (!transport || transport.complete === true) await clearWriteReadback();
+          }
+          await updateBrowserProgress(write ? `Cvent write action dispatched; performing required readback` : `Cvent browser read complete: ${operation}`);
+          return toolText(packaged);
+        } catch (error) {
+          await updateBrowserProgress(`${write ? "Cvent write" : "Cvent browser read"} blocked safely during ${operation}`);
+          throw error;
+        }
       });
     },
   });
@@ -723,6 +783,7 @@ export default function cventJobTools(pi: any) {
         pending.nextChunk = index + 1;
         pending.complete = complete;
         await atomicJson(SNAPSHOT_PENDING, pending);
+        if (complete && await pendingWriteReadback()) await clearWriteReadback();
         return toolText({
           snapshotId: id, chunkIndex: index, totalChunks: chunks.length, complete,
           bytes: pending.bytes, sha256: pending.sha256, capturedAt: pending.capturedAt,
@@ -754,6 +815,7 @@ export default function cventJobTools(pi: any) {
     }),
     async execute(_id: string, params: any) {
       if (!["DRAFT_COMPLETE", "REVIEW_REQUIRED", "INCOMPLETE"].includes(params.status)) throw new Error("Capability denied: invalid final status");
+      if (await pendingWriteReadback()) throw new Error("Final report blocked until the required Cvent write readback is complete");
       return withQueue("job-files", async () => {
         const report = {
           status: params.status,

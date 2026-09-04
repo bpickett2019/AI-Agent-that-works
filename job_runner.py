@@ -1,6 +1,7 @@
 """Immediate three-slot admission and isolated Pi/Steel lifecycle."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -209,6 +210,52 @@ class JobRunner:
             environment.pop(name, None)
         return environment
 
+    def prepare_environment(self, job: dict[str, Any], slot_id: int) -> dict[str, str]:
+        """Give deterministic RR helpers only non-secret job identity and fixed paths."""
+        environment = {
+            name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if os.environ.get(name)
+        }
+        environment.update({
+            "CVENT_REPO_ROOT": str(ROOT),
+            "CVENT_JOB_DIR": str(job_dir(job["workspace_id"], job["id"])),
+            "CVENT_JOB_ID": job["id"],
+            "CVENT_WORKSPACE_ID": job["workspace_id"],
+            "CVENT_WORKER_SLOT": str(slot_id),
+            "CVENT_AUTHORIZED_EVENT_ID": job["event_id"],
+            "CVENT_AUTHORIZED_EVENT_NAME": job["event_name"],
+            "CVENT_AUTHORIZED_EVENT_KEY": job["event_key"],
+            "CVENT_AUTHORIZED_EVENT_CODE": event_by_id(job["event_id"]).event_code,
+        })
+        return environment
+
+    def prepare_rr(self, job: dict[str, Any], slot_id: int) -> dict[str, Any]:
+        """Compile the current RR before any browser or model process can start."""
+        directory = job_dir(job["workspace_id"], job["id"])
+        workbook = directory / "input.xlsx"
+        inspection = directory / "input.inspection.json"
+        environment = self.prepare_environment(job, slot_id)
+        commands = (
+            [sys.executable, str(ROOT / "inspect_rr.py"), str(workbook), str(inspection)],
+            [sys.executable, str(ROOT / "rr_compiler.py")],
+        )
+        completed = None
+        for command_line in commands:
+            completed = subprocess.run(
+                command_line, cwd=ROOT, env=environment, text=True, capture_output=True, timeout=180,
+            )
+            if completed.returncode:
+                detail = (completed.stderr or completed.stdout).strip().splitlines()
+                raise RuntimeError("RR preflight failed: " + (detail[-1] if detail else "approved helper failed"))
+        expected = read_json(directory / "expected-domains.json", {})
+        if (
+            not expected
+            or expected.get("rr", {}).get("sha256") != hashlib.sha256(workbook.read_bytes()).hexdigest()
+            or expected.get("target", {}).get("eventKey") != job["event_key"]
+            or expected.get("target", {}).get("name") != job["event_name"]
+        ):
+            raise RuntimeError("RR preflight produced stale or mismatched expectations")
+        return expected
+
     def steel_command(self, job: dict[str, Any], token: str, slot_id: int, command: str,
                       url: str | None = None, timeout: int = 180) -> dict[str, Any]:
         args = [sys.executable, str(ROOT / "steel_session.py"), command]
@@ -265,9 +312,13 @@ class JobRunner:
             load_scope_manifest()
             state = read_json(directory / "state.json", fresh_state(job))
             state.update({
-                "status": "starting", "current_stage": "starting", "current_action": "Starting isolated Steel browser",
+                "status": "starting", "current_stage": "starting", "current_action": "Compiling and verifying the current RR",
                 "worker_slot": active.slot_id, "started_at": state.get("started_at") or now(), "updated_at": now(),
             })
+            atomic_json(directory / "state.json", state)
+            expected = self.prepare_rr(job, active.slot_id)
+            append_log(directory, f"RR preflight compiled {expected.get('counts', {}).get('confirmedApplicableFields', 0)} confirmed applicable fields")
+            state.update({"current_action": "Starting isolated Steel browser", "updated_at": now()})
             atomic_json(directory / "state.json", state)
             append_log(directory, f"Acquired worker {active.slot_id} and event lease {job['event_id']}")
             steel = self.steel_command(job, active.token, active.slot_id, "ensure")

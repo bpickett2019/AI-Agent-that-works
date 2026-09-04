@@ -120,13 +120,21 @@ def recover_browser(runtime_path,runtime,tool,params):
         time.sleep(3)
     raise RuntimeError(f'Browser renderer did not recover within the bounded wait: {last[-500:]}')
 def preflight_write_target(runtime_path,operation,params):
-    targets=[params.get('target')]
-    if operation=='drag':targets.append(params.get('destination'))
-    for target in filter(None,targets):
+    keys=['target']
+    if operation=='drag':keys.append('destination')
+    resolved=dict(params)
+    for key in keys:
+        target=params.get(key)
+        if not target:continue
         probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','__preflightTarget','--params',json.dumps({'target':target})],cwd=ROOT,text=True,capture_output=True,timeout=30)
         result=child_result(probe)
         if probe.returncode or not result.get('ok'):
             raise RuntimeError('Write rejected before browser dispatch: '+result.get('error','target could not be resolved')[-800:])
+        descriptor=result.get('resolved') or {}
+        if not descriptor.get('connected') or descriptor.get('disabled'):
+            raise RuntimeError('Write rejected before browser dispatch: target is disconnected or disabled')
+        resolved[key]=result.get('resolvedTarget') or target
+    return resolved
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
     if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
@@ -146,7 +154,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
         if is_write:
-            preflight_write_target(runtime_path,operation,params)
+            params=preflight_write_target(runtime_path,operation,params)
             audit_scope_write(operation,params,current,'attempted')
         try:
             proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))

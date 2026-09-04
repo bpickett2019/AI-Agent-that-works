@@ -1,9 +1,22 @@
 #!/usr/bin/env node
 /** Ego direct-tool adapter pinned to the canonical Steel Chromium target. */
 import fs from 'node:fs';
+import path from 'node:path';
 const argv=process.argv.slice(2);const arg=n=>argv[argv.indexOf(n)+1];
 const runtimePath=arg('--runtime');const operation=arg('--operation');const params=JSON.parse(arg('--params')||'{}');
 function output(value,ok=true){process.stdout.write('BROWSER_TOOL_RESULT='+JSON.stringify(ok?{ok:true,tool:'ego',operation,...value}:{ok:false,tool:'ego',operation,error:String(value)})+'\n')}
+function roleRequest(target){
+  const match=String(target||'').match(/^role:([a-z][a-z0-9_-]*)\[name=(?:"([^"]+)"|'([^']+)'|([^\]]+))\]$/i);
+  return match?{role:match[1].toLowerCase(),name:(match[2]??match[3]??match[4]??'').trim()}:null;
+}
+const snapshotCachePath=runtimePath?path.join(path.dirname(path.resolve(runtimePath)),'browser-snapshot-cache.json'):null;
+function readSnapshotCache(){
+  try{const info=fs.lstatSync(snapshotCachePath);if(!info.isFile()||info.isSymbolicLink()||info.size>3*1024*1024)return null;return JSON.parse(fs.readFileSync(snapshotCachePath,'utf8'))}catch{return null}
+}
+function writeSnapshotCache(value){
+  const temporary=`${snapshotCachePath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,snapshotCachePath);fs.chmodSync(snapshotCachePath,0o600);
+}
+if(snapshotCachePath&&operation!=='snapshotText'){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
 if(!runtimePath||!operation){output('Explicit --runtime and --operation are required',false);process.exit(2)}
 const runtime=JSON.parse(fs.readFileSync(runtimePath,'utf8'));
 const cdpOrigin=new URL(runtime.cdpHttpOrigin);process.env.EGO_BROWSER_CDP_HOST=cdpOrigin.hostname;process.env.EGO_BROWSER_CDP_PORT=cdpOrigin.port;
@@ -18,9 +31,32 @@ try{
   if(marker!==runtime.browserRuntimeId)throw new Error('Ego marker mismatch — cross-browser routing blocked');
   let result;
   switch(operation){
-    case '__preflightTarget': result={resolved:await ego.evaluateLocator(params.target,(element)=>({tag:element.tagName,role:element.getAttribute('role'),disabled:'disabled' in element?Boolean(element.disabled):false,connected:element.isConnected}))};break;
+    case '__preflightTarget': {
+      let resolvedTarget=params.target,descriptor,fallbackUsed=false;
+      try{
+        descriptor=await ego.evaluateLocator(params.target,(element)=>({tag:element.tagName,role:element.getAttribute('role'),disabled:'disabled' in element?Boolean(element.disabled):false,connected:element.isConnected}));
+      }catch(originalError){
+        const requested=roleRequest(params.target);if(!requested)throw originalError;
+        const token=`cvent-agent-target-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const fallback=await ego.evaluate(`(() => {const requested=${JSON.stringify(requested)},token=${JSON.stringify(token)},normalize=value=>String(value||'').toLowerCase().replace(/[\\s:*]+/g,' ').trim(),implicitRole=element=>{const tag=element.tagName;const type=(element.getAttribute('type')||'').toLowerCase();if(tag==='SELECT')return 'combobox';if(tag==='TEXTAREA')return 'textbox';if(tag==='INPUT')return ['checkbox','radio','button','submit'].includes(type)?type:(type==='search'?'searchbox':'textbox');if(tag==='BUTTON')return 'button';if(tag==='A'&&element.hasAttribute('href'))return 'link';return ''},roots=[document],elements=[];for(let i=0;i<roots.length;i++){const root=roots[i];for(const element of root.querySelectorAll('*')){if(element.shadowRoot)roots.push(element.shadowRoot);const role=(element.getAttribute('role')||implicitRole(element)).toLowerCase();if(role!==requested.role||!element.isConnected)continue;const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null,groupLabel=element.closest('label')||element.parentElement?.querySelector(':scope > label'),names=[element.getAttribute('aria-label'),element.getAttribute('title'),element.getAttribute('name'),label?.innerText,groupLabel?.innerText].filter(Boolean).map(normalize);if(!names.includes(normalize(requested.name)))continue;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);if(rect.width<=0||rect.height<=0||style.visibility==='hidden'||style.display==='none'||('disabled' in element&&element.disabled))continue;elements.push(element)}}if(elements.length!==1)return {count:elements.length};elements[0].setAttribute('data-cvent-agent-target',token);return {count:1,descriptor:{tag:elements[0].tagName,role:elements[0].getAttribute('role')||implicitRole(elements[0]),disabled:'disabled' in elements[0]?Boolean(elements[0].disabled):false,connected:elements[0].isConnected}}})()`);
+        if(fallback.count!==1)throw new Error(`Write target preflight found ${fallback.count} exact accessible-name matches after the original locator failed`);
+        resolvedTarget=`[data-cvent-agent-target="${token}"]`;descriptor=fallback.descriptor;fallbackUsed=true;
+      }
+      result={resolved:descriptor,resolvedTarget,fallbackUsed};break;
+    }
     case 'probe': {const info=await ego.pageInfo();result={marker,targetId:wanted,url:info.url,title:info.title};break}
-    case 'snapshotText': result={snapshot:await ego.snapshot()};break;
+    case 'snapshotText': {
+      const identity=await ego.evaluate(`(() => {if(!window.__CVENT_SNAPSHOT_DOCUMENT_ID){Object.defineProperty(window,'__CVENT_SNAPSHOT_DOCUMENT_ID',{value:crypto.randomUUID(),configurable:false});window.__CVENT_SNAPSHOT_GENERATION=0;new MutationObserver(()=>window.__CVENT_SNAPSHOT_GENERATION++).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true})}return {documentId:window.__CVENT_SNAPSHOT_DOCUMENT_ID,generation:window.__CVENT_SNAPSHOT_GENERATION,url:location.href}})()`);
+      const cached=readSnapshotCache();
+      if(cached&&cached.browserRuntimeId===runtime.browserRuntimeId&&cached.targetId===wanted&&cached.documentId===identity.documentId&&cached.generation===identity.generation&&cached.url===identity.url&&Date.now()-cached.savedAt<60000){
+        result={snapshot:cached.snapshot,snapshotCacheHit:true};
+      }else{
+        const snapshot=await ego.snapshot();const after=await ego.evaluate(`({documentId:window.__CVENT_SNAPSHOT_DOCUMENT_ID,generation:window.__CVENT_SNAPSHOT_GENERATION,url:location.href})`);
+        if(identity.documentId===after.documentId&&identity.generation===after.generation&&identity.url===after.url)writeSnapshotCache({browserRuntimeId:runtime.browserRuntimeId,targetId:wanted,...after,savedAt:Date.now(),snapshot});
+        result={snapshot,snapshotCacheHit:false};
+      }
+      break;
+    }
     case 'controlInventory': {
       const inventory=await ego.evaluate(`(() => {const controls=[],seen=new Set();const walk=(root,path)=>{for(const element of root.querySelectorAll('*')){if(element.shadowRoot)walk(element.shadowRoot,path+' > '+element.tagName.toLowerCase()+(element.id?'#'+element.id:''));if(!element.matches('a,button,input,select,textarea,[role],[contenteditable=true]')||seen.has(element))continue;seen.add(element);const type=(element.getAttribute('type')||'').toLowerCase();controls.push({path,tag:element.tagName,role:element.getAttribute('role'),text:(element.innerText||element.textContent||'').trim().slice(0,500),id:element.id||null,name:element.getAttribute('name'),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),testId:element.getAttribute('data-cvent-id')||element.getAttribute('data-testid'),href:element instanceof HTMLAnchorElement?element.href:null,type:type||null,value:type==='password'?null:('value' in element?String(element.value).slice(0,500):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null})}};walk(document,'document');return {url:location.href,title:document.title,controls}})()`);
       result={snapshotKind:'controlInventory',snapshot:JSON.stringify(inventory,null,2)};break;

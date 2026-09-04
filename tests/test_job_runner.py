@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -65,6 +67,44 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("ENTRA_CLIENT_SECRET", environment)
         self.assertNotIn("CVENT_SESSION_SECRET", environment)
         self.assertNotIn("AZURE_CLIENT_SECRET", environment)
+
+    def test_deterministic_rr_preflight_environment_has_no_provider_or_app_secrets(self):
+        with patch.dict(os.environ, {
+            "ANTHROPIC_API_KEY": "provider-key",
+            "CVENT_LEASE_TOKEN": "lease-token",
+            "ENTRA_CLIENT_SECRET": "entra-secret",
+            "CVENT_SESSION_SECRET": "session-secret",
+        }):
+            environment = self.runner.prepare_environment(self.job, 1)
+        self.assertEqual(environment["CVENT_JOB_ID"], self.job["id"])
+        self.assertEqual(environment["CVENT_WORKER_SLOT"], "1")
+        self.assertFalse(set(environment) & {
+            "ANTHROPIC_API_KEY", "CVENT_LEASE_TOKEN", "ENTRA_CLIENT_SECRET", "CVENT_SESSION_SECRET",
+        })
+
+    def test_deterministic_rr_preflight_runs_before_agent_with_matching_evidence(self):
+        workbook = self.directory / "input.xlsx"
+        workbook.write_bytes(b"test-workbook")
+        expected = {
+            "rr": {"sha256": hashlib.sha256(workbook.read_bytes()).hexdigest()},
+            "target": {"eventKey": self.job["event_key"], "name": self.job["event_name"]},
+            "counts": {"confirmedApplicableFields": 1},
+        }
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if command[1].endswith("rr_compiler.py"):
+                (self.directory / "expected-domains.json").write_text(json.dumps(expected))
+            return subprocess.CompletedProcess(command, 0, "{}", "")
+
+        with patch("job_runner.job_dir", return_value=self.directory), \
+             patch.object(self.runner, "prepare_environment", return_value={"PATH": os.environ.get("PATH", "")}), \
+             patch.object(subprocess, "run", side_effect=run):
+            result = self.runner.prepare_rr(self.job, 1)
+        self.assertEqual(result, expected)
+        self.assertTrue(commands[0][1].endswith("inspect_rr.py"))
+        self.assertTrue(commands[1][1].endswith("rr_compiler.py"))
 
     def test_pi_config_bounds_429_retry_behavior(self):
         self.runner._write_pi_settings(self.directory)

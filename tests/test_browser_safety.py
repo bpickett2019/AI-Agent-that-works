@@ -10,6 +10,7 @@ APP=(ROOT/'app.py').read_text()
 PROMPT=(ROOT/'PI_PROMPT.md').read_text()
 SKILL=(ROOT/'.agents/skills/cvent-browser/SKILL.md').read_text()
 ROUTER=(ROOT/'browser_tool.py').read_text()
+EGO_DIRECT=(ROOT/'ego_direct.mjs').read_text()
 
 class ViewerSafetyTests(unittest.TestCase):
     def test_viewer_is_shielded_by_default(self):
@@ -163,7 +164,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
     def test_write_timeout_is_audited_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
         params={'intent':'write','scopeIds':['scope-004'],'target':'#Save','timeoutSeconds':1}
-        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON"}}\n','')
+        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON","connected":true,"disabled":false}}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
              patch.object(browser_tool.subprocess,'run',side_effect=[resolved,subprocess.TimeoutExpired(['node'],1)]):
@@ -175,7 +176,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
     def test_write_helper_error_is_uncertain_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
         params={'intent':'write','scopeIds':['scope-004'],'target':'#Save','timeoutSeconds':1}
-        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON"}}\n','')
+        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON","connected":true,"disabled":false}}\n','')
         failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"post-action marker failed"}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
@@ -205,6 +206,15 @@ class BrowserTargetSafetyTests(unittest.TestCase):
                 browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
         self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
         self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
+
+    def test_preflight_can_replace_role_locator_before_write_dispatch(self):
+        resolved=subprocess.CompletedProcess(['node'],0,
+            'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"SELECT","connected":true,"disabled":false},"resolvedTarget":"[data-cvent-agent-target=\\"one\\"]","fallbackUsed":true}\n','')
+        with patch.object(browser_tool.subprocess,'run',return_value=resolved):
+            params=browser_tool.preflight_write_target(self.base/'runtime.json','selectOption',{
+                'intent':'write','scopeIds':['scope-004'],'target':'role:combobox[name="Time Zone:"]',
+            })
+        self.assertEqual(params['target'],'[data-cvent-agent-target="one"]')
     def test_open_authorized_event_requires_live_lease_inventory_and_runtime_identity(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/Subscribers/Events2/EventSelection'}
         with patch.object(browser_tool, 'assert_event_lease') as lease:
@@ -283,6 +293,15 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('assertCompiledExpectations',extension)
         self.assertIn('compiled RR expectations are stale or belong to another target',extension)
         self.assertIn('scope IDs are not applicable in the compiled RR',extension)
+        self.assertIn('reusedPreflight',extension)
+        self.assertIn('Validating scoped Cvent write',extension)
+        self.assertIn('performing required readback',extension)
+        self.assertIn('A fresh complete Cvent snapshot readback is required before another browser action',extension)
+        self.assertIn('browser-write-readback-required.json',extension)
+        self.assertIn('Final report blocked until the required Cvent write readback is complete',extension)
+        self.assertIn('snapshotCacheHit',EGO_DIRECT)
+        self.assertIn('MutationObserver',EGO_DIRECT)
+        self.assertIn('fallbackUsed',EGO_DIRECT)
         self.assertNotIn('name: "bash"',extension)
         self.assertNotIn('name: "read"',extension)
         self.assertIn('name: "cvent_login_handoff"',extension)
