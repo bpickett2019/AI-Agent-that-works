@@ -15,7 +15,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-TERMINAL_STATES = {"completed", "review_required", "failed", "failed_prewrite", "failed_uncertain", "cancelled"}
+from mutation_outcome import mutation_outcome
+
+TERMINAL_STATES = {"completed", "review_required", "failed", "failed_prewrite", "failed_recoverable", "failed_uncertain", "cancelled"}
 ACTIVE_STATES = {"starting", "running", "login_required", "stopping"}
 
 
@@ -201,7 +203,7 @@ class ControlStore:
         with self.immediate() as conn:
             self._expire_stale(conn, now)
             job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-            startable = {"draft", "login_required", "review_required", "failed", "failed_prewrite", "cancelled"}
+            startable = {"draft", "login_required", "review_required", "failed", "failed_prewrite", "failed_recoverable", "cancelled"}
             if not job or job["state"] not in startable:
                 result = {"error": "Job cannot be started from its current state"}
             elif conn.execute("SELECT 1 FROM event_leases WHERE event_id=?", (job["event_id"],)).fetchone():
@@ -334,18 +336,20 @@ class ControlStore:
             ).fetchall()
             recovered = [row["id"] for row in rows]
             for row in rows:
-                attempted = self._mutation_attempted(row["workspace_id"], row["id"])
-                state = "failed_uncertain" if attempted else "failed_prewrite"
+                outcome = self._mutation_outcome(row["workspace_id"], row["id"])
+                state = "failed_uncertain" if outcome["unresolved"] else ("failed_recoverable" if outcome["hasAttempts"] else "failed_prewrite")
                 error = (
-                    "Controller restarted after a Cvent write attempt; mutation outcome requires review"
-                    if attempted else "Controller restarted before any Cvent write attempt; fresh preflight required"
+                    "Controller restarted with an unresolved Cvent write attempt; mutation outcome requires review"
+                    if outcome["unresolved"] else ("Controller restarted after conclusively read-back writes; recompute remaining delta"
+                                                   if outcome["hasAttempts"] else "Controller restarted before any Cvent write attempt; fresh preflight required")
                 )
                 conn.execute(
                     """UPDATE jobs SET state=?,uncertain=?,pid=NULL,slot_id=NULL,lease_token=NULL,
                     finished_at=?,error=?,updated_at=? WHERE id=?""",
-                    (state, int(attempted), now, error, now, row["id"]),
+                    (state, int(outcome["unresolved"]), now, error, now, row["id"]),
                 )
-                self._audit(conn, "system", "job.recovered_uncertain" if attempted else "job.recovered_prewrite", row["id"], {})
+                action = "job.recovered_uncertain" if outcome["unresolved"] else ("job.recovered_verified_writes" if outcome["hasAttempts"] else "job.recovered_prewrite")
+                self._audit(conn, "system", action, row["id"], outcome)
             conn.execute("DELETE FROM event_leases")
             conn.execute("DELETE FROM worker_leases")
         return recovered
@@ -369,11 +373,12 @@ class ControlStore:
             (iso(), actor, action, job_id, json.dumps(details, separators=(",", ":"))),
         )
 
-    def _mutation_attempted(self, workspace_id: str, job_id: str) -> bool:
+    def _mutation_outcome(self, workspace_id: str, job_id: str) -> dict[str, Any]:
         directory = self.path.parent / "workspaces" / workspace_id / "jobs" / job_id
-        audit = directory / "scope-write-audit.jsonl"
-        uncertain = directory / "browser-mutation-uncertain.json"
-        return uncertain.exists() or (audit.exists() and audit.stat().st_size > 0)
+        return mutation_outcome(directory)
+
+    def _mutation_attempted(self, workspace_id: str, job_id: str) -> bool:
+        return self._mutation_outcome(workspace_id, job_id)["hasAttempts"]
 
     def _expire_stale(self, conn: sqlite3.Connection, now: str) -> None:
         stale = conn.execute(
@@ -384,16 +389,17 @@ class ControlStore:
             (now, now),
         ).fetchall()
         for row in stale:
-            attempted = self._mutation_attempted(row["workspace_id"], row["id"])
-            state = "failed_uncertain" if attempted else "failed_prewrite"
+            outcome = self._mutation_outcome(row["workspace_id"], row["id"])
+            state = "failed_uncertain" if outcome["unresolved"] else ("failed_recoverable" if outcome["hasAttempts"] else "failed_prewrite")
             error = (
-                "Worker lease heartbeat expired after a Cvent write attempt; mutation outcome requires review"
-                if attempted else "Worker lease heartbeat expired before any Cvent write attempt; fresh preflight required"
+                "Worker lease heartbeat expired with an unresolved Cvent write attempt; mutation outcome requires review"
+                if outcome["unresolved"] else ("Worker stopped after conclusively read-back writes; recompute remaining delta"
+                                               if outcome["hasAttempts"] else "Worker lease heartbeat expired before any Cvent write attempt; fresh preflight required")
             )
             conn.execute(
                 """UPDATE jobs SET state=?,uncertain=?,pid=NULL,slot_id=NULL,lease_token=NULL,
                 finished_at=?,error=?,updated_at=? WHERE id=? AND state IN ('starting','running','stopping')""",
-                (state, int(attempted), now, error, now, row["id"]),
+                (state, int(outcome["unresolved"]), now, error, now, row["id"]),
             )
         conn.execute("DELETE FROM event_leases WHERE expires_at<=?", (now,))
         conn.execute("DELETE FROM worker_leases WHERE expires_at<=?", (now,))

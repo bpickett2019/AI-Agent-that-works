@@ -67,7 +67,18 @@ never forwards Anthropic, Entra, or session secrets. Arbitrary JavaScript, raw
 CDP, and browser cookie/storage/network access are not exposed to the model. When Cvent requires
 SSO/MFA, the login-handoff capability keeps the same worker and browser alive,
 gives the viewer to the user, and blocks further automation until control is
-returned.
+returned. The same persistent per-slot Chromium profile is reused across handoffs;
+no authentication material is copied into prompts or logs.
+
+Before Steel or Pi starts, a one-token Anthropic availability probe fails closed
+when the approved account cannot serve requests. During execution, each section
+uses a compact RR-derived mission and a verified event-local route, inventories
+all records in one bounded DOM pass, batches routine UI actions, and reserves full
+snapshots for unknown layouts or recovery. Discount creation uses only the fixed
+RR-derived bulk-import workbook. Provider failure after zero writes is
+`failed_prewrite`; after conclusively read-back writes it is
+`failed_recoverable` and resumes with fresh state/delta computation; only an
+unresolved mutation is `failed_uncertain` and blocks replay.
 
 ## Validation
 
@@ -91,5 +102,6 @@ scale-out architecture.
 
 The audited pre-refactor map is in
 [`docs/CURRENT-STATE-AUDIT.md`](docs/CURRENT-STATE-AUDIT.md). Performance notes
-are in [`docs/PERFORMANCE-NOTES.md`](docs/PERFORMANCE-NOTES.md). Complete page reads
-and fresh verification after each saved configuration group remain mandatory.
+are in [`docs/PERFORMANCE-NOTES.md`](docs/PERFORMANCE-NOTES.md). Complete
+section-level state collection and fresh targeted verification after each saved
+configuration group remain mandatory; repeated full-page snapshots are not.

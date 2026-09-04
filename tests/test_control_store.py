@@ -142,6 +142,22 @@ class ControlStoreTests(unittest.TestCase):
         self.assertEqual(saved["uncertain"], 0)
         self.assertIsNotNone(self.reserve(job, 0))
 
+    def test_controller_recovery_after_conclusive_write_readback_is_recoverable(self):
+        job = self.job(0, 1)
+        lease = self.reserve(job, 0)
+        self.assertTrue(self.store.mark_running(job["id"], lease["token"], 12345))
+        directory = Path(self.temp.name) / "workspaces" / job["workspace_id"] / "jobs" / job["id"]
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "scope-write-audit.jsonl").write_text(
+            '{"operation":"fill","rrSource":"Sheet!A1","result":"attempted"}\n'
+            '{"operation":"fill","rrSource":"Sheet!A1","result":"succeeded"}\n'
+        )
+        self.store.recover_after_controller_restart()
+        saved = self.store.get_job(job["id"])
+        self.assertEqual(saved["state"], "failed_recoverable")
+        self.assertEqual(saved["uncertain"], 0)
+        self.assertIsNotNone(self.reserve(job, 0))
+
     def test_controller_recovery_after_write_attempt_remains_uncertain(self):
         job = self.job(0, 1)
         lease = self.reserve(job, 0)

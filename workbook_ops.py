@@ -101,7 +101,7 @@ def reset_after_edit(directory: Path, filename: str) -> None:
     for name in (
         "benchmark-results.json", "build-checklist.json", "configuration-plan.json", "discount-import.xlsx", "domain-results.json", "expected-domains.json", "final-verification.json",
         "input.inspection.json", "input.inspection-summary.json", "review-required.json", "rr-checklist.json", "rr-validation.json", "preflight-performance.json",
-        "performance-events.jsonl", "performance-summary.json", "system-metrics.jsonl",
+        "performance-events.jsonl", "performance-summary.json", "provider-probe.json", "system-metrics.jsonl", "cvent-route-cache.json",
         "rr-execution-checklist.json", "rr-focus.json", "rr-focused.txt", "rr-inspection.json",
         "rr-inspection-summary.json", "rr-question-checklist.json",
     ):

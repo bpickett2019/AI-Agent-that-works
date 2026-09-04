@@ -37,8 +37,9 @@ Use only the fixed `cvent_*` tools. You have no shell, generic filesystem, raw C
 - `cvent_expectations`: read the extracted RR summary or detailed configuration for a domain. Page large arrays with `offset` and `limit`.
 - `cvent_job_read`, `cvent_job_update`, `cvent_record_domain`, and `cvent_verify_domain`: read/update progress and account for every RR item in final RR-versus-Cvent verification.
 - `cvent_login_handoff`: hand the existing isolated browser to the user for SSO/MFA only when required.
-- `cvent_browser`: read/configure Cvent through Ego. Use `readTarget` for small fresh readbacks; `uploadDiscountImport` attaches only the fixed RR-derived workbook.
-- `cvent_configure`: execute a known same-page procedure of up to 50 planned operations in one bounded call, stop on first failure without uncertain retry, and take one final verification snapshot.
+- `cvent_section_state`: use the cached/proven exact-event route and collect a complete compact section inventory for all RR records in one call. It returns aggregate matches and only differing/missing exceptions.
+- `cvent_browser`: exception-only Cvent discovery/recovery. Use `readTarget` for small fresh readbacks; `uploadDiscountImport` attaches only the fixed RR-derived workbook.
+- `cvent_configure`: execute up to 50 planned operations, including safe exact-event route changes, in one bounded call; stop on first failure without uncertain retry and take one final verification snapshot.
 - `cvent_snapshot_chunk`: consume every chunk of a large complete snapshot in order.
 - `cvent_finish`: write the final result, terminate this agent, and allow the worker and event lease to be released.
 
@@ -49,7 +50,7 @@ Never request or expose credentials, environment variables, browser storage, coo
 1. Set the job to running and log `Reading validated RR plan`.
 2. Call `cvent_prepare_rr` (normally this reuses the server's already-completed preflight).
 3. Read `cvent_plan` summary and complete ordered mission before opening Cvent. Read each populated domain's extracted configuration when executing it. Execute only VERIFIED items; hold only genuine AMBIGUOUS/NOT_SUPPORTED_BY_RR items. Never reinterpret the workbook field-by-field while browsing.
-4. Verify login. If Cvent or Microsoft requires login, immediately call `cvent_login_handoff`; do not automate SSO/MFA.
+4. Verify login. If Cvent or Microsoft requires login, immediately call `cvent_login_handoff`; do not automate SSO/MFA. After control returns, resume the same section mission; do not restart workbook interpretation or replay a write.
 5. Discover the selected event from the authenticated event inventory using `scanEventList` and `openAuthorizedEvent`. Require exactly one exact name/key match. Verify its visible identity and Draft/unpublished state, then call `authorizeTarget`.
 6. Read current state and prior domain results and resume idempotently without duplicating completed work.
 
@@ -59,14 +60,14 @@ Use complete `snapshotText` reads only when entering an unknown page, when layou
 
 Prefer exact semantic locators such as `role:button[name="Edit"]`. Use the bounded custom-combobox support for exact option labels. When Cvent renders repeated exact controls, use observed `targetContext` and, only if still necessary, the observed zero-based `targetIndex` from the fresh control inventory; selector disambiguation is permitted only before dispatch. On unfamiliar pages: read, scroll, understand, interact, save, and reread. If the Cvent renderer is temporarily unavailable, use `recover` once and then take a complete snapshot.
 
-Use `intent: write` for form edits and any click/key/drag that can mutate event configuration. `rrSource` records relevant RR evidence but is not an approval token. On known pages, prefer one `cvent_configure` call for locate/fill/select/save/wait instead of a separate Claude cycle per operation. Batch related fields and objects, then use its automatic fresh readback or targeted `readTarget` checks. Invoke new reasoning only for an unknown layout, missing control, unexpected modal, ambiguity, recovery, or Site Designer judgment. Never blindly retry a timed-out or otherwise uncertain write.
+For every known section, call `cvent_section_state` first instead of discovering menus or individual records. It opens the proven event-local route once, compares all records, and returns only exceptions. Then use one `cvent_configure` mission for all required changes in that section, including safe item-page route changes where supplied. Do not inspect already-correct records individually. Use `intent: write` for form edits and any click/key/drag that can mutate configuration. `rrSource` records RR evidence but is not an approval token. Invoke new reasoning only for an unknown route/layout, missing control, unexpected modal, ambiguity, recovery, or Site Designer judgment. Never blindly retry a timed-out or otherwise uncertain write.
 
 ## Continuous domain workflow
 
 Process all populated domains in the compiled RR, not merely a fixed MVP subset. For large discount sets, use Cvent's Actions → Import Discounts workflow and the bounded `uploadDiscountImport` operation, map the preserved RR columns, review the count, finish the draft import, and verify the resulting codes/settings. Re-import by stable Discount Code may update existing rows in bulk.
 
-1. Read the domain requirements.
-2. Read the corresponding current configuration in the selected event.
+1. Read the domain requirements once and form the complete section mission.
+2. Call `cvent_section_state` to read and compare the corresponding current configuration in one bounded pass.
 3. Match by stable event-scoped code/name where available; avoid duplicates.
 4. Leave matching values unchanged.
 5. Create missing values and update differing values.

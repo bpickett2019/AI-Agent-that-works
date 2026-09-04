@@ -407,7 +407,7 @@ def workbook_sheet(request: Request, name: str, start: int = 1, limit: int = 80,
 def update_workbook(request: Request, payload: dict, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
-    if job["state"] not in {"draft", "cancelled", "failed", "failed_prewrite", "review_required", "login_required"}:
+    if job["state"] not in {"draft", "cancelled", "failed", "failed_prewrite", "failed_recoverable", "review_required", "login_required"}:
         raise HTTPException(409, "This job is not editable in its current state")
     result = update_workbook_data(directory_for(job), payload, bool(active_job(job)))
     store.audit(identity["subject"], "workbook.updated", job["id"], {"saved": result["saved"]})
@@ -438,7 +438,7 @@ def start(request: Request, job_id: str | None = None):
     gate = BrowserGate(directory_for(job))
     if gate.read().get("ownership") != "AGENT":
         active = active_job(job)
-        if not active and job["state"] in {"login_required", "failed_prewrite", "failed", "review_required"}:
+        if not active and job["state"] in {"login_required", "failed_prewrite", "failed_recoverable", "failed", "review_required"}:
             gate.initialize()
             store.audit(identity["subject"], "browser.stale_control_reset_on_start", job["id"], {})
         else:
@@ -465,6 +465,8 @@ def continue_job(request: Request, job_id: str | None = None):
     try:
         if job["state"] == "failed_prewrite":
             runner.retry_prewrite(job["id"], identity["subject"])
+        elif job["state"] == "failed_recoverable":
+            runner.retry_recoverable(job["id"], identity["subject"])
         else:
             runner.resume(job["id"], identity["subject"])
     except ValueError as exc:
@@ -634,7 +636,7 @@ def return_to_agent(request: Request, job_id: str | None = None):
         # A prior login handoff may outlive its worker. There is no process or
         # live browser to resume, so clear only this stale gate and require a
         # fresh runtime/lease/preflight on Continue.
-        if gate.read().get("ownership") == "USER" and job["state"] in {"login_required", "failed_prewrite", "failed", "review_required"}:
+        if gate.read().get("ownership") == "USER" and job["state"] in {"login_required", "failed_prewrite", "failed_recoverable", "failed", "review_required"}:
             gate.initialize()
             store.audit(identity["subject"], "browser.return_stale_control", job["id"], {})
             return {"ok": True, "staleReset": True, "gate": gate.read(), "instruction": "Continue to acquire a fresh isolated browser runtime"}

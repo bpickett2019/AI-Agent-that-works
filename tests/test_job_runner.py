@@ -40,7 +40,7 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("bash", tools)
         self.assertEqual(tools, {
             "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_configure", "cvent_login_handoff",
+            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_configure", "cvent_login_handoff",
             "cvent_snapshot_chunk", "cvent_finish",
         })
         self.assertEqual(command[-1], "job prompt")
@@ -113,6 +113,18 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         performance = json.loads((self.directory / "preflight-performance.json").read_text())
         self.assertEqual([item["stage"] for item in performance["stages"]], ["rr_load_inspection", "rr_extraction", "rr_validation_and_planning"])
 
+    def test_provider_probe_runs_without_application_secrets_and_fails_closed(self):
+        completed = subprocess.CompletedProcess(["python"], 1, '{"ok":false,"classification":"credit_unavailable"}\n', "")
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "approved-key", "ENTRA_CLIENT_SECRET": "never-pass"}), \
+             patch.object(subprocess, "run", return_value=completed) as run:
+            with self.assertRaisesRegex(RuntimeError, "credit_unavailable"):
+                self.runner.verify_provider_access(self.directory)
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["ANTHROPIC_API_KEY"], "approved-key")
+        self.assertNotIn("ENTRA_CLIENT_SECRET", environment)
+        artifact = json.loads((self.directory / "provider-probe.json").read_text())
+        self.assertFalse(artifact["ok"])
+
     def test_pi_config_bounds_429_retry_behavior(self):
         self.runner._write_pi_settings(self.directory)
         settings = json.loads((self.directory / "pi-config" / "settings.json").read_text())
@@ -132,13 +144,22 @@ class JobRunnerConfigurationTests(unittest.TestCase):
 
     def test_controlled_incomplete_report_requires_review_instead_of_failed_prewrite(self):
         self.assertEqual(
-            classify_process_outcome(0, "INCOMPLETE", "running", False, None),
+            classify_process_outcome(0, "INCOMPLETE", "running", False, False, None),
             ("review_required", False, None),
         )
         self.assertEqual(
-            classify_process_outcome(1, "INCOMPLETE", "running", False, None)[0],
+            classify_process_outcome(1, "INCOMPLETE", "running", False, False, None)[0],
             "failed_prewrite",
         )
+
+    def test_provider_failure_after_conclusive_write_readback_is_recoverable(self):
+        outcome = classify_process_outcome(1, "", "running", True, False, "Anthropic API credit balance is too low")
+        self.assertEqual(outcome[0], "failed_recoverable")
+        self.assertFalse(outcome[1])
+        self.assertIn("conclusively read back", outcome[2])
+        unresolved = classify_process_outcome(1, "", "running", True, True, "provider failed")
+        self.assertEqual(unresolved[0], "failed_uncertain")
+        self.assertTrue(unresolved[1])
 
     def test_failed_prewrite_retry_uses_a_fresh_session_only_without_write_evidence(self):
         job = {**self.job, "state": "failed_prewrite", "uncertain": 0, "original_filename": "rr.xlsx"}

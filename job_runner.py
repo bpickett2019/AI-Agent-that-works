@@ -19,6 +19,7 @@ from browser_gate import BrowserGate
 from browser_runtime import initialize as initialize_browser_runtime
 from control_store import ControlStore
 from performance_monitor import monitor as monitor_performance
+from mutation_outcome import mutation_outcome
 from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, event_by_id, job_dir, pi_model, pi_provider, slot_by_id
 
 
@@ -47,19 +48,20 @@ def append_log(directory: Path, message: str) -> None:
 
 
 def classify_process_outcome(code: int, report_status: str, reported_state: str,
-                             writes_exist: bool, provider_failure: str | None) -> tuple[str, bool, str | None]:
+                             writes_exist: bool, writes_unresolved: bool, provider_failure: str | None) -> tuple[str, bool, str | None]:
     """Map a completed agent process to a durable fail-closed job outcome."""
     if code == 0 and report_status == "DRAFT_COMPLETE":
         return "completed", False, None
     if code == 0 and (report_status in {"REVIEW_REQUIRED", "INCOMPLETE"} or reported_state == "review_required"):
         return "review_required", False, None
-    if reported_state == "login_required" and not writes_exist:
+    if reported_state == "login_required" and not writes_unresolved:
         return "login_required", False, None
-    uncertain = writes_exist
-    finish_state = "failed_uncertain" if uncertain else "failed_prewrite"
+    uncertain = writes_unresolved
+    finish_state = "failed_uncertain" if uncertain else ("failed_recoverable" if writes_exist else "failed_prewrite")
     outcome = (
-        "job also has an unresolved Cvent write attempt; mutation outcome requires review"
-        if uncertain else "no Cvent write was attempted; a fresh preflight is required"
+        "job has an unresolved Cvent write attempt; mutation outcome requires review"
+        if uncertain else ("all attempted Cvent writes were conclusively read back; reacquire leases and recompute the remaining delta"
+                           if writes_exist else "no Cvent write was attempted; a fresh preflight is required")
     )
     error = f"{provider_failure}; {outcome}" if provider_failure else f"CVENT Agent exited with code {code}; {outcome}"
     return finish_state, uncertain, error
@@ -229,6 +231,32 @@ class JobRunner:
         })
         return environment
 
+    def verify_provider_access(self, directory: Path) -> dict[str, Any]:
+        """Fail before Steel/Cvent when the approved Anthropic account cannot serve even one token."""
+        cache = read_json(directory / "provider-probe.json", {})
+        try:
+            checked = datetime.fromisoformat(cache.get("checkedAt", ""))
+            if cache.get("ok") and (datetime.now(timezone.utc) - checked).total_seconds() < 600:
+                return cache
+        except Exception:
+            pass
+        environment = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if os.environ.get(name)}
+        environment["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_API_KEY", "")
+        environment["CVENT_PI_MODEL"] = pi_model()
+        started = time.monotonic()
+        completed = subprocess.run([sys.executable, str(ROOT / "provider_probe.py")], cwd=ROOT, env=environment,
+                                   text=True, capture_output=True, timeout=30)
+        try:
+            result = json.loads((completed.stdout or "{}").splitlines()[-1])
+        except Exception:
+            result = {"ok": False, "classification": "invalid_probe_result"}
+        result.update({"checkedAt": now(), "durationMs": round((time.monotonic() - started) * 1000, 1),
+                       "scope": "one-token availability probe; Anthropic exposes no approved remaining-credit balance endpoint"})
+        atomic_json(directory / "provider-probe.json", result)
+        if completed.returncode or not result.get("ok"):
+            raise RuntimeError(f"Anthropic preflight failed: {result.get('classification', 'unavailable')}")
+        return result
+
     def prepare_rr(self, job: dict[str, Any], slot_id: int) -> dict[str, Any]:
         """Compile the current RR before any browser or model process can start."""
         directory = job_dir(job["workspace_id"], job["id"])
@@ -336,6 +364,12 @@ class JobRunner:
                 "worker_slot": active.slot_id, "started_at": state.get("started_at") or now(), "updated_at": now(),
             })
             atomic_json(directory / "state.json", state)
+            state.update({"current_action": "Verifying Anthropic account access before Cvent", "updated_at": now()})
+            atomic_json(directory / "state.json", state)
+            provider = self.verify_provider_access(directory)
+            append_log(directory, f"Anthropic one-token access probe passed in {provider.get('durationMs', 0)} ms")
+            state.update({"current_action": "Compiling and verifying the current RR", "updated_at": now()})
+            atomic_json(directory / "state.json", state)
             expected = self.prepare_rr(job, active.slot_id)
             append_log(directory, f"RR preflight compiled {expected.get('counts', {}).get('applicableFields', 0)} writable configuration fields")
             state.update({"current_action": "Starting isolated Steel browser", "updated_at": now()})
@@ -379,7 +413,9 @@ class JobRunner:
             except Exception:
                 pass
             try:
-                self._finish_after_lease_loss(job["id"], active.token, "failed", str(exc), False)
+                outcome = mutation_outcome(directory)
+                failure_state = "failed_uncertain" if outcome["unresolved"] else ("failed_recoverable" if outcome["hasAttempts"] else "failed_prewrite")
+                self._finish_after_lease_loss(job["id"], active.token, failure_state, str(exc), outcome["unresolved"])
             except Exception:
                 pass
             state = read_json(directory / "state.json", fresh_state(job))
@@ -403,10 +439,11 @@ class JobRunner:
         report = read_json(directory / "final-report.json", {})
         report_status = str(report.get("status", "")).upper()
         reported_state = str(state.get("status", "")).lower()
-        writes_exist = self._mutation_attempted(directory)
+        outcome = mutation_outcome(directory)
+        writes_exist = outcome["hasAttempts"]
         provider_failure = self._provider_failure(directory)
         finish_state, uncertain, error = classify_process_outcome(
-            code, report_status, reported_state, writes_exist, provider_failure,
+            code, report_status, reported_state, writes_exist, outcome["unresolved"], provider_failure,
         )
         try:
             self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
@@ -450,11 +487,12 @@ class JobRunner:
         if process:
             return
         self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
-        attempted = self._mutation_attempted(job_dir(job["workspace_id"], job_id))
+        outcome = mutation_outcome(job_dir(job["workspace_id"], job_id))
+        state = "failed_uncertain" if outcome["unresolved"] else ("failed_recoverable" if outcome["hasAttempts"] else "failed_prewrite")
         self._finish_after_lease_loss(
-            job_id, active.token, "failed_uncertain" if attempted else "failed_prewrite",
-            "Stopped during worker startup after a Cvent write attempt" if attempted else "Stopped before any Cvent write attempt; fresh preflight required",
-            attempted,
+            job_id, active.token, state,
+            "Stopped with an unresolved Cvent write" if outcome["unresolved"] else ("Stopped after prior writes were conclusively read back; recompute delta" if outcome["hasAttempts"] else "Stopped before any Cvent write attempt; fresh preflight required"),
+            outcome["unresolved"],
         )
         self._remove_active(active)
 
@@ -465,6 +503,20 @@ class JobRunner:
         directory = job_dir(job["workspace_id"], job_id)
         state = read_json(directory / "state.json", fresh_state(job))
         state["resume_requested"] = True
+        atomic_json(directory / "state.json", state)
+        self.start(job_id, actor)
+
+    def retry_recoverable(self, job_id: str, actor: str) -> None:
+        """Start fresh after verified writes when no mutation outcome is unresolved."""
+        job = self.store.get_job(job_id)
+        if not job or job["state"] != "failed_recoverable" or job.get("uncertain"):
+            raise ValueError("Only a certain recoverable job can be resumed")
+        directory = job_dir(job["workspace_id"], job_id)
+        if mutation_outcome(directory)["unresolved"]:
+            raise ValueError("Resume blocked because a Cvent mutation outcome is unresolved")
+        state = read_json(directory / "state.json", fresh_state(job))
+        state.update({"resume_requested": False, "pi_session": None, "current_stage": "starting",
+                      "current_action": "Reacquiring leases, rechecking auth/event identity, and recomputing the current delta"})
         atomic_json(directory / "state.json", state)
         self.start(job_id, actor)
 
@@ -493,7 +545,7 @@ class JobRunner:
         sessions = directory / "pi-sessions"
         capability_tools = (
             "cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
-            "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_configure,cvent_login_handoff,"
+            "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_section_state,cvent_configure,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
         )
         command_line = [

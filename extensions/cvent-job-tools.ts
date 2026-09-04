@@ -5,12 +5,12 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
 const BROWSER_OPERATION_NAMES = [
-  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport",
 ];
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
-  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "navigate", "wait", "hover", "search", "selectText",]);
 const ALLOWED_KEYS = new Set([
   "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -38,7 +38,7 @@ const ARTIFACTS: Record<string, string> = {
 };
 const ALLOWED_TOOLS = new Set([
   "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_configure",
+  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_configure",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
@@ -48,7 +48,10 @@ const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-snapshot-pending.json");
 const WRITE_READBACK_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-write-readback-required.json");
 const PERFORMANCE_EVENTS = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "performance-events.jsonl");
+const ROUTE_CACHE = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "cvent-route-cache.json");
 const queues = new Map<string, Promise<unknown>>();
+const extensionStarted = performance.now();
+let firstBrowserActionRecorded = false;
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -251,6 +254,10 @@ function parseMarker(stdout: string, marker: string): any {
 
 async function invokeBrowser(operation: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutSeconds = 90): Promise<any> {
   const started = performance.now();
+  if (!firstBrowserActionRecorded) {
+    firstBrowserActionRecorded = true;
+    await appendPerformance("first_browser_action", extensionStarted, { operation });
+  }
   await readJobFile(runtimePath, 1024 * 1024);
   const timeout = Math.max(1, Math.min(timeoutSeconds, operation === "recover" ? 300 : 180));
   const boundedParams = { ...params, timeoutSeconds: timeout };
@@ -263,6 +270,77 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
   return result;
 }
 
+function fixedSectionMenuPath(domain: string): string[] {
+  const paths: Record<string, string[]> = {
+    optional_items: ["Registration", "Optional Items"], pricing: ["Registration", "Pricing"],
+    integrations: ["Integrations"], communications: ["Email"], badges_onsite: ["OnArrival"],
+    questions: ["Registration", "Registration Process"], registration_paths: ["Registration", "Registration Process"],
+    site_designer: ["Registration", "Registration Overview"],
+  };
+  return paths[domain] ?? [];
+}
+
+function fixedSectionRoutes(): Record<string, string> {
+  const key = encodeURIComponent(requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY"));
+  return {
+    event_settings: `https://app.cvent.com/Subscribers/Events2/Details/EventDetails/Index?evtstub=${key}`,
+    registration_types: `https://app.cvent.com/Subscribers/Events2/Details/RegistrationTypes/Index/View?evtstub=${key}`,
+    admission_items: `https://app.cvent.com/Subscribers/Events2/AgendaAndFees/AdmissionItemGrid/Index/?evtstub=${key}`,
+    discounts_vouchers: `https://app.cvent.com/Subscribers/Events2/AgendaAndFees/DiscountsGrid?evtstub=${key}`,
+  };
+}
+
+async function rememberSectionRoute(url: string, explicitDomain?: string): Promise<void> {
+  const state = await readJson(join(jobDir, "state.json"), {});
+  const domain = String(explicitDomain ?? state.current_stage ?? "");
+  if (!DOMAINS.has(domain)) return;
+  const parsed = new URL(url);
+  const eventKey = requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY").toLowerCase();
+  if (!parsed.hostname.toLowerCase().endsWith("cvent.com") || !parsed.href.toLowerCase().includes(eventKey)) return;
+  const routes = await readJson(ROUTE_CACHE, { schemaVersion: 1, routes: {} });
+  routes.routes[domain] = { url: parsed.href, verifiedAt: new Date().toISOString(), browserRuntimeId: (await readJson(runtimePath, {})).browserRuntimeId };
+  await atomicJson(ROUTE_CACHE, routes);
+}
+
+function desiredSectionRecords(domain: string, expected: any): any[] {
+  const section = expected.domains?.[domain] ?? {};
+  if (domain === "discounts_vouchers") return section.discounts ?? [];
+  if (domain === "site_designer") return [...(section.footerLinks ?? []), ...(section.socialLinks ?? []), ...(section.countdownMessages ?? [])];
+  if (domain === "event_settings") return Object.entries(section.fields ?? {}).map(([name, field]: any) => ({ matchReference: name.replace(/_/g, " "), fields: { [name]: field } }));
+  return section.items ?? section.requirements ?? section.badgeRequirements ?? [];
+}
+
+function compactSectionComparison(domain: string, expected: any, observed: any): any {
+  const rows = observed.rows ?? [];
+  const normalizedRows = rows.map((row: any) => ({ ...row, normalized: cleanText(row.text, 10000).toLowerCase().replace(/\s+/g, " ") }));
+  const normalizedControls = (observed.controls ?? []).map((control: any) => ({ ...control, normalizedLabel: cleanText(control.label, 1000).toLowerCase().replace(/\s+/g, " ") }));
+  const records = desiredSectionRecords(domain, expected);
+  const comparisons = records.map((record: any, index: number) => {
+    const fields = record.fields ?? {};
+    const reference = record.matchReference ?? record.label ?? fields.code?.value ?? fields.registration_code?.value ?? fields.internal_name?.value ?? fields.name?.value ?? record.values?.A ?? record.values?.R ?? [record.registrationType, record.admissionItem].filter(Boolean).join(" / ");
+    const desiredName = fields.registration_name?.value ?? fields.admission_name?.value ?? fields.name?.value;
+    const needle = cleanText(reference, 1000).toLowerCase();
+    const row = needle ? normalizedRows.find((item: any) => item.normalized.includes(needle)) : undefined;
+    const control = needle ? normalizedControls.find((item: any) => item.normalizedLabel === needle || item.normalizedLabel.includes(needle)) : undefined;
+    const onlyField: any = Object.values(fields)[0];
+    const scalarDesired = Object.keys(fields).length === 1 && ![null, undefined, ""].includes(onlyField?.value) ? String(onlyField.value).toLowerCase().trim() : "";
+    const controlMatches = control && scalarDesired ? String(control.value ?? "").toLowerCase().trim() === scalarDesired : Boolean(control);
+    const nameMatches = !desiredName || (row && row.normalized.includes(cleanText(desiredName, 2000).toLowerCase().replace(/\s+/g, " ")));
+    const found = row ?? control;
+    return { index, reference, desiredName, status: !found ? "MISSING" : (row ? nameMatches : controlMatches) ? "PRESENT" : "DIFFERS", current: row ? { text: row.text, links: row.links } : control ? { label: control.label, value: control.value, selector: control.selector } : null };
+  });
+  const counts: Record<string, number> = { PRESENT: 0, DIFFERS: 0, MISSING: 0 };
+  for (const item of comparisons) counts[item.status] += 1;
+  const fullySummaryComparable = (item: any) => (item.desiredName || domain === "event_settings") && Object.keys(records[item.index]?.fields ?? {}).length <= 2;
+  return { domain, counts,
+    alreadyCorrect: comparisons.filter((item: any) => item.status === "PRESENT" && fullySummaryComparable(item)).map((item: any) => item.reference).slice(0, 1000),
+    locatedNeedsDetailInspection: comparisons.filter((item: any) => item.status === "PRESENT" && !fullySummaryComparable(item)).map((item: any) => item.reference).slice(0, 1000),
+    needsConfiguration: comparisons.filter((item: any) => item.status === "DIFFERS").slice(0, 200),
+    missing: comparisons.filter((item: any) => item.status === "MISSING").slice(0, 200),
+    observed: { url: observed.url, title: observed.title, rowCount: rows.length, controls: (observed.controls ?? []).slice(0, 200), headings: observed.headings, buttons: observed.buttons },
+  };
+}
+
 function browserParams(operation: string, input: any): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   if (["authorizeTarget", "openAuthorizedEvent"].includes(operation)) {
@@ -273,6 +351,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     params.maxScrolls = Math.max(1, Math.min(Number(input.maxScrolls ?? 30), 60));
   }
   if (operation === "scanEventList") params.exactName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
+  if (operation === "sectionState") params.domain = cleanText(input.domain, 80);
   if (["click", "activate", "fill", "type", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "wait", "uploadDiscountImport", "readTarget"].includes(operation) && input.target) {
     params.target = cleanText(input.target, 4000);
     if (input.targetContext) params.targetContext = cleanText(input.targetContext, 1000);
@@ -288,7 +367,10 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
   if (operation === "search") params.submit = input.submit !== false;
   if (operation === "drag") params.destination = cleanText(input.destination, 4000);
   if (operation === "uploadDiscountImport") params.artifact = "discount-import.xlsx";
-  if (operation === "navigate") params.url = cleanText(input.url, 8000);
+  if (operation === "navigate") {
+    params.url = cleanText(input.url, 8000);
+    params.waitUntil = ["load", "domcontentloaded", "networkidle"].includes(input.loadState) ? input.loadState : "domcontentloaded";
+  }
   if (operation === "scroll") {
     params.deltaY = Math.max(-10000, Math.min(Number(input.deltaY ?? 700), 10000));
     params.settleMs = Math.max(100, Math.min(Number(input.settleMs ?? 500), 5000));
@@ -412,6 +494,17 @@ export default function cventJobTools(pi: any) {
   pi.on("session_start", async () => {
     pi.setActiveTools([...ALLOWED_TOOLS]);
     await safeMetric("pi_session_start", performance.now(), { pid: process.pid });
+  });
+  pi.on("context", async (event: any) => {
+    const messages = event.messages ?? [];
+    if (messages.length <= 32) return undefined;
+    const initial = messages.find((message: any) => message.role === "user");
+    let start = Math.max(0, messages.length - 28);
+    while (start < messages.length && messages[start]?.role === "toolResult") start += 1;
+    const recent = messages.slice(start);
+    const filtered = initial && !recent.includes(initial) ? [initial, ...recent] : recent;
+    await safeMetric("context_pruned", performance.now(), { originalMessages: messages.length, retainedMessages: filtered.length });
+    return { messages: filtered };
   });
   pi.on("turn_start", () => { turnStarted = performance.now(); firstTokenRecorded = false; });
   pi.on("message_update", async (event: any) => {
@@ -745,6 +838,42 @@ export default function cventJobTools(pi: any) {
   });
 
   pi.registerTool({
+    name: "cvent_section_state",
+    label: "Read complete Cvent section state",
+    description: "Open a cached or proven exact-event section route once, collect compact structured table/form state for all RR records, and return only aggregate matches plus exceptions. Use before any per-record discovery.",
+    parameters: Type.Object({ domain: literalUnion(DOMAIN_NAMES) }),
+    async execute(_id: string, params: any, signal: AbortSignal) {
+      const domain = String(params.domain);
+      await assertSnapshotConsumed();
+      if (await pendingWriteReadback()) throw new Error("Complete pending write readback before changing sections");
+      const expected = await verifiedCompiledExpectations();
+      const runtime = await readJson(runtimePath, {});
+      const cache = await readJson(ROUTE_CACHE, { routes: {} });
+      const cached = cache.routes?.[domain];
+      const route = cached?.browserRuntimeId === runtime.browserRuntimeId ? cached.url : fixedSectionRoutes()[domain];
+      const menuPath = fixedSectionMenuPath(domain);
+      if (!route && !menuPath.length) return toolText({ ok: false, domain, exception: "NO_PROVEN_ROUTE", instruction: "Use Pi discovery once; successful exact-event navigation will be cached for this job." });
+      return withQueue("browser", async () => {
+        const base = route ?? fixedSectionRoutes().event_settings.replace("/Details/EventDetails/Index", "/Overview/Overview/Index/View");
+        const navigation = await invokeBrowser("navigate", browserParams("navigate", { intent: "read", url: base, loadState: "domcontentloaded" }), signal, 120);
+        for (const label of menuPath) {
+          await invokeBrowser("click", browserParams("click", { intent: "read", target: `role:menuitem[name="${label}"]` }), signal, 60);
+          await invokeBrowser("wait", browserParams("wait", { intent: "read", ms: 600 }), signal, 30);
+        }
+        const observed = await invokeBrowser("sectionState", browserParams("sectionState", { intent: "read", domain }), signal, 90);
+        await rememberSectionRoute(String(observed.url ?? observed.page?.url ?? base), domain);
+        const liveUrl = String(observed.url ?? observed.page?.url ?? "").toLowerCase();
+        if (!liveUrl.includes(requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY").toLowerCase())) {
+          throw new Error("CVENT_AUTH_REQUIRED_OR_EVENT_ROUTE_LOST: hand off only if the fresh auth check confirms login is required");
+        }
+        const comparison = compactSectionComparison(domain, expected, observed);
+        await appendActivity(`Collected complete ${domain} section state in one bounded mission: ${comparison.counts.PRESENT} present, ${comparison.counts.DIFFERS} differing, ${comparison.counts.MISSING} missing`);
+        return toolText({ ok: true, route: observed.url ?? observed.page?.url ?? navigation.page?.url ?? base, ...comparison });
+      });
+    },
+  });
+
+  pi.registerTool({
     name: "cvent_browser",
     label: "Cvent browser",
     description: "Read or configure the exact selected Cvent event in its canonical Steel browser. RR-driven writes are allowed by default; exact target identity, one-writer lease, protected-action blocks, uncertainty handling, and verification are enforced.",
@@ -794,6 +923,7 @@ export default function cventJobTools(pi: any) {
           const input = browserParams(operation, params);
           const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
           const result = await invokeBrowser(operation, input, signal, timeout);
+          if (operation === "navigate" && params.url) await rememberSectionRoute(String(params.url));
           const packaged = await saveLargeSnapshot(result);
           if (write) {
             const pending = readback ?? {};
@@ -825,8 +955,10 @@ export default function cventJobTools(pi: any) {
       procedure: Type.String({ maxLength: 120 }),
       rrSource: Type.String({ maxLength: 500 }),
       steps: Type.Array(Type.Object({
-        operation: Type.Union(["click", "activate", "fill", "type", "selectOption", "setChecked", "press", "wait", "uploadDiscountImport"].map((name) => Type.Literal(name))),
+        operation: Type.Union(["navigate", "click", "activate", "fill", "type", "selectOption", "setChecked", "press", "wait", "readTarget", "uploadDiscountImport"].map((name) => Type.Literal(name))),
         target: Type.Optional(Type.String({ maxLength: 4000 })),
+        url: Type.Optional(Type.String({ maxLength: 8000 })),
+        loadState: Type.Optional(Type.Union([Type.Literal("load"), Type.Literal("domcontentloaded"), Type.Literal("networkidle")])),
         targetContext: Type.Optional(Type.String({ maxLength: 1000 })),
         targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
         text: Type.Optional(Type.String({ maxLength: 20000 })),
@@ -851,10 +983,11 @@ export default function cventJobTools(pi: any) {
           const step = params.steps[index];
           const operation = String(step.operation);
           if (operation === "press" && !ALLOWED_KEYS.has(String(step.key))) throw new Error(`Procedure step ${index + 1}: keyboard key is not approved`);
-          const write = operation !== "wait";
+          const write = !["wait", "navigate", "readTarget"].includes(operation);
           const input = browserParams(operation, { ...step, intent: write ? "write" : "read", rrSource });
           try {
             const result = await invokeBrowser(operation, input, signal, Number(step.timeoutSeconds ?? 90));
+            if (operation === "navigate" && step.url) await rememberSectionRoute(String(step.url));
             results.push({ step: index + 1, operation, ok: true, url: result.url, title: result.title });
             if (write) {
               const pending = await pendingWriteReadback();

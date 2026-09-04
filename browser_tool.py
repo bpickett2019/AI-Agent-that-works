@@ -9,7 +9,7 @@ from browser_gate import action
 from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
-EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'}
+EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','sectionState','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'}
 INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
 def event_key(url):
     try:
