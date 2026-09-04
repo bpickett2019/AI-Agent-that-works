@@ -202,6 +202,20 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
         self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
 
+    def test_trusted_procedure_accepts_only_typed_rr_values(self):
+        admission={'intent':'write','rrSource':'VERIFIED RR domain: admission_items','timeoutSeconds':600,'records':[
+            {'code':'FULL','name':'Full Access','source':'Sheet!D5','registrationTypes':[{'code':'ATT','name':'Attendee'}],'knownRegistrationTypes':[{'code':'ATT','name':'Attendee'}]},
+        ]}
+        browser_tool.validate_trusted_procedure('configureAdmissionItems',admission)
+        with self.assertRaisesRegex(RuntimeError,'only typed RR'):
+            browser_tool.validate_trusted_procedure('configureAdmissionItems',{**admission,'target':'#arbitrary'})
+        registration={'intent':'write','rrSource':'VERIFIED RR domain: registration_types','timeoutSeconds':600,'records':[
+            {'code':'ATT','name':'Attendee','source':'Sheet!A5','active':True,'groupRegistration':False,'reprintFee':125},
+        ]}
+        browser_tool.validate_trusted_procedure('configureRegistrationTypes',registration)
+        with self.assertRaisesRegex(RuntimeError,'flags are invalid'):
+            browser_tool.validate_trusted_procedure('configureRegistrationTypes',{**registration,'records':[{**registration['records'][0],'active':'yes'}]})
+
     def test_only_fixed_rr_discount_artifact_can_be_uploaded(self):
         artifact=self.base/'discount-import.xlsx';artifact.write_bytes(b'xlsx')
         self.assertEqual(browser_tool.fixed_upload_artifact({'artifact':'discount-import.xlsx'}),artifact.resolve())
@@ -276,7 +290,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
                     browser_tool.preflight_write_target(self.base/'runtime.json','click',{'intent':'write','target':f'role:button[name="{label}"]'})
     def test_ego_inside_steel_is_the_only_active_router(self):
         self.assertIn('Use only the fixed `cvent_*` tools',PROMPT)
-        self.assertIn('Use `cvent_browser` for all Cvent reading, configuration, and verification',SKILL)
+        self.assertIn('Use `cvent_browser` only for read-only identity, inventory, snapshot, and recovery operations',SKILL)
         self.assertFalse((ROOT/'browser_use_operator.py').exists())
         self.assertFalse((ROOT/'browser_use_direct.py').exists())
         self.assertIn("choices=['auto','ego']",ROUTER)
@@ -297,7 +311,9 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn("case 'cdp'",(ROOT/'ego_direct.mjs').read_text())
         self.assertNotIn('params.expression',extension)
         self.assertNotIn('params.method',extension)
-        self.assertNotIn('cvent_execute',extension)
+        self.assertIn('name: "cvent_execute_section"',extension)
+        self.assertIn('PI_BROWSER_OPERATION_NAMES',extension)
+        self.assertIn('trustedProcedureRecords',extension)
         self.assertNotIn('cvent_run_js',extension)
         self.assertNotIn('cvent_raw_cdp',extension)
         for operation in ('recover','authStatus','openAuthorizedEvent','readTarget','sectionState','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag','uploadDiscountImport'):
@@ -317,8 +333,18 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('fallbackUsed',EGO_DIRECT)
         self.assertIn("ego.setInputFiles(params.target,params.filePath)",EGO_DIRECT)
         self.assertIn('params.artifact = "discount-import.xlsx"',extension)
-        self.assertIn('name: "cvent_configure"',extension)
+        self.assertNotIn('name: "cvent_configure"',extension)
         self.assertIn('name: "cvent_section_state"',extension)
+        self.assertNotIn('cvent_configure,cvent_login_handoff', (ROOT/'job_runner.py').read_text())
+        trusted=(ROOT/'trusted_cvent_procedures.mjs').read_text()
+        self.assertIn('configureAdmissionItems',trusted)
+        self.assertIn('configureRegistrationTypes',trusted)
+        self.assertIn('for (const desired of params.records)',trusted)
+        self.assertIn('await ego.goto',trusted)
+        self.assertIn('await ego.fill',trusted)
+        self.assertIn('await ego.click',trusted)
+        self.assertNotIn('params.target',trusted)
+        self.assertIn("runTrustedCventProcedure(ego,runtime,operation,params)",EGO_DIRECT)
         self.assertIn('context_pruned',extension)
         self.assertIn('RegistrationTypes/Index/View',extension)
         self.assertIn('AdmissionItemGrid/Index',extension)

@@ -72,9 +72,12 @@ no authentication material is copied into prompts or logs.
 
 Before Steel or Pi starts, a one-token Anthropic availability probe fails closed
 when the approved account cannot serve requests. During execution, each section
-uses a compact RR-derived mission and a verified event-local route, inventories
-all records in one bounded DOM pass, batches routine UI actions, and reserves full
-snapshots for unknown layouts or recovery. Discount creation uses only the fixed
+uses a compact RR-derived mission and a verified event-local route. Admission Items
+and Registration Types run as trusted multi-step Ego procedures: Pi chooses only
+the section enum while reviewed code owns routes, locators, edits, saves, and
+readback for every record without returning to the model between browser primitives.
+The Pi-facing browser tool is read-only and exposes no selector-driven writes. Full
+snapshots are reserved for unknown layouts or recovery. Discount creation uses only the fixed
 RR-derived bulk-import workbook. Provider failure after zero writes is
 `failed_prewrite`; after conclusively read-back writes it is
 `failed_recoverable` and resumes with fresh state/delta computation; only an

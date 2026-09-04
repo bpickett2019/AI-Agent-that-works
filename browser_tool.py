@@ -9,8 +9,9 @@ from browser_gate import action
 from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
-EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','sectionState','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'}
-INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}
+TRUSTED_PROCEDURES={'configureAdmissionItems','configureRegistrationTypes'}
+EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','sectionState','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport',*TRUSTED_PROCEDURES}
+INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag',*TRUSTED_PROCEDURES}
 def event_key(url):
     try:
         q={key.lower():value for key,value in parse_qs(urlparse(url).query).items()}
@@ -148,6 +149,31 @@ def preflight_write_target(runtime_path,operation,params):
         assert_safe_write_target(operation,params,descriptor)
         resolved[key]=result.get('resolvedTarget') or target
     return resolved
+def validate_trusted_procedure(operation,params):
+    allowed={'intent','rrSource','records','timeoutSeconds'}
+    if set(params)-allowed:raise RuntimeError('Trusted procedure accepts only typed RR configuration records')
+    records=params.get('records')
+    if not isinstance(records,list) or not 1<=len(records)<=50:raise RuntimeError('Trusted procedure RR record count is invalid')
+    for record in records:
+        if not isinstance(record,dict):raise RuntimeError('Trusted procedure record must be an object')
+        common={'code','name','source'}
+        expected=common|({'registrationTypes','knownRegistrationTypes'} if operation=='configureAdmissionItems' else {'active','groupRegistration','reprintFee'})
+        if set(record)-expected:raise RuntimeError('Trusted procedure record contains an unsupported field')
+        if not isinstance(record.get('code'),str) or not record['code'].strip() or len(record['code'])>200:raise RuntimeError('Trusted procedure code is invalid')
+        if not isinstance(record.get('name'),str) or not record['name'].strip() or len(record['name'])>1000:raise RuntimeError('Trusted procedure name is invalid')
+        if not isinstance(record.get('source'),str) or len(record['source'])>500:raise RuntimeError('Trusted procedure source evidence is invalid')
+        if operation=='configureAdmissionItems':
+            values=record.get('registrationTypes');known=record.get('knownRegistrationTypes')
+            if not isinstance(values,list) or len(values)>100 or not isinstance(known,list) or not 1<=len(known)<=100:raise RuntimeError('Admission registration-type associations are invalid')
+            for item in values+known:
+                if not isinstance(item,dict) or set(item)-{'code','name'} or not isinstance(item.get('code'),str) or not isinstance(item.get('name'),str):raise RuntimeError('Admission registration-type association is invalid')
+        else:
+            if not isinstance(record.get('active'),bool) or not isinstance(record.get('groupRegistration'),bool):raise RuntimeError('Registration-type flags are invalid')
+            if record.get('reprintFee') is not None and (not isinstance(record['reprintFee'],(int,float)) or not 0<=record['reprintFee']<=100000):raise RuntimeError('Registration-type reprint fee is invalid')
+    timeout=params.get('timeoutSeconds',600)
+    if not isinstance(timeout,int) or not 30<=timeout<=900:raise RuntimeError('Trusted procedure timeout is invalid')
+
+
 def fixed_upload_artifact(params):
     if params.get('artifact')!='discount-import.xlsx':raise RuntimeError('Only the compiled RR discount import artifact may be uploaded')
     candidate=CURRENT/'discount-import.xlsx';info=candidate.lstat()
@@ -174,6 +200,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
+        if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
         if is_write:
             params=preflight_write_target(runtime_path,operation,params)
             if operation=='uploadDiscountImport':params['filePath']=str(fixed_upload_artifact(params))

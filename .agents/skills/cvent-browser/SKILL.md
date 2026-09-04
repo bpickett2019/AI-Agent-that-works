@@ -6,7 +6,7 @@ description: Configure one exact server-selected existing Cvent event from its u
 
 # RR-driven Cvent configuration
 
-Use `cvent_browser` for all Cvent reading, configuration, and verification. The gateway attaches Ego to the job's canonical Steel Chromium and persisted login.
+Use `cvent_browser` only for read-only identity, inventory, snapshot, and recovery operations. Use `cvent_execute_section` for configuration. The gateway attaches Ego to the job's canonical Steel Chromium and persisted login.
 
 The uploaded RR is the configuration authority. Normal event-scoped RR requirements are writable by default and do not require per-field scope IDs or manual approval. Do not create an event. Configure only the exact existing event selected by the server.
 
@@ -24,7 +24,7 @@ Use `intent: write` for mutations. An optional `rrSource` can identify the relev
 
 ## Browser operations
 
-Read the complete validated mission before opening Cvent; do not reinterpret the workbook one field at a time. Use complete `snapshotText` only on a new/unknown page or during ambiguity/recovery, `readTarget` for known-field readback, and `controlInventory` only for selector recovery. Consume all chunks of a large snapshot in strict order. Prefer exact role/name locators. Use `cvent_configure` to execute known same-page fill/select/save procedures in one bounded call and one final readback rather than one model cycle per click. `selectOption` supports native selects and exact-label Cvent custom comboboxes. Repeated exact controls can be resolved before dispatch with an observed `targetContext` and, only when necessary, the fresh inventory's zero-based `targetIndex`. For large discount sets, use Cvent's Import Discounts wizard with `uploadDiscountImport`; it can upload only the fixed RR-derived job artifact and accepts no path.
+Read the complete validated mission before opening Cvent; do not reinterpret the workbook one field at a time. For Admission Items and Registration Types, invoke `cvent_execute_section` once per section. The reviewed procedure loads typed VERIFIED RR records, performs all Ego navigation/observation/locating/edit/save/readback internally, and returns structured per-record statuses. Do not supply selectors, URLs, primitive write commands, JavaScript, or CDP operations. Use complete `snapshotText` only after a procedure reports an unknown UI or recovery exception, and consume all chunks in strict order. For a section without a trusted procedure, inventory once with `cvent_section_state` and report the capability gap; never reconstruct primitive writes.
 
 On unfamiliar pages: read → scroll → understand → configure → Save → fresh reread. Use `recover` once if rendering stalls. Never blindly retry an uncertain write.
 

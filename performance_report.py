@@ -51,6 +51,7 @@ def main(directory):
     first_tokens = [event.get("durationMs", 0) for event in events if event.get("kind") == "anthropic_first_token"]
     stage_markers = [event for event in events if event.get("kind") == "stage_marker"]
     first_browser = next((event for event in events if event.get("kind") == "first_browser_action"), {})
+    trusted_procedures = [event for event in events if event.get("kind") == "trusted_section_procedure"]
     stage_times = {}
     for index, event in enumerate(stage_markers):
         end = stage_markers[index + 1]["timestamp"] if index + 1 < len(stage_markers) else (events[-1]["timestamp"] if events else event["timestamp"])
@@ -92,7 +93,10 @@ def main(directory):
             "targetedReadbacks": sum(item.get("intent") == "read" and not item.get("fullSnapshot") for item in browser)},
         "executionLoop": {"timeToFirstBrowserActionMs": first_browser.get("durationMs", 0),
             "sectionStateMissions": sum(event.get("kind") == "browser_operation" and event.get("operation") == "sectionState" for event in events),
-            "contextPrunes": sum(event.get("kind") == "context_pruned" for event in events)},
+            "contextPrunes": sum(event.get("kind") == "context_pruned" for event in events),
+            "trustedSectionProcedures": [{"domain": event.get("domain"), "status": event.get("status"),
+                "records": event.get("records", 0), "mutations": event.get("mutationCount", 0), "durationMs": event.get("durationMs", 0)}
+                for event in trusted_procedures]},
         "stageDurationsMs": stage_times, "forgeStatusUpdates": len(stage_markers), "api": {"reads": 0, "writes": 0}, "computeAndDisk": compute,
         "securitySoftware": {"observedProcessMetrics": compute.get("security", {}), "causalOverheadEstablished": False, "exclusionsApplied": False},
         "topMeasuredTimeCategories": [{"name": name, "durationMs": round(value, 1)} for name, value in sorted(categories, key=lambda item: item[1], reverse=True)[:5]],

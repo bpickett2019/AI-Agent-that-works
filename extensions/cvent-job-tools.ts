@@ -8,6 +8,10 @@ const BROWSER_OPERATION_NAMES = [
   "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport",
 ];
+const PI_BROWSER_OPERATION_NAMES = ["probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList"];
+const TRUSTED_SECTION_PROCEDURES: Record<string, string> = {
+  admission_items: "configureAdmissionItems", registration_types: "configureRegistrationTypes",
+};
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
   "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
@@ -38,7 +42,7 @@ const ARTIFACTS: Record<string, string> = {
 };
 const ALLOWED_TOOLS = new Set([
   "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_configure",
+  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
@@ -259,12 +263,13 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
     await appendPerformance("first_browser_action", extensionStarted, { operation });
   }
   await readJobFile(runtimePath, 1024 * 1024);
-  const timeout = Math.max(1, Math.min(timeoutSeconds, operation === "recover" ? 300 : 180));
+  const trusted = Object.values(TRUSTED_SECTION_PROCEDURES).includes(operation);
+  const timeout = Math.max(1, Math.min(timeoutSeconds, trusted ? 900 : operation === "recover" ? 300 : 180));
   const boundedParams = { ...params, timeoutSeconds: timeout };
   const output = await runFixed(python, [
     join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
     "--operation", operation, "--params", JSON.stringify(boundedParams),
-  ], "browser", signal, (timeout + (operation === "recover" ? 45 : 10)) * 1000);
+  ], "browser", signal, (timeout + (operation === "recover" ? 45 : trusted ? 30 : 10)) * 1000);
   const result = parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
   await appendPerformance("browser_operation", started, { operation, intent: params.intent, navigation: ["navigate", "openAuthorizedEvent"].includes(operation), snapshot: operation === "snapshotText", fullSnapshot: operation === "snapshotText", responseBytes: Buffer.byteLength(JSON.stringify(result)) });
   return result;
@@ -308,6 +313,44 @@ function desiredSectionRecords(domain: string, expected: any): any[] {
   if (domain === "site_designer") return [...(section.footerLinks ?? []), ...(section.socialLinks ?? []), ...(section.countdownMessages ?? []), ...(section.inlineContentLinks ?? [])];
   if (domain === "event_settings") return Object.entries(section.fields ?? {}).map(([name, field]: any) => ({ matchReference: name.replace(/_/g, " "), fields: { [name]: field } }));
   return section.items ?? section.requirements ?? section.badgeRequirements ?? [];
+}
+
+function booleanValue(value: unknown): boolean {
+  return ["yes", "true", "active", "activate", "required", "1"].includes(cleanText(value, 40).toLowerCase());
+}
+
+function trustedProcedureRecords(domain: string, expected: any): any[] {
+  const section = expected.domains?.[domain] ?? {};
+  if (domain === "admission_items") {
+    const registrationNames = new Map((expected.domains?.registration_types?.items ?? []).map((item: any) => [
+      cleanText(item.fields?.registration_code?.value, 200), cleanText(item.fields?.registration_name?.value, 1000),
+    ]));
+    const knownRegistrationTypes = [...registrationNames.entries()].map(([code, name]) => ({ code, name }));
+    return (section.items ?? []).map((item: any) => ({
+      code: cleanText(item.fields?.admission_code?.value ?? item.matchReference, 200),
+      name: cleanText(item.fields?.admission_name?.value, 1000),
+      source: cleanText(item.fields?.admission_code?.source ?? item.fields?.admission_name?.source, 500),
+      registrationTypes: [...new Set(item.registrationTypes ?? [])].map((code: any) => ({
+        code: cleanText(code, 200), name: cleanText(registrationNames.get(cleanText(code, 200)) ?? code, 1000),
+      })),
+      knownRegistrationTypes,
+    }));
+  }
+  if (domain === "registration_types") return (section.items ?? []).map((item: any) => ({
+    code: cleanText(item.fields?.registration_code?.value ?? item.matchReference, 200),
+    name: cleanText(item.fields?.registration_name?.value, 1000),
+    source: cleanText(item.fields?.registration_code?.source ?? item.fields?.registration_name?.source, 500),
+    active: booleanValue(item.fields?.active?.value),
+    groupRegistration: booleanValue(item.fields?.group_registration?.value),
+    reprintFee: item.fields?.reprint_fee?.value == null ? null : Number(item.fields.reprint_fee.value),
+  }));
+  throw new Error(`No trusted procedure data projection exists for ${domain}`);
+}
+
+async function assertDomainEvidenceVerified(domain: string): Promise<void> {
+  const validation = await readJson(join(jobDir, "rr-validation.json"), null);
+  const unsupported = (validation?.items ?? []).filter((item: any) => item.domain === domain && item.status !== "VERIFIED");
+  if (unsupported.length) throw new Error(`Trusted ${domain} procedure blocked: ${unsupported.length} RR evidence items are not independently VERIFIED`);
 }
 
 function compactSectionComparison(domain: string, expected: any, observed: any): any {
@@ -874,29 +917,43 @@ export default function cventJobTools(pi: any) {
   });
 
   pi.registerTool({
+    name: "cvent_execute_section",
+    label: "Execute trusted Cvent section procedure",
+    description: "Run one application-owned, bounded multi-step Ego procedure for an entire RR section. Pi supplies only the section enum; trusted code loads VERIFIED RR data and owns routes, locators, actions, saves, and final readback.",
+    parameters: Type.Object({ domain: literalUnion(Object.keys(TRUSTED_SECTION_PROCEDURES)) }),
+    async execute(_id: string, params: any, signal: AbortSignal) {
+      const domain = String(params.domain);
+      const operation = TRUSTED_SECTION_PROCEDURES[domain];
+      if (!operation) throw new Error(`No trusted Cvent procedure is registered for ${domain}`);
+      return withQueue("browser", async () => {
+        await assertSnapshotConsumed();
+        if (await pendingWriteReadback()) throw new Error("Complete the pending Cvent write readback before starting a trusted section procedure");
+        const expected = await verifiedCompiledExpectations();
+        await assertDomainEvidenceVerified(domain);
+        const records = trustedProcedureRecords(domain, expected);
+        if (!records.length) return toolText({ ok: true, domain, status: "ALREADY_CORRECT", records: [], detail: "RR contains no records for this section" });
+        await updateBrowserProgress(`Running trusted multi-step Ego procedure for ${domain}`);
+        const started = performance.now();
+        const result = await invokeBrowser(operation, {
+          intent: "write", rrSource: `VERIFIED RR domain: ${domain}`, records, timeoutSeconds: 780,
+        }, signal, 780);
+        await appendPerformance("trusted_section_procedure", started, { domain, operation, records: records.length,
+          status: result.status, mutationCount: result.mutationCount ?? 0 });
+        await appendActivity(`Trusted ${domain} Ego mission returned ${result.status}: ${result.records?.length ?? 0} records, ${result.mutationCount ?? 0} mutations`);
+        await updateBrowserProgress(result.status === "AUTH_REQUIRED" ? `Cvent authentication required while entering ${domain}` : `Trusted ${domain} mission finished: ${result.status}`);
+        return toolText({ ok: true, domain, ...result });
+      });
+    },
+  });
+
+  pi.registerTool({
     name: "cvent_browser",
     label: "Cvent browser",
     description: "Read or configure the exact selected Cvent event in its canonical Steel browser. RR-driven writes are allowed by default; exact target identity, one-writer lease, protected-action blocks, uncertainty handling, and verification are enforced.",
     parameters: Type.Object({
-      operation: Type.Union(BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
-      intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
-      rrSource: Type.Optional(Type.String({ maxLength: 500, description: "Optional RR sheet/cell reference for the write audit" })),
-      target: Type.Optional(Type.String({ maxLength: 4000 })),
-      targetContext: Type.Optional(Type.String({ maxLength: 1000, description: "Observed surrounding dialog, section, or row text used only to disambiguate repeated controls" })),
-      targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, description: "Observed zero-based visible-control index used only when identical controls remain after context filtering" })),
-      text: Type.Optional(Type.String({ maxLength: 20000 })),
-      url: Type.Optional(Type.String({ maxLength: 8000 })),
-      option: Type.Optional(Type.String({ maxLength: 2000 })),
-      optionBy: Type.Optional(Type.Union([Type.Literal("label"), Type.Literal("value")])),
-      checked: Type.Optional(Type.Boolean()),
-      key: Type.Optional(Type.String({ maxLength: 40 })),
-      submit: Type.Optional(Type.Boolean()),
-      destination: Type.Optional(Type.String({ maxLength: 4000 })),
-      loadState: Type.Optional(Type.Union([Type.Literal("load"), Type.Literal("domcontentloaded"), Type.Literal("networkidle")])),
-      deltaY: Type.Optional(Type.Number()),
-      settleMs: Type.Optional(Type.Integer()),
-      maxScrolls: Type.Optional(Type.Integer()),
-      ms: Type.Optional(Type.Integer()),
+      operation: Type.Union(PI_BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
+      intent: Type.Literal("read"),
+      maxScrolls: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })),
       timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
     }),
     async execute(_id: string, params: any, signal: AbortSignal) {
@@ -943,72 +1000,6 @@ export default function cventJobTools(pi: any) {
           await updateBrowserProgress(`${write ? "Cvent write" : "Cvent browser read"} blocked safely during ${operation}`);
           throw error;
         }
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "cvent_configure",
-    label: "Run bounded Cvent procedure",
-    description: "Execute up to 50 planned operations on one known Cvent page, stop on the first failure without retrying uncertain writes, then capture one fresh verification snapshot.",
-    parameters: Type.Object({
-      procedure: Type.String({ maxLength: 120 }),
-      rrSource: Type.String({ maxLength: 500 }),
-      steps: Type.Array(Type.Object({
-        operation: Type.Union(["navigate", "click", "activate", "fill", "type", "selectOption", "setChecked", "press", "wait", "readTarget", "uploadDiscountImport"].map((name) => Type.Literal(name))),
-        target: Type.Optional(Type.String({ maxLength: 4000 })),
-        url: Type.Optional(Type.String({ maxLength: 8000 })),
-        loadState: Type.Optional(Type.Union([Type.Literal("load"), Type.Literal("domcontentloaded"), Type.Literal("networkidle")])),
-        targetContext: Type.Optional(Type.String({ maxLength: 1000 })),
-        targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
-        text: Type.Optional(Type.String({ maxLength: 20000 })),
-        option: Type.Optional(Type.String({ maxLength: 2000 })),
-        optionBy: Type.Optional(Type.Union([Type.Literal("label"), Type.Literal("value")])),
-        checked: Type.Optional(Type.Boolean()),
-        key: Type.Optional(Type.String({ maxLength: 40 })),
-        ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000 })),
-        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 180 })),
-      }), { minItems: 1, maxItems: 50 }),
-    }),
-    async execute(_id: string, params: any, signal: AbortSignal) {
-      return withQueue("browser", async () => {
-        await assertSnapshotConsumed();
-        if (await pendingWriteReadback()) throw new Error("Complete the pending Cvent write readback before starting another procedure");
-        await assertCompiledExpectations();
-        const procedure = cleanText(params.procedure, 120);
-        const rrSource = cleanText(params.rrSource, 500);
-        const results: any[] = [];
-        await updateBrowserProgress(`Running bounded Cvent procedure: ${procedure}`);
-        for (let index = 0; index < params.steps.length; index += 1) {
-          const step = params.steps[index];
-          const operation = String(step.operation);
-          if (operation === "press" && !ALLOWED_KEYS.has(String(step.key))) throw new Error(`Procedure step ${index + 1}: keyboard key is not approved`);
-          const write = !["wait", "navigate", "readTarget"].includes(operation);
-          const input = browserParams(operation, { ...step, intent: write ? "write" : "read", rrSource });
-          try {
-            const result = await invokeBrowser(operation, input, signal, Number(step.timeoutSeconds ?? 90));
-            if (operation === "navigate" && step.url) await rememberSectionRoute(String(step.url));
-            results.push({ step: index + 1, operation, ok: true, url: result.url, title: result.title });
-            if (write) {
-              const pending = await pendingWriteReadback();
-              await atomicJson(WRITE_READBACK_PENDING, {
-                operations: [...(pending?.operations ?? []), operation].slice(-100), rrSources: [rrSource],
-                browserRuntimeId: result.browserRuntimeId, targetId: result.targetId,
-                requiredAt: pending?.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(), procedure,
-              });
-            }
-          } catch (error) {
-            await updateBrowserProgress(`Bounded procedure ${procedure} stopped safely at step ${index + 1}`);
-            throw error;
-          }
-        }
-        const verification = await invokeBrowser("snapshotText", browserParams("snapshotText", { intent: "read" }), signal, 90);
-        const packaged = await saveLargeSnapshot(verification);
-        const transport = await pendingSnapshot();
-        if (!transport || transport.complete === true) await clearWriteReadback();
-        await appendActivity(`Completed bounded Cvent procedure ${procedure}: ${results.length} operations plus one verification readback`);
-        await updateBrowserProgress(`Verified bounded Cvent procedure: ${procedure}`);
-        return toolText({ ok: true, procedure, operations: results, verification: packaged });
       });
     },
   });

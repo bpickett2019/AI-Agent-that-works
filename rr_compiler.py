@@ -427,10 +427,13 @@ try:
             admission = admissions_by_key.setdefault(admission_key, {
                 "matchReference": admission_code or admission_name, "sourceRows": [],
                 "fields": {key: value for key, value in fields.items() if key in {"admission_code", "admission_name", "admission_description", "admission_additional_text", "badge_description"}},
-                "registrationTypes": [],
+                "registrationTypes": [], "registrationTypeEvidence": [],
             })
             admission["sourceRows"].append(row)
             admission["registrationTypes"].append(reg_code or reg_name)
+            association_columns = [column for column in (layout.get("registration_code") or layout.get("registration_name"), layout.get("admission_code") or layout.get("admission_name")) if column]
+            association_source = f"{reg_sheet}!{get_column_letter(min(association_columns))}{row}:{get_column_letter(max(association_columns))}{row}"
+            admission["registrationTypeEvidence"].append(field({"registrationType": reg_code or reg_name, "admissionItem": admission_code or admission_name}, association_source))
         tier_values = []
         for column, label in tiers:
             value = clean(reg_ws.cell(row, column).value)
