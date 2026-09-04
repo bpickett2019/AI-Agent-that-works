@@ -948,8 +948,8 @@ export default function cventJobTools(pi: any) {
 
   pi.registerTool({
     name: "cvent_browser",
-    label: "Cvent browser",
-    description: "Read or configure the exact selected Cvent event in its canonical Steel browser. RR-driven writes are allowed by default; exact target identity, one-writer lease, protected-action blocks, uncertainty handling, and verification are enforced.",
+    label: "Read-only Cvent browser",
+    description: "Read identity, inventory, snapshots, or recovery state in the canonical Steel browser. This Pi-facing tool exposes no primitive writes, selectors, URLs, JavaScript, or CDP; configuration uses trusted section procedures.",
     parameters: Type.Object({
       operation: Type.Union(PI_BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
       intent: Type.Literal("read"),
