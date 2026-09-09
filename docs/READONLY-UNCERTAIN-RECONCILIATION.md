@@ -67,3 +67,25 @@ The local Ego task space is 17. It is being handed to the user solely to refresh
 Cvent login and select Return to Agent. Current ATTED values and the remaining
 registration-type delta are still unverified. Do not report stored snapshots as
 fresh readback or retry the earlier mutation.
+
+## Login verified, inventory preflight stopped
+
+The user completed the handoff. At 21:19:51 UTC the first reader ended after
+fresh authentication passed, but its exact Draft inventory check did not. It
+never reached ATTED. Its result confirms original evidence unchanged and no
+write audit; both leases released. The first reader did not retain enough
+inventory diagnostics to distinguish a wrong landing page from a missing row.
+
+A subsequent fresh browser again required Cvent login despite the preserved
+profile/account binding. Do not call that successful session persistence.
+The reader now explicitly navigates to the known EventSelection route both at
+startup and after login, records selected-event inventory diagnostics before
+checking them, and retains an authenticated read-only browser on read errors
+for bounded diagnosis instead of forcing another browser restart.
+
+Current operator reader PID `3850235`, directory
+`reconciliation/atted-e430f6805c09`, is waiting for login. The staging UI confirms
+read-only mode, USER ownership, Session Online, and no agent process. The reader
+is the reviewed updated operator script in `/tmp/cvent_atted_reconcile_readonly.py`;
+the application deployment remains `71224a5`. No deployment may replace the
+active leased runtime. No ATTED retry or RR restart occurred.

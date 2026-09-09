@@ -177,7 +177,7 @@ def main():
                 private_json(original/'read-only-reconciliation.json',{
                     'jobId':JOB_ID,'directory':folder.name,'browserRuntimeId':runtime['browserRuntimeId'],
                     'leaseFingerprint':hashlib.sha256(token.encode()).hexdigest()})
-                browser('navigate',url='https://app.cvent.com/subscribers/default.aspx')
+                browser('navigate',url='https://app.cvent.com/Subscribers/Events2/EventSelection')
                 auth = None
                 for _ in range(10):
                     auth = browser('authStatus')
@@ -203,8 +203,14 @@ def main():
                     auth=browser('authStatus')
                     if not auth.get('authenticated'):raise RuntimeError('Returned browser did not pass fresh authentication')
                     result['auth']={k:auth.get(k) for k in ('authenticated','persistedProfile','profileMatch','accountContextMatch','workerSlot')}
+                # Login can return to a dashboard rather than the event inventory.
+                # Navigate to the previously proven inventory route before scanning.
+                browser('navigate',url='https://app.cvent.com/Subscribers/Events2/EventSelection')
+                time.sleep(1)
                 inventory = browser('scanEventList',exactName=EVENT_NAME,maxScrolls=60)
                 matches = inventory.get('exactMatches',[])
+                result['eventInventoryMatches']=matches
+                result['inventoryObservedRows']=len(inventory.get('observedRows',[]))
                 if len(matches)!=1 or matches[0].get('status','').strip().lower() != 'draft':
                     raise RuntimeError('Unique exact Draft event inventory match not established')
                 result['eventInventory'] = matches[0]
@@ -251,6 +257,19 @@ def main():
                 print(json.dumps({'evidenceDirectory':str(folder),'auth':result['auth'],
                     'eventTitleUnchanged':result['eventTitleUnchanged'],'actual':result['actual'],
                     'registrationTypeInventoryDelta':deltas},indent=2))
+            except RuntimeError as error:
+                result['readError']=str(error)
+                private_json(folder/'atted-readback.json',result)
+                if result.get('auth',{}).get('authenticated') and not lost.is_set() and not (folder/'stop-requested.json').exists():
+                    print(json.dumps({'readPaused':True,'error':str(error),'evidenceDirectory':str(folder),
+                        'eventInventoryMatches':result.get('eventInventoryMatches'),
+                        'inventoryObservedRows':result.get('inventoryObservedRows')}),flush=True)
+                    # Retain an authenticated read-only browser for diagnosis
+                    # rather than forcing another login after an inventory error.
+                    deadline=time.monotonic()+1800
+                    while time.monotonic()<deadline and not lost.is_set() and not (folder/'stop-requested.json').exists():
+                        time.sleep(1)
+                raise
             finally:
                 released=steel('release')
                 if not released.get('released'): raise RuntimeError('Browser resource did not release cleanly')

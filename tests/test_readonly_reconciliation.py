@@ -63,6 +63,14 @@ class ReadonlyReconciliationTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777,0o600)
         self.assertFalse(list(path.parent.glob('reader.json.*.tmp')))
 
+    def test_login_landing_does_not_determine_inventory_and_read_errors_preserve_session(self):
+        source=(Path(__file__).resolve().parents[1]/'scripts/reconcile_registration_readonly.py').read_text()
+        self.assertNotIn("url='https://app.cvent.com/subscribers/default.aspx'",source)
+        self.assertEqual(source.count("browser('navigate',url='https://app.cvent.com/Subscribers/Events2/EventSelection')"),2)
+        self.assertLess(source.index("result['eventInventoryMatches']=matches"),source.index('if len(matches)!=1'))
+        self.assertIn("'readPaused':True",source)
+        self.assertLess(source.index("'readPaused':True"),source.index("released=steel('release')"))
+
     def test_dispatcher_cannot_mutate_or_save(self):
         self.assertTrue(READ_ACTIONS.isdisjoint({'click','activate','fill','type','setChecked','selectOption',
                                                'configureRegistrationTypes','configureAdmissionItems','save'}))
