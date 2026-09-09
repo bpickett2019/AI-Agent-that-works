@@ -46,13 +46,17 @@ async function gotoAuthorized(ego, url, eventKey) {
 }
 
 async function gridRows(ego) {
-  return ego.evaluate(`(() => {const clean=v=>String(v||'').replace(/\\s+/g,' ').trim();return [...document.querySelectorAll('table tr,[role=row]')].map(row=>{const cells=[...row.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(cell=>clean(cell.innerText||cell.textContent));const links=[...row.querySelectorAll('a[href]')].map(link=>({text:clean(link.innerText||link.textContent),href:link.href}));return {text:clean(row.innerText||row.textContent),cells,links}}).filter(row=>row.cells.length)})()`);
+  return ego.evaluate(`(() => {const clean=v=>String(v||'').replace(/\\s+/g,' ').trim();return [...document.querySelectorAll('table tr,[role=row]')].map(row=>{const cells=[...row.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(cell=>clean(cell.innerText||cell.textContent));const links=[...row.querySelectorAll('a[href]')].map(link=>({text:clean(link.innerText||link.textContent),href:link.href}));return {header:Boolean(row.querySelector('th,[role=columnheader]')),text:clean(row.innerText||row.textContent),cells,links}}).filter(row=>row.cells.length)})()`);
 }
 
-function exactRow(rows, code) {
-  const wanted = norm(code);
-  const matches = rows.filter(row => row.cells.some(cell => norm(cell) === wanted));
-  return matches.length === 1 ? { row: matches[0] } : { count: matches.length };
+export function exactRow(rows, code) {
+  // A name or unrelated cell equal to the code is not a code identity match.
+  const cleanHeader = value => norm(String(value ?? '').replace(/[\uE000-\uF8FF]/g, ''));
+  const columns = new Set(rows.filter(row => row.header === true).flatMap(row => (row.cells || []).flatMap((cell, index) => cleanHeader(cell) === 'code' ? [index] : [])));
+  if (columns.size !== 1) return { count: null, identityUnavailable: true };
+  const column = [...columns][0];
+  const matches = rows.filter(row => !row.header && row.links?.length && norm(row.cells[column]) === norm(code));
+  return matches.length === 1 ? { row: matches[0], column } : { count: matches.length };
 }
 
 export function safeDetailHref(row, eventKey, pathNeedle) {
@@ -155,7 +159,8 @@ async function admissionAvailability(ego, expectedTypes, knownTypes) {
   const end = tail.findIndex(line => norm(line).replace(/:$/, '') === 'status & capacity');
   const section = norm((end < 0 ? tail : tail.slice(0, end)).join('\n'));
   if (/^no(?:\s|$)/.test(section)) return { known: true, allTypes: true, matches: expectedTypes.length === knownTypes.length };
-  const selected = knownTypes.filter(item => section.includes(norm(item.name)) || section.includes(norm(item.code))).map(item => norm(item.code));
+  const exactLabels = new Set((end < 0 ? tail : tail.slice(0, end)).map(norm));
+  const selected = knownTypes.filter(item => exactLabels.has(norm(item.name)) || exactLabels.has(norm(item.code))).map(item => norm(item.code));
   const expected = expectedTypes.map(item => norm(item.code));
   const missing = expected.filter(item => !selected.includes(item));
   const unexpected = selected.filter(item => !expected.includes(item));
@@ -207,7 +212,9 @@ async function configureAdmissionItems(ego, runtime, params) {
   for (const desired of params.records) {
     const found = exactRow(rows, desired.code);
     if (!found.row) {
-      records.push({ reference: desired.code, status: found.count > 1 ? 'AMBIGUOUS' : 'CONTROL_NOT_FOUND', detail: `Admission grid exact-code matches: ${found.count || 0}` });
+      records.push({ reference: desired.code, status: 'AMBIGUOUS', detail: found.count === 0
+        ? 'Exact admission code absent. Event-local creation form is not yet proven; never repurpose a similar item.'
+        : 'Exact admission code identity is unavailable or duplicated.', identityMatches: found.count });
       continue;
     }
     const currentName = found.row.links?.[0]?.text || found.row.cells[0];
@@ -292,6 +299,18 @@ export async function registrationFacts(ego, desired) {
   return { facts, matches: result, all: Object.values(result).every(Boolean) };
 }
 
+export function partitionRegistrationFields(planned, matches) {
+  return {
+    actionable: planned.filter(change => change.marked),
+    fieldGaps: [
+      ...planned.filter(change => !change.marked).map(change => ({ field: change.field,
+        desired: change.value, actual: null, status: 'CONTROL_NOT_AVAILABLE', reason: 'No exact reviewed event-local control' })),
+      ...['active'].filter(field => !matches[field]).map(field => ({ field, actual: null,
+        status: 'CONTROL_NOT_AVAILABLE', reason: 'Independent active-status readback is unavailable; existence is not active status' })),
+    ],
+  };
+}
+
 async function configureRegistrationTypes(ego, runtime, params) {
   const eventKey = runtime.authorizedEventKey;
   const gridUrl = `https://app.cvent.com/Subscribers/Events2/Details/RegistrationTypes/Index/View?evtstub=${encodeURIComponent(eventKey)}`;
@@ -303,7 +322,9 @@ async function configureRegistrationTypes(ego, runtime, params) {
   for (const desired of params.records) {
     const found = exactRow(rows, desired.code);
     if (!found.row) {
-      records.push({ reference: desired.code, status: found.count > 1 ? 'AMBIGUOUS' : 'CONTROL_NOT_FOUND', detail: `Registration-type grid exact-code matches: ${found.count || 0}` });
+      records.push({ reference: desired.code, status: 'AMBIGUOUS', detail: found.count === 0
+        ? 'Exact registration code absent. Event-local creation form is not yet proven; never rename a similar type or create a shared definition.'
+        : 'Exact registration code identity is unavailable or duplicated.', identityMatches: found.count });
       continue;
     }
     const detailHref = safeDetailHref(found.row, eventKey, 'registrationtype');
@@ -314,6 +335,10 @@ async function configureRegistrationTypes(ego, runtime, params) {
     disposition = await gotoAuthorized(ego, detailHref, eventKey);
     if (disposition.status) return { procedure: 'configureRegistrationTypes', status: disposition.status, records, mutationCount, page: disposition.page };
     const observed = await registrationFacts(ego, desired);
+    // Code identity is proven by the grid's Code column and its exact detail
+    // link, not by searching the detail body for a possibly incidental code.
+    observed.matches.code = true;
+    observed.all = Object.values(observed.matches).every(Boolean);
     if (observed.all) {
       records.push({ reference: desired.code, status: 'ALREADY_CORRECT', verified: Object.keys(observed.matches) });
       disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
@@ -331,18 +356,16 @@ async function configureRegistrationTypes(ego, runtime, params) {
     if (!observed.matches.name) planned.push({ field: 'name', marked: await markControl(ego, ['Name:', 'Name', 'Registration Type Name:', 'Registration Type Name']), value: desired.name });
     if (!observed.matches.groupRegistration) planned.push({ field: 'groupRegistration', marked: await markControl(ego, ['Allow Group Registration?:', 'Allow Group Registration?', 'Group Registration:', 'Group Registration']), value: desired.groupRegistration ? 'Yes' : 'No', option: true });
     if (!observed.matches.reprintFee) planned.push({ field: 'reprintFee', marked: await markControl(ego, ['Reprint Fee:', 'Reprint Fee']), value: desired.reprintFee });
-    // Neither desired values nor incidental body substrings establish readback.
-    // No reviewed active/code editor exists here: stop before any field mutation.
-    const unavailable = [
-      ...planned.filter(change => !change.marked),
-      ...['active', 'code'].filter(field => !observed.matches[field]).map(field => ({ field })),
-    ];
-    if (unavailable.length) {
-      records.push({ reference: desired.code, status: 'CONTROL_NOT_FOUND', detail: `Trusted controls absent: ${unavailable.map(item => item.field).join(', ')}`, mismatches: observed.matches });
+    const { actionable, fieldGaps } = partitionRegistrationFields(planned, observed.matches);
+    // An unavailable optional property does not veto independent safe edits.
+    // In particular, never guess a replacement for groupRegistration.
+    if (!actionable.length) {
+      records.push({ reference: desired.code, status: 'CONTROL_NOT_FOUND', configured: [],
+        verified: Object.keys(observed.matches).filter(field => observed.matches[field]), fieldGaps });
       disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
       continue;
     }
-    for (const change of planned) {
+    for (const change of actionable) {
       const changed = change.option ? await chooseExactOption(ego, change.marked, change.value) : await setControl(ego, change.marked, change.value);
       if (!changed) throw new Error(`Trusted ${change.field} control changed shape after preflight for ${desired.code}`);
       changes.push(change.field); mutationCount += 1;
@@ -353,14 +376,40 @@ async function configureRegistrationTypes(ego, runtime, params) {
     disposition = await gotoAuthorized(ego, detailHref, eventKey);
     if (disposition.status) return { procedure: 'configureRegistrationTypes', status: disposition.status, records, mutationCount, page: disposition.page };
     const verified = await registrationFacts(ego, desired);
-    records.push(verified.all ? { reference: desired.code, status: 'CONFIGURED', configured: changes, verified: Object.keys(verified.matches) } : { reference: desired.code, status: 'VERIFY_FAILED', configured: changes, mismatches: verified.matches });
+    const changedFieldsVerified = changes.every(field => verified.matches[field]);
+    records.push(changedFieldsVerified ? { reference: desired.code, status: 'CONFIGURED', configured: changes,
+      verified: Object.keys(verified.matches).filter(field => verified.matches[field]), fieldGaps } :
+      { reference: desired.code, status: 'VERIFY_FAILED', configured: changes, mismatches: verified.matches, fieldGaps });
+    if (!changedFieldsVerified) throw new Error(`Registration-type saved changes could not be verified for ${desired.code}; do not replay`);
     disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
   }
-  const failures = records.filter(item => !['CONFIGURED', 'ALREADY_CORRECT'].includes(item.status));
-  return { procedure: 'configureRegistrationTypes', status: failures.length ? failures[0].status : (mutationCount ? 'CONFIGURED' : 'ALREADY_CORRECT'), records, mutationCount, finalVerification: { rowCount: rows.length, exactCodes: params.records.map(item => ({ code: item.code, matches: exactRow(rows, item.code).row ? 1 : exactRow(rows, item.code).count || 0 })) } };
+  const failures = records.filter(item => item.fieldGaps?.length || !['CONFIGURED', 'ALREADY_CORRECT'].includes(item.status));
+  return { procedure: 'configureRegistrationTypes', status: failures.length ? (failures[0].fieldGaps?.length ? 'CONTROL_NOT_FOUND' : failures[0].status) : (mutationCount ? 'CONFIGURED' : 'ALREADY_CORRECT'), records, mutationCount, finalVerification: { rowCount: rows.length, exactCodes: params.records.map(item => ({ code: item.code, matches: exactRow(rows, item.code).row ? 1 : exactRow(rows, item.code).count || 0 })) } };
+}
+
+export function itemOutcome(status) {
+  const outcomes = { CONFIGURED: 'EXACT_MATCH_UPDATED', ALREADY_CORRECT: 'EXACT_MATCH_ALREADY_CORRECT',
+    CREATED: 'NOT_FOUND_CREATED', AMBIGUOUS: 'MATCH_UNCERTAIN_HUMAN_REVIEW',
+    UNEXPECTED_UI: 'MATCH_UNCERTAIN_HUMAN_REVIEW', CONTROL_NOT_FOUND: 'CONTROL_NOT_AVAILABLE',
+    VERIFY_FAILED: 'VERIFY_FAILED', PROHIBITED: 'PROHIBITED',
+    REMOVAL_REQUIRED_HUMAN_REVIEW: 'REMOVAL_REQUIRED_HUMAN_REVIEW' };
+  if (!outcomes[status]) throw new Error(`Unknown per-item outcome: ${status}`);
+  return outcomes[status];
 }
 
 export async function runTrustedCventProcedure(ego, runtime, name, params) {
+  const metrics = { egoOperations: 0, navigationTimeMs: 0, fullSnapshots: 0, targetedReads: 0 };
+  ego = new Proxy(ego, { get(target, key) {
+    const method = target[key];
+    if (typeof method !== 'function') return method;
+    return async (...args) => {
+      const started = performance.now(); metrics.egoOperations++;
+      if (key === 'snapshot') metrics.fullSnapshots++;
+      if (['evaluate', 'evaluateLocator', 'pageInfo'].includes(key)) metrics.targetedReads++;
+      try { return await method.apply(target, args); }
+      finally { if (key === 'goto') metrics.navigationTimeMs += performance.now() - started; }
+    };
+  } });
   if (!runtime?.authorizedEventKey) throw new Error('Trusted procedure requires the server-authorized event key');
   if (!Array.isArray(params?.records)) throw new Error('Trusted procedure requires typed RR records');
   let result;
@@ -368,5 +417,15 @@ export async function runTrustedCventProcedure(ego, runtime, name, params) {
   else if (name === 'configureRegistrationTypes') result = await configureRegistrationTypes(ego, runtime, params);
   else throw new Error(`Unknown trusted Cvent procedure: ${name}`);
   if (!STATUS.has(result.status)) throw new Error('Trusted procedure returned an invalid status');
+  result.records = result.records.map(record => ({ ...record, status: itemOutcome(record.status) }));
+  result.counts = { created: 0, updated: 0, alreadyCorrect: 0, failures: 0, fieldGaps: 0 };
+  for (const record of result.records) {
+    if (record.status === 'NOT_FOUND_CREATED') result.counts.created++;
+    if (record.status === 'EXACT_MATCH_UPDATED') result.counts.updated++;
+    if (record.status === 'EXACT_MATCH_ALREADY_CORRECT') result.counts.alreadyCorrect++;
+    if (record.fieldGaps?.length || !['NOT_FOUND_CREATED', 'EXACT_MATCH_UPDATED', 'EXACT_MATCH_ALREADY_CORRECT'].includes(record.status)) result.counts.failures++;
+    result.counts.fieldGaps += record.fieldGaps?.length || 0;
+  }
+  result.metrics = metrics;
   return result;
 }

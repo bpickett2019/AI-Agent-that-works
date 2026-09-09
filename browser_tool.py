@@ -14,9 +14,9 @@ EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','sna
 INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag',*TRUSTED_PROCEDURES}
 def event_key(url):
     try:
-        q={key.lower():value for key,value in parse_qs(urlparse(url).query).items()}
-        for k in ('evtstub','eventid','event'):
-            if q.get(k):return q[k][0].lower()
+        pairs=parse_qs(urlparse(url).query,keep_blank_values=True)
+        keys=[value.strip().lower() for name,values in pairs.items() if name.lower() in ('evtstub','eventid','event') for value in values]
+        if keys:return keys[0] if keys[0] and all(value==keys[0] for value in keys) else None
         match=re.search(r'/events/([0-9a-f-]{20,})',urlparse(url).path,re.I)
         if match:return match.group(1).lower()
     except Exception:pass
@@ -49,8 +49,8 @@ def assert_event_lease(runtime):
     if not job_id and os.environ.get('CVENT_ENV','development')!='production':return
     if not job_id or not token or not url or not event_id:raise RuntimeError('Write blocked: job event-lease context is absent')
     if not lease_is_valid(url,job_id,token,event_id):raise RuntimeError('Write blocked: canonical event lease is absent, stale, mismatched, or owned by another job')
-PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?)(?:/|$)',re.I)
-PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test email(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
+PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?|account(?:settings)?|organization|admin|global|library|profiles?)(?:/|$)',re.I)
+PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
 PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|code)|evtstub|eventid)',re.I)
 
 def assert_safe_write_target(operation,params,descriptor):
@@ -84,6 +84,9 @@ def guard(runtime,operation,params):
     if target and re.search(r':(?:contains|has-text)\s*\(',target,re.I):
         raise RuntimeError('Unsupported selector syntax rejected before browser action; use an exact Ego role locator such as role:button[name="Edit"] or a selector from controlInventory')
     if intent=='write':
+        origin=urlparse(current.get('url',''));host=(origin.hostname or '').lower()
+        if origin.scheme!='https' or not (host=='cvent.com' or host.endswith('.cvent.com')) or origin.username or origin.password or origin.port not in (None,443):
+            raise RuntimeError('Write blocked: current page is not a trusted Cvent HTTPS origin')
         if (CURRENT/'browser-mutation-uncertain.json').exists():
             raise RuntimeError('Write blocked: a prior browser mutation timed out with uncertain outcome; fresh human review is required')
         if not valid_lock or current_key!=locked:
@@ -168,7 +171,7 @@ def validate_trusted_procedure(operation,params):
             for item in values+known:
                 if not isinstance(item,dict) or set(item)-{'code','name'} or not isinstance(item.get('code'),str) or not isinstance(item.get('name'),str):raise RuntimeError('Admission registration-type association is invalid')
         else:
-            if not isinstance(record.get('active'),bool) or not isinstance(record.get('groupRegistration'),bool):raise RuntimeError('Registration-type flags are invalid')
+            if not isinstance(record.get('active'),bool) or (record.get('groupRegistration') is not None and not isinstance(record['groupRegistration'],bool)):raise RuntimeError('Registration-type flags are invalid')
             if record.get('reprintFee') is not None and (not isinstance(record['reprintFee'],(int,float)) or not 0<=record['reprintFee']<=100000):raise RuntimeError('Registration-type reprint fee is invalid')
     timeout=params.get('timeoutSeconds',600)
     if not isinstance(timeout,int) or not 30<=timeout<=900:raise RuntimeError('Trusted procedure timeout is invalid')

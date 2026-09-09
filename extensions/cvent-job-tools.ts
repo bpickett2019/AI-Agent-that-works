@@ -351,6 +351,29 @@ function trustedProcedureRecords(domain: string, expected: any): any[] {
   throw new Error(`No trusted procedure data projection exists for ${domain}`);
 }
 
+function verificationItemResults(domainItems: any[], matches: any[], exceptions: any[]): any[] {
+  const ids = new Set(domainItems.map(item => item.itemId));
+  const matched = new Map<string, any>();
+  const held = new Map<string, any>();
+  for (const item of matches) {
+    if (!ids.has(item.itemId) || matched.has(item.itemId) || !item.cventEvidence?.length)
+      throw new Error("Every explicit match needs unique domain identity and actual Cvent evidence");
+    matched.set(item.itemId, item);
+  }
+  for (const item of exceptions) {
+    if (!ids.has(item.itemId) || held.has(item.itemId) || matched.has(item.itemId))
+      throw new Error("Verification outcomes must be unique and belong to this domain");
+    held.set(item.itemId, item);
+  }
+  return domainItems.map(item => {
+    const exception = held.get(item.itemId), match = matched.get(item.itemId);
+    if (match && item.status !== "VERIFIED") throw new Error("Unverified RR evidence cannot be marked MATCH");
+    return { itemId: item.itemId, rrStatus: item.status,
+      status: exception?.status ?? (match ? "MATCH" : item.status === "VERIFIED" ? "NOT_CONFIGURED" : "AMBIGUOUS"),
+      ...(match ? { cventEvidence: match.cventEvidence } : { reason: exception?.reason ?? "No explicit item-level Cvent readback was supplied" }) };
+  });
+}
+
 async function assertDomainEvidenceVerified(domain: string): Promise<void> {
   const validation = await readJson(join(jobDir, "rr-validation.json"), null);
   const unsupported = (validation?.items ?? []).filter((item: any) => item.domain === domain && item.status !== "VERIFIED");
@@ -775,10 +798,14 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_verify_domain",
     label: "Record RR versus Cvent verification",
-    description: "Account for every independently validated RR item in one domain after fresh Cvent readback. All VERIFIED items become MATCH unless explicitly listed as NOT_CONFIGURED, AMBIGUOUS, or PROHIBITED.",
+    description: "Account for every RR item after fresh Cvent readback. Supply explicit item-level matches with evidence; omitted items remain NOT_CONFIGURED, never implicitly MATCH.",
     parameters: Type.Object({
       domain: literalUnion(DOMAIN_NAMES),
       cventEvidence: Type.Array(Type.String({ maxLength: 3000 }), { minItems: 1, maxItems: 100 }),
+      matches: Type.Optional(Type.Array(Type.Object({
+        itemId: Type.String({ pattern: "^[0-9a-f]{20}$" }),
+        cventEvidence: Type.Array(Type.String({ minLength: 1, maxLength: 3000 }), { minItems: 1, maxItems: 10 }),
+      }), { maxItems: 8000 })),
       exceptions: Type.Array(Type.Object({
         itemId: Type.String({ pattern: "^[0-9a-f]{20}$" }),
         status: Type.Union([Type.Literal("NOT_CONFIGURED"), Type.Literal("AMBIGUOUS"), Type.Literal("PROHIBITED")]),
@@ -791,16 +818,11 @@ export default function cventJobTools(pi: any) {
         const validation = await readJson(join(jobDir, "rr-validation.json"), null);
         if (!validation) throw new Error("Run cvent_prepare_rr first");
         const domainItems = validation.items.filter((item: any) => item.domain === params.domain);
-        const exceptions = new Map(params.exceptions.map((item: any) => [item.itemId, item]));
-        for (const id of exceptions.keys()) if (!domainItems.some((item: any) => item.itemId === id)) throw new Error("Verification exception does not belong to this domain");
+        const items = verificationItemResults(domainItems, params.matches ?? [], params.exceptions);
         const document = await readJson(join(jobDir, "final-verification.json"), { schemaVersion: 1, domains: {} });
         document.domains[params.domain] = {
           verifiedAt: new Date().toISOString(), cventEvidence: params.cventEvidence,
-          items: domainItems.map((item: any) => {
-            const exception: any = exceptions.get(item.itemId);
-            let status = exception?.status ?? (item.status === "VERIFIED" ? "MATCH" : "AMBIGUOUS");
-            return { itemId: item.itemId, rrStatus: item.status, status, ...(exception ? { reason: exception.reason } : {}) };
-          }),
+          items,
         };
         document.updatedAt = new Date().toISOString();
         await atomicJson(join(jobDir, "final-verification.json"), document);
@@ -942,7 +964,9 @@ export default function cventJobTools(pi: any) {
           intent: "write", rrSource: `VERIFIED RR domain: ${domain}`, records, timeoutSeconds: 780,
         }, signal, 780);
         await appendPerformance("trusted_section_procedure", started, { domain, operation, records: records.length,
-          status: result.status, mutationCount: result.mutationCount ?? 0 });
+          status: result.status, mutationCount: result.mutationCount ?? 0, metrics: result.metrics, counts: result.counts });
+        await atomicJson(join(jobDir, `trusted-${domain}-result.json`), { ...result,
+          rrSha256: expected.rr?.sha256, recordedAt: new Date().toISOString() });
         await appendActivity(`Trusted ${domain} Ego mission returned ${result.status}: ${result.records?.length ?? 0} records, ${result.mutationCount ?? 0} mutations`);
         await updateBrowserProgress(result.status === "AUTH_REQUIRED" ? `Cvent authentication required while entering ${domain}` : `Trusted ${domain} mission finished: ${result.status}`);
         return toolText({ ok: true, domain, ...result });
