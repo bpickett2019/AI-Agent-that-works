@@ -84,6 +84,19 @@ class ReadonlyReconciliationTests(unittest.TestCase):
         self.assertIn("params.update(intent='read'",source)
         self.assertNotIn("steel('ensure')",source)
 
+    def test_active_capability_continuation_is_job_driven_and_never_repeats_atted(self):
+        source=(Path(__file__).resolve().parents[1]/'scripts/inspect_registration_capabilities_active.py').read_text()
+        tree=ast.parse(source)
+        calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='browser']
+        operations={call.args[0].value for call in calls if call.args and isinstance(call.args[0],ast.Constant)}
+        self.assertEqual(operations,{'pageInfo','snapshotText','authorizeTarget','inspectRegistrationTypeCapabilities'})
+        for event_specific in ('ATTED','SPONCOMP','e712e34c-6117-4d13-bf4c-8ed54cf2b495','(C+D) Medtrade'):
+            self.assertNotIn(event_specific,source)
+        self.assertIn("parser.add_argument('--job-id', required=True)",source)
+        self.assertIn("'attedReadRepeated':False",source)
+        self.assertNotIn("steel('ensure')",source)
+        self.assertNotIn("browser('scanEventList'",source)
+
     def test_dispatcher_cannot_mutate_or_save(self):
         self.assertTrue(READ_ACTIONS.isdisjoint({'click','activate','fill','type','setChecked','selectOption',
                                                'configureRegistrationTypes','configureAdmissionItems','save'}))

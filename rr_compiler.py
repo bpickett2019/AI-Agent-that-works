@@ -17,12 +17,22 @@ ROOT = Path(__file__).resolve().parent
 JOB_DIR = Path(os.environ.get("CVENT_JOB_DIR", ROOT / "data/current"))
 RR = JOB_DIR / "input.xlsx"
 OUT = JOB_DIR / "expected-domains.json"
+def required_target(name):
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Job-specific target binding is required: {name}")
+    return value
+
+
 TARGET = {
-    "name": os.environ.get("CVENT_AUTHORIZED_EVENT_NAME", "(C+D) Medtrade Testing Clone 2"),
-    "eventId": os.environ.get("CVENT_AUTHORIZED_EVENT_ID", ""),
-    "eventKey": os.environ.get("CVENT_AUTHORIZED_EVENT_KEY", "e712e34c-6117-4d13-bf4c-8ed54cf2b495"),
+    "name": required_target("CVENT_AUTHORIZED_EVENT_NAME"),
+    "eventId": required_target("CVENT_AUTHORIZED_EVENT_ID"),
+    "eventKey": required_target("CVENT_AUTHORIZED_EVENT_KEY"),
     "eventCode": os.environ.get("CVENT_AUTHORIZED_EVENT_CODE", ""),
-    "mustRemainUnpublished": True,
+    "lifecyclePolicy": {
+        "mustPreserveObservedStatus": True,
+        "writableStatuses": [value.strip() for value in os.environ.get("CVENT_WRITABLE_EVENT_STATUSES", "draft").split(",") if value.strip()],
+    },
 }
 
 
@@ -154,6 +164,17 @@ def header_map(ws, row):
     return result
 
 
+def layered_header_map(ws, row, preceding_rows=1):
+    result = {}
+    for column in range(1, ws.max_column + 1):
+        labels = [clean(ws.cell(header_row, column).value)
+                  for header_row in range(max(1, row-preceding_rows), row+1)]
+        text = " ".join(str(value) for value in labels if value is not None)
+        if text:
+            result[re.sub(r"\s+", " ", text).strip().lower()] = column
+    return result
+
+
 def matching_column(headers, *needles):
     for header, column in headers.items():
         if any(needle in header for needle in needles):
@@ -191,7 +212,7 @@ def populated_records(ws, sheet, header_row, start_row, columns, required=()):
 def choose_registration_layout(ws):
     # Current RRs label REG CODE in column A. Older accepted templates used B/C/D/E/F.
     for row in range(1, min(ws.max_row, 50) + 1):
-        headers = header_map(ws, row)
+        headers = layered_header_map(ws, row)
         reg_code = matching_column(headers, "reg code", "registration type code")
         state = matching_column(headers, "activate", "status")
         admission_code = matching_column(headers, "admission item code")
@@ -216,10 +237,7 @@ def choose_registration_layout(ws):
                 "badge_color": matching_column(headers, "badge color"),
                 "reprint_fee": matching_column(headers, "reprint fee"),
             }
-    return 4, {
-        "registration_code": 2, "registration_name": 3, "active": 4,
-        "admission_code": 5, "admission_name": 6, "admission_description": 10,
-    }
+    raise RuntimeError("Registration Types & Pricing headers are not reliably identifiable; refusing positional fallback")
 
 
 def tier_columns(ws, header_row, layout):

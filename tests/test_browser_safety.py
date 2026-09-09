@@ -135,8 +135,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.runtime={'browserRuntimeId':'runtime-current','authorizedEventName':'(C+D) Medtrade Testing Clone 2','authorizedEventKey':'locked','targetBrowserIdentity':{'url':'https://app.cvent.com/event?evtstub=locked'}}
     def tearDown(self):
         browser_tool.CURRENT,browser_tool.local_probe=self.old;self.tmp.cleanup()
-    def write_lock(self):
-        (self.base/'authorized-target.json').write_text(json.dumps({'name':'(C+D) Medtrade Testing Clone 2','url':'https://app.cvent.com/event?evtstub=locked','event_key':'locked','browser_runtime_id':'runtime-current'}))
+    def write_lock(self, status='Draft'):
+        (self.base/'authorized-target.json').write_text(json.dumps({'name':'(C+D) Medtrade Testing Clone 2','url':'https://app.cvent.com/event?evtstub=locked','event_key':'locked','event_status':status,'browser_runtime_id':'runtime-current'}))
     def test_write_requires_lock_matching_live_page(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtStub=locked'}
         self.assertEqual(browser_tool.event_key('https://app.cvent.com/event?evtStub=locked'),'locked')
@@ -150,6 +150,14 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=other'}
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
+
+    def test_completed_event_is_explicitly_blocked_by_default_product_policy(self):
+        browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
+        self.write_lock('Completed')
+        with self.assertRaisesRegex(RuntimeError,'completed.*not writable under approved product policy'):
+            browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
+        with patch.dict(os.environ,{'CVENT_WRITABLE_EVENT_STATUSES':'draft,completed'}):
+            browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
     def test_uncertain_mutation_blocks_automatic_replay(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
         self.write_lock()

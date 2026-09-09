@@ -331,7 +331,7 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     state["browser_gate"] = BrowserGate(browser_directory_for(job)).read()
     active = active_job(job)
     if getattr(active, "read_only", False):
-        state["current_action"] = "READ-ONLY ATTED reconciliation: refresh login if needed, then Return to Agent; no configuration writes are enabled"
+        state["current_action"] = "Read-only uncertainty reconciliation/capability inspection; no configuration writes are enabled"
         state["read_only_reconciliation"] = True
     state["agent_process_running"] = bool(active and active.process and active.process.poll() is None)
     state["agent_pid"] = active.process.pid if state["agent_process_running"] else None

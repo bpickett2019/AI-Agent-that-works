@@ -1,7 +1,10 @@
 # Registration capability mapping — September 9, 2026
 
-This is a source-level safety/capability checkpoint. The new inspection has not
-run against staging yet and is not write acceptance.
+This is a safety/capability checkpoint, not write acceptance. The fixed
+inspection ran read-only against staging at 22:26:46 UTC in the existing USER 1
+session. Evidence:
+`reconciliation/atted-775a71d9d418/registration-capability-readback.json`
+(SHA-256 `feab81060173fbf7c367c6202db75fe8a81497da85de93f7a0ad3cf18167b593`).
 
 ## Authoritative scope findings
 
@@ -24,12 +27,15 @@ Consequences for this job:
    registration mission now reports those fields as `PROHIBITED` instead of
    opening an event detail editor and searching for a Name input. Hidden
    `#Name` remains evidence only and is never a mutation target.
-2. Missing SPONCOMP may be resolved only if the event's **Add from Contact
-   Types** inventory contains one unique exact `SPONCOMP` Code row with the
-   expected literal name. Adding that already-existing definition to the event
-   would be event-local association. **Create Contact Type** is a shared
-   definition operation and remains prohibited. No association implementation
-   or SPONCOMP write is claimed yet.
+2. A missing requested type may be resolved only if the event's **Add from
+   Contact Types** inventory contains one unique exact Code row with the expected
+   literal name. Adding that already-existing definition to the event would be
+   event-local association. **Create Contact Type** is a shared definition
+   operation and remains prohibited. In the current event, Add from Contact
+   Types and Create Contact Type were both observed, but the chooser did not
+   expose a unique Code column to the trusted reader; all candidate identities
+   were `identityUnavailable`. SPONCOMP is therefore blocked, not absent from
+   the shared inventory and not safe to associate or create.
 3. There is no proven event-local registration-name creation capability.
 
 Cvent's public **Setting Up Sponsorships** documentation places Group
@@ -73,9 +79,19 @@ it is not added to Pi's browser operation enum. It:
 
 The read-only runtime gateway explicitly allows this one fixed inspection while
 continuing to reject generic clicks and every trusted write procedure. The
-operator reader now records `registration-capability-readback.json` and accepts
-the exact authorized event's observed lifecycle status for inspection, including
+operator reader records `registration-capability-readback.json` and accepts the
+exact authorized event's observed lifecycle status for inspection, including
 Completed; that does not waive write eligibility.
+
+The live event-local detail editor had Save/Cancel, Capacity, date controls,
+Invitation List, and item-association checkboxes. It had no visible Name control
+and no Group Registration control. The first reader did not associate the
+unlabelled Yes/No role controls with the Open for registration heading, so its
+`openForRegistrationEditor: false` is a reader limitation rather than proof of
+absence. The generalized follow-up reader captures ARIA radio/checkbox roles and
+nearest section context and returns raw candidate headers with
+`SECTION_STATE_UNTRUSTED` when exact Code/Name columns cannot be established.
+That follow-up is locally tested; no second login/readback was performed.
 
 ## Other safety correction
 
@@ -89,8 +105,8 @@ closed.
 
 - Original ATTED mutation uncertainty is retained; no automatic retry or marker
   clearing is authorized.
-- No staging capability readback has yet proved that SPONCOMP is available in
-  Add from Contact Types.
+- Staging proved the Add from Contact Types chooser exists, but did not prove an
+  exact SPONCOMP candidate identity because its Code column was unavailable.
 - No SPONCOMP association, admission-item write, pricing write, Save, publish,
   communication, attendee/contact operation, or shared-definition change is
   performed by these source changes.

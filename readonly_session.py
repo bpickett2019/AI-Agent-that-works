@@ -3,8 +3,21 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import os
 import re
+import uuid
 from control_store import iso
+
+
+def private_json(path, value):
+    """Atomically write private evidence owned by the existing workspace owner."""
+    path = Path(path);owner = path.parent.stat()
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    with temporary.open('x') as output:
+        json.dump(value, output, indent=2)
+    temporary.chmod(0o600)
+    os.chown(temporary, owner.st_uid, owner.st_gid)
+    temporary.replace(path)
 
 
 @dataclass
@@ -26,7 +39,7 @@ def resolve_readonly_session(store, job, directory):
             return None
         descriptor = json.loads(pointer.read_text())
         name = descriptor['directory']
-        if not re.fullmatch(r'atted-[0-9a-f]{12}', name):
+        if not re.fullmatch(r'(?:readonly|atted)-[0-9a-f]{12}', name):
             return None
         folder = directory/'reconciliation'/name
         if (folder.is_symlink() or (directory/'reconciliation').is_symlink() or

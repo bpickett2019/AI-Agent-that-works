@@ -101,7 +101,7 @@ def private_json(path, value):
 def main():
     # Fixed staging/job boundary, not a generic browser or credential surface.
     data = Path('/var/lib/cvent-agent')
-    if hashlib.sha256((ROOT/'trusted_cvent_procedures.mjs').read_bytes()).hexdigest() != 'e2b7d5a0282c3ae0f5cf162e4c8369241e2deb736a6e1cda5e5a68ebbaa0014f':
+    if hashlib.sha256((ROOT/'trusted_cvent_procedures.mjs').read_bytes()).hexdigest() != 'bd62ec8f921ad14561159336dfd593290b5cc1871e012c8ae8e60247cb3b4f8e':
         raise RuntimeError('Review this reader against the current trusted procedure before using it')
     os.environ['CVENT_DATA_ROOT'] = str(data)
     from runtime_config import browser_profile_dir, browser_cache_dir

@@ -146,7 +146,7 @@ async function chooseExactOption(ego, marked, desired) {
 }
 
 async function visibleControlFacts(ego) {
-  return ego.evaluate(`(() => {const clean=v=>String(v||'').replace(/\\s+/g,' ').trim(),label=element=>{const id=element.id,direct=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return clean(element.getAttribute('aria-label')||direct?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))};return [...document.querySelectorAll('input,select,textarea,[role=combobox]')].filter(element=>{const box=element.getBoundingClientRect(),style=getComputedStyle(element);return element.isConnected&&(element.getAttribute('type')||'').toLowerCase()!=='hidden'&&box.width>0&&box.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.visibility!=='collapse'}).slice(0,500).map(element=>({label:label(element),tag:element.tagName,type:(element.getAttribute('type')||'').toLowerCase(),value:(element.getAttribute('type')||'').toLowerCase()==='password'?null:('value' in element?String(element.value).slice(0,1000):''),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):false,readOnly:'readOnly' in element?Boolean(element.readOnly):false}))})()`);
+  return ego.evaluate(`(() => {const clean=v=>String(v||'').replace(/\\s+/g,' ').trim(),label=element=>{const id=element.id,direct=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return clean(element.getAttribute('aria-label')||direct?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder')||element.innerText)},context=element=>{let root=element.parentElement;for(let depth=0;root&&depth<6;depth++,root=root.parentElement){const heading=root.querySelector(':scope > h1,:scope > h2,:scope > h3,:scope > h4,:scope > legend,:scope > label');const text=clean(heading?.innerText||heading?.textContent);if(text)return text}return ''};return [...document.querySelectorAll('input,select,textarea,[role=combobox],[role=radio],[role=checkbox]')].filter(element=>{const box=element.getBoundingClientRect(),style=getComputedStyle(element);return element.isConnected&&(element.getAttribute('type')||'').toLowerCase()!=='hidden'&&box.width>0&&box.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.visibility!=='collapse'}).slice(0,500).map(element=>({label:label(element),context:context(element),tag:element.tagName,role:element.getAttribute('role')||'',type:(element.getAttribute('type')||'').toLowerCase(),value:(element.getAttribute('type')||'').toLowerCase()==='password'?null:('value' in element?String(element.value).slice(0,1000):''),checked:'checked' in element?Boolean(element.checked):element.getAttribute('aria-checked'),disabled:'disabled' in element?Boolean(element.disabled):element.getAttribute('aria-disabled')==='true',readOnly:'readOnly' in element?Boolean(element.readOnly):false}))})()`);
 }
 
 async function enterEdit(ego) {
@@ -351,8 +351,8 @@ export async function inspectRegistrationTypeCapabilities(ego, runtime, params) 
     return { code, desiredName: desiredNames.get(code), exactEventMatches: found.row ? 1 : found.count, actualName,
       literalNameMatches: actualName === desiredNames.get(code), identityUnavailable: Boolean(found.identityUnavailable) };
   });
-  const probeCode = String(params.probeCode || codes[0]).trim();
-  const probe = exactRow(rows, probeCode);
+  const probeCode = params.probeCode == null ? null : String(params.probeCode).trim();
+  const probe = probeCode ? exactRow(rows, probeCode) : {};
   const detailEditor = { probeCode, opened: false, eventLocalNameEditor: false, groupRegistrationEditor: false, openForRegistrationEditor: false, controls: [], buttons: [] };
   if (probe.row) {
     const href = safeDetailHref(probe.row, eventKey, 'registrationtype');
@@ -367,8 +367,8 @@ export async function inspectRegistrationTypeCapabilities(ego, runtime, params) 
           detailEditor.controls = controls;
           detailEditor.buttons = facts.buttons;
           detailEditor.eventLocalNameEditor = controls.some(control => ['name', 'registration type name'].includes(norm(control.label)));
-          detailEditor.groupRegistrationEditor = controls.some(control => /group registration/.test(norm(control.label)));
-          detailEditor.openForRegistrationEditor = controls.some(control => norm(control.label) === 'open for registration' || ['yes', 'no'].includes(norm(control.label)) && /open for registration/i.test(facts.body));
+          detailEditor.groupRegistrationEditor = controls.some(control => /group registration/.test(norm(`${control.context} ${control.label}`)));
+          detailEditor.openForRegistrationEditor = controls.some(control => /open for registration/.test(norm(`${control.context} ${control.label}`)));
         }
       }
     }
@@ -377,7 +377,7 @@ export async function inspectRegistrationTypeCapabilities(ego, runtime, params) 
   // Save is available to this inspection procedure.
   disposition = await gotoAuthorized(ego, gridUrl, eventKey);
   if (disposition.status) return { procedure: 'inspectRegistrationTypeCapabilities', status: disposition.status, inventory, detailEditor, configurationWrites: 0, saveCalls: 0 };
-  const associationEditor = { opened: false, addFromContactTypes: false, candidateInventory: [], createContactTypeObserved: false, eventLocalCreationProven: false, buttons: [] };
+  const associationEditor = { opened: false, addFromContactTypes: false, candidateState: 'NOT_INSPECTED', candidateRows: [], candidateInventory: [], createContactTypeObserved: false, eventLocalCreationProven: false, buttons: [] };
   if (await enterEdit(ego)) {
     disposition = await pageDisposition(ego, eventKey);
     if (!disposition.status) {
@@ -393,6 +393,8 @@ export async function inspectRegistrationTypeCapabilities(ego, runtime, params) 
         disposition = await pageDisposition(ego, eventKey);
         if (!disposition.status) {
           const candidates = await gridRows(ego);
+          associationEditor.candidateRows = candidates.slice(0, 200).map(row => ({ header:row.header, cells:row.cells }));
+          associationEditor.candidateState = codeColumn(candidates) === null || namedColumn(candidates, 'name') === null ? 'SECTION_STATE_UNTRUSTED' : 'TRUSTED_EXACT_CODE_AND_NAME_COLUMNS';
           associationEditor.candidateInventory = codes.map(code => {
             const found = exactCodeInventory(candidates, code, false);
             const nameColumn = namedColumn(candidates, 'name');

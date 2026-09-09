@@ -28,6 +28,9 @@ class RRCompilerTests(unittest.TestCase):
 
             registration = workbook.create_sheet(sheet_name)
             registration["B1"] = "No processing fee"
+            for cell,value in {"B4":"REG CODE","C4":"REG TYPE NAME","D4":"ACTIVATE / NOT NEEDED",
+                               "E4":"ADMISSION ITEM CODE","F4":"ADMISSION ITEM"}.items():
+                registration[cell] = value
             registration["T4"] = "Advance"
             registration["U4"] = "Onsite 01/01/2030 - 01/02/2030"
             registration["B5"] = "REG-1"
@@ -48,7 +51,8 @@ class RRCompilerTests(unittest.TestCase):
             workbook.close()
 
             environment = os.environ.copy()
-            environment["CVENT_JOB_DIR"] = str(job_dir)
+            environment.update({"CVENT_JOB_DIR": str(job_dir), "CVENT_AUTHORIZED_EVENT_ID": "event-id",
+                                "CVENT_AUTHORIZED_EVENT_KEY": "event-id", "CVENT_AUTHORIZED_EVENT_NAME": "Selected event"})
             completed = subprocess.run(
                 [sys.executable, str(ROOT / "rr_compiler.py")],
                 cwd=ROOT,
@@ -114,7 +118,8 @@ class RRCompilerTests(unittest.TestCase):
             workbook.save(job_dir / "input.xlsx")
             workbook.close()
             environment = os.environ.copy()
-            environment.update({"CVENT_JOB_DIR": str(job_dir), "CVENT_AUTHORIZED_EVENT_ID": "event-id"})
+            environment.update({"CVENT_JOB_DIR": str(job_dir), "CVENT_AUTHORIZED_EVENT_ID": "event-id",
+                                "CVENT_AUTHORIZED_EVENT_KEY": "event-id", "CVENT_AUTHORIZED_EVENT_NAME": "Selected event"})
             subprocess.run([sys.executable, str(ROOT / "rr_compiler.py")], cwd=ROOT, env=environment, check=True, capture_output=True)
             expected = json.loads((job_dir / "expected-domains.json").read_text())
             self.assertEqual(expected["target"]["eventId"], "event-id")
@@ -154,7 +159,7 @@ class RRCompilerTests(unittest.TestCase):
             for column, value in enumerate(["Question Appearance", "Question Text", "Demo Name", "Required"], 5): questions.cell(10, column, value)
             for column, value in enumerate(["Single Select", "Moved question?", "MOVEDQ", "Yes"], 5): questions.cell(13, column, value)
             workbook.save(job_dir / "input.xlsx"); workbook.close()
-            environment = os.environ.copy(); environment.update({"CVENT_JOB_DIR": str(job_dir), "CVENT_AUTHORIZED_EVENT_ID": "event-id"})
+            environment = os.environ.copy(); environment.update({"CVENT_JOB_DIR": str(job_dir), "CVENT_AUTHORIZED_EVENT_ID": "event-id", "CVENT_AUTHORIZED_EVENT_KEY": "event-id", "CVENT_AUTHORIZED_EVENT_NAME": "Selected event"})
             subprocess.run([sys.executable, str(ROOT / "rr_compiler.py")], cwd=ROOT, env=environment, check=True, capture_output=True)
             subprocess.run([sys.executable, str(ROOT / "rr_validator.py")], cwd=ROOT, env=environment, check=True, capture_output=True)
             expected = json.loads((job_dir / "expected-domains.json").read_text())

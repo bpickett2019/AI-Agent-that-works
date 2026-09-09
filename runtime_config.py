@@ -11,8 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("CVENT_DATA_ROOT", ROOT / "data")).resolve()
-DEFAULT_EVENT_NAME = "(C+D) Medtrade Testing Clone 2"
-DEFAULT_EVENT_KEY = "e712e34c-6117-4d13-bf4c-8ed54cf2b495"
+DEFAULT_EVENT_NAME = "Development Test Event"
+DEFAULT_EVENT_KEY = "00000000-0000-4000-8000-000000000001"
 STEEL_IMAGE = os.environ.get(
     "CVENT_STEEL_IMAGE",
     "ghcr.io/steel-dev/steel-browser@sha256:21cf2a5785aa9478d0f7933c04bce96ca79f3d7a93d9824ea184800d29d3cd02",
@@ -96,6 +96,8 @@ def authorized_events() -> tuple[AuthorizedEvent, ...]:
     encoded = os.environ.get("CVENT_AUTHORIZED_EVENTS_B64")
     if not raw and encoded:
         raw = base64.b64decode(encoded).decode("utf-8")
+    if not raw and os.environ.get("CVENT_ENV", "development") != "development":
+        raise RuntimeError("Staging and production require an explicit authorized-event allowlist")
     values = json.loads(raw) if raw else [{
         "event_id": DEFAULT_EVENT_KEY,
         "name": DEFAULT_EVENT_NAME,

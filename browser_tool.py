@@ -25,6 +25,17 @@ def event_key(url):
 def target_lock():
     try:return json.loads((CURRENT/'authorized-target.json').read_text())
     except Exception:return {}
+def selected_event_inventory():
+    try:return json.loads((CURRENT/'selected-event-inventory.json').read_text())
+    except Exception:return {}
+def writable_event_statuses():
+    values={value.strip().lower() for value in os.environ.get('CVENT_WRITABLE_EVENT_STATUSES','draft').split(',') if value.strip()}
+    if not values:raise RuntimeError('Write blocked: product policy defines no writable Cvent event statuses')
+    return values
+def atomic_private_json(path,value):
+    temporary=path.with_name(path.name+f'.{os.getpid()}.tmp')
+    with temporary.open('x') as output:json.dump(value,output,indent=2)
+    temporary.chmod(0o600);temporary.replace(path)
 def emit(data):print('BROWSER_ROUTER_RESULT='+json.dumps(data,ensure_ascii=False))
 def audit_scope_write(operation,params,current,result,error=None):
     record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'rrSource':params.get('rrSource'),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':result}
@@ -98,6 +109,9 @@ def guard(runtime,operation,params):
             raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
         if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
             raise RuntimeError('Write blocked: visible event key does not match the server-authorized event')
+        status=str(lock.get('event_status') or '').strip().lower()
+        if status not in writable_event_statuses():
+            raise RuntimeError(f'Write blocked: selected event lifecycle status {status or "UNPROVEN"} is not writable under approved product policy')
         assert_event_lease(runtime)
         if PROTECTED_PAGE.search(urlparse(current.get('url','')).path):
             raise RuntimeError('Write blocked: attendee/contact and communications areas are protected')
@@ -113,6 +127,8 @@ def supported_authenticated_origin(runtime,url):
     if parsed.scheme!='https' or parsed.username or parsed.password or parsed.port not in (None,443):return False
     if host=='app.cvent.com':return True
     return host=='events.app.cvent.com' and bool(runtime.get('authorizedEventKey')) and event_key(url)==str(runtime['authorizedEventKey']).lower()
+def visible_authenticated_context(runtime,url,ui):
+    return (urlparse(url).hostname or '').lower()!='events.app.cvent.com' or ui.get('hasAuthorizedEvent') is True
 
 def authenticated_profile_status(runtime):
     current=local_probe(runtime);slot=int(runtime.get('workerSlot',0));workspace=os.environ.get('CVENT_WORKSPACE_ID','')
@@ -127,9 +143,12 @@ def authenticated_profile_status(runtime):
     if page:
         cookies=browser_command(page['webSocketDebuggerUrl'],'Network.getAllCookies',{},runtime['cdpHttpOrigin']).get('cookies',[])
         organization=next((str(c.get('value','')) for c in cookies if c.get('name')=='org-id' and str(c.get('domain','')).endswith('cvent.com')),'')
-        ui=browser_command(page['webSocketDebuggerUrl'],'Runtime.evaluate',{'expression':"(() => { const text=(document.body?.innerText||'').slice(0,50000); return {ready:document.readyState,hasUi:/(?:event management|my events|event details|registration|cvent)/i.test(text),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(text)} })()",'returnByValue':True},runtime['cdpHttpOrigin']).get('result',{}).get('value',{})
+        expected=json.dumps(str(runtime.get('authorizedEventName') or ''))
+        expression=f"(() => {{ const text=(document.body?.innerText||'').slice(0,50000), expected={expected}; return {{ready:document.readyState,hasUi:/(?:event management|my events|event details|registration|cvent)/i.test(text),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(text),hasAuthorizedEvent:Boolean(expected)&&text.includes(expected)}} }})()"
+        ui=browser_command(page['webSocketDebuggerUrl'],'Runtime.evaluate',{'expression':expression,'returnByValue':True},runtime['cdpHttpOrigin']).get('result',{}).get('value',{})
     context_match=bool(organization and metadata.get('organizationId')==organization)
-    authenticated=bool(metadata.get('authenticated') is True and metadata.get('workerSlot')==slot and profile_match and context_match and supported_authenticated_origin(runtime,url) and not re.search(r'(?:login|signin|authenticate|sso)',url,re.I) and ui.get('ready')=='complete' and ui.get('hasUi') and not ui.get('hasLogin'))
+    visible_context=visible_authenticated_context(runtime,url,ui)
+    authenticated=bool(metadata.get('authenticated') is True and metadata.get('workerSlot')==slot and profile_match and context_match and visible_context and supported_authenticated_origin(runtime,url) and not re.search(r'(?:login|signin|authenticate|sso)',url,re.I) and ui.get('ready')=='complete' and ui.get('hasUi') and not ui.get('hasLogin'))
     return {'ok':True,'operation':'authStatus','authenticated':authenticated,'persistedProfile':bool(metadata),'workerSlot':slot,'profileMatch':profile_match,'accountContextMatch':context_match,'loginRequired':not authenticated}
 
 def recover_browser(runtime_path,runtime,tool,params):
@@ -218,12 +237,13 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             return {'tool':'ego','router':'ego',**authenticated_profile_status(runtime)}
         if operation=='authorizeTarget':
             probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','snapshotText','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=90);observed=child_result(probe)
-            info=local_probe(runtime);key=event_key(info.get('url',''))
+            info=local_probe(runtime);key=event_key(info.get('url',''));inventory=selected_event_inventory()
             host=(urlparse(info.get('url','')).hostname or '').lower()
             if params.get('eventName')!=runtime['authorizedEventName'] or runtime['authorizedEventName'].lower() not in json.dumps(observed).lower() or not key or not host.endswith('cvent.com'):raise RuntimeError('Exact visible authorized event identity was not proven')
             if runtime.get('authorizedEventKey') and key!=runtime['authorizedEventKey']:raise RuntimeError('Visible event key is not the server-authorized event')
-            lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':key,'browser_runtime_id':runtime['browserRuntimeId'],'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
-            target=CURRENT/'authorized-target.json';tmp=target.with_suffix('.tmp');tmp.write_text(json.dumps(lock,indent=2));tmp.replace(target)
+            if inventory.get('name')!=runtime['authorizedEventName'] or inventory.get('event_key')!=key or inventory.get('browser_runtime_id')!=runtime['browserRuntimeId'] or not str(inventory.get('status') or '').strip():raise RuntimeError('Exact selected-event lifecycle status was not proven from inventory')
+            lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':key,'event_status':inventory['status'],'browser_runtime_id':runtime['browserRuntimeId'],'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
+            target=CURRENT/'authorized-target.json';atomic_private_json(target,lock)
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
@@ -241,6 +261,13 @@ def run_direct(runtime_path,runtime,tool,operation,params):
                 mark_mutation_uncertain(operation,params,current,error)
             raise RuntimeError('Browser mutation outcome is uncertain after helper timeout; automatic replay is blocked') from error
     result=child_result(proc);result['router']=tool
+    if operation=='openAuthorizedEvent' and not proc.returncode and result.get('ok'):
+        selected=result.get('navigationTarget') or {};selected_key=event_key(str(selected.get('href') or ''))
+        if selected.get('name')!=runtime.get('authorizedEventName') or selected_key!=runtime.get('authorizedEventKey') or not str(selected.get('status') or '').strip():
+            raise RuntimeError('Opened event inventory evidence omitted exact identity or lifecycle status')
+        atomic_private_json(CURRENT/'selected-event-inventory.json',{'name':selected['name'],'event_key':selected_key,
+            'event_id':runtime.get('authorizedEventId'),'code':selected.get('code'),'status':selected['status'],
+            'href':selected.get('href'),'browser_runtime_id':runtime['browserRuntimeId'],'observed_at':datetime.now(timezone.utc).isoformat()})
     if params.get('intent')=='write':
         if proc.returncode or not result.get('ok'):
             audit_scope_write(operation,params,current,'uncertain_error',result.get('error'))

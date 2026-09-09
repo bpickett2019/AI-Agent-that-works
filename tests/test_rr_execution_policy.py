@@ -87,7 +87,11 @@ for(const key of ['profileMatch','accountContextMatch','persistedProfile']){
     def test_modern_event_origin_auth_requires_the_exact_authorized_key(self):
         runtime = {'authorizedEventKey':'selected'}
         self.assertTrue(browser_tool.supported_authenticated_origin(runtime, 'https://app.cvent.com/Subscribers/Events2/EventSelection'))
-        self.assertTrue(browser_tool.supported_authenticated_origin(runtime, 'https://events.app.cvent.com/events/home?evtstub=selected'))
+        modern='https://events.app.cvent.com/events/home?evtstub=selected'
+        self.assertTrue(browser_tool.supported_authenticated_origin(runtime, modern))
+        self.assertTrue(browser_tool.visible_authenticated_context(runtime,modern,{'hasAuthorizedEvent':True}))
+        self.assertFalse(browser_tool.visible_authenticated_context(runtime,modern,{'hasAuthorizedEvent':False}))
+        self.assertTrue(browser_tool.visible_authenticated_context(runtime,'https://app.cvent.com/Subscribers/Events2/EventSelection',{}))
         for url in ('https://events.app.cvent.com/events/home?evtstub=other',
                     'https://events.app.cvent.com/events/home',
                     'http://events.app.cvent.com/events/home?evtstub=selected',

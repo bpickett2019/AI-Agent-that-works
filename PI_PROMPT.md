@@ -55,7 +55,7 @@ Never request or expose credentials, environment variables, browser storage, coo
 2. Call `cvent_prepare_rr` (normally this reuses the server's already-completed preflight).
 3. Read `cvent_plan` summary and complete ordered mission before opening Cvent. Read each populated domain's extracted configuration when executing it. Execute only VERIFIED items; hold only genuine AMBIGUOUS/NOT_SUPPORTED_BY_RR items. Never reinterpret the workbook field-by-field while browsing.
 4. Verify login. If Cvent or Microsoft requires login, immediately call `cvent_login_handoff`; do not automate SSO/MFA. After control returns, resume the same section mission; do not restart workbook interpretation or replay a write.
-5. Discover the selected event from the authenticated event inventory using `scanEventList` and `openAuthorizedEvent`. Require exactly one exact name/key match. Verify its visible identity and Draft/unpublished state, then call `authorizeTarget`.
+5. Discover the selected event from the authenticated event inventory using `scanEventList` and `openAuthorizedEvent`. Require exactly one exact name/key match and preserve its observed lifecycle status. Call `authorizeTarget` only after visible identity is proven. The gateway, not model inference, decides whether that status is writable under configured product policy. If it is not writable, report the explicit policy mismatch; never change lifecycle status to proceed.
 6. Read current state and prior domain results and resume idempotently without duplicating completed work.
 
 ## Browser execution
@@ -94,7 +94,7 @@ If a legitimate RR action cannot be performed with the available API/browser cap
 
 ## Finish and release
 
-Run final QA against the actual selected event. Re-run `cvent_prepare_rr` to verify that expectations still match the uploaded RR, then reread every configured domain needed to establish the result. Confirm the event remains Draft/unpublished, all protected-action counts are zero, and every RR item is explicitly MATCH, NOT_CONFIGURED, AMBIGUOUS, or PROHIBITED. There may be no silent omission.
+Run final QA against the actual selected event. Re-run `cvent_prepare_rr` to verify that expectations still match the uploaded RR, then reread every configured domain needed to establish the result. Confirm the exact selected event lifecycle status was not changed, all protected-action counts are zero, and every RR item is explicitly MATCH, NOT_CONFIGURED, AMBIGUOUS, or PROHIBITED. There may be no silent omission.
 
 Always call `cvent_finish` exactly once when work is complete or genuinely blocked:
 
