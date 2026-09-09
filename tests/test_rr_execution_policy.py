@@ -171,6 +171,31 @@ assert.equal(result.records[0].fieldGaps[0].field,'groupRegistration');
 assert.equal(result.records[1].status,'MATCH_UNCERTAIN_HUMAN_REVIEW');
 assert.equal(result.counts.updated,1);assert.equal(result.counts.failures,2);
 assert.equal(result.metrics.fullSnapshots,0);assert.ok(result.metrics.egoOperations>10);
+const priorEvaluate=ego.evaluate;
+ego.evaluate=async expression=>expression.includes('const wanted=')&&expression.includes('save and close') ? {count:0} : priorEvaluate(expression);
+const noSave=await runTrustedCventProcedure(ego,{authorizedEventKey:key},'configureRegistrationTypes',
+ {records:[{...record,name:'Another name'}]});
+assert.equal(noSave.records[0].status,'CONTROL_NOT_AVAILABLE');
+assert.equal(fills,1);assert.equal(saves,1); // no new field action without a proven Save control
+""")
+
+    def test_hidden_or_readonly_controls_are_never_mutation_targets(self):
+        self.node(r"""
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import {markControl} from './trusted_cvent_procedures.mjs';
+const element=(overrides={})=>({id:'',tagName:'INPUT',isConnected:true,disabled:false,readOnly:false,value:'old',
+ getAttribute:name=>({type:'text',name:'Name'})[name]??null,closest:()=>null,
+ getBoundingClientRect:()=>({width:100,height:20}),setAttribute:()=>{},...overrides});
+const check=(element,style={display:'block',visibility:'visible'})=>markControl({evaluate:async code=>vm.runInNewContext(code,{
+ document:{querySelectorAll:()=>[element]},getComputedStyle:()=>style})},['Name']);
+assert.ok(await check(element()));
+assert.equal(await check(element({readOnly:true})),null);
+assert.equal(await check(element({disabled:true})),null);
+assert.equal(await check(element({getBoundingClientRect:()=>({width:0,height:0})})),null);
+assert.equal(await check(element(),{display:'none',visibility:'visible'}),null);
+assert.equal(await check(element(),{display:'block',visibility:'hidden'}),null);
+assert.equal(await check(element({getAttribute:name=>({type:'hidden',name:'Name'})[name]??null})),null);
 """)
 
     def test_reviewed_or_unread_domains_do_not_appear_completed(self):

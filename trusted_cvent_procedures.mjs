@@ -97,9 +97,9 @@ function textHasLabeledValue(body, labels, desired) {
   return false;
 }
 
-async function markControl(ego, labels, kinds = []) {
+export async function markControl(ego, labels, kinds = []) {
   const marker = token();
-  const result = await ego.evaluate(`(() => {const labels=${JSON.stringify(labels.map(norm))},kinds=${JSON.stringify(kinds)},marker=${JSON.stringify(marker)},clean=v=>String(v||'').replace(/\\s+/g,' ').trim().toLowerCase(),role=element=>element.getAttribute('role')||'',label=element=>{const id=element.id,direct=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return clean(element.getAttribute('aria-label')||direct?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))};const candidates=[...document.querySelectorAll('input,select,textarea,[role=combobox]')].filter(element=>element.isConnected&&!element.disabled&&labels.includes(label(element))&&(!kinds.length||kinds.includes((element.getAttribute('type')||element.tagName||role(element)).toLowerCase())));if(candidates.length!==1)return {count:candidates.length};candidates[0].setAttribute('data-cvent-trusted-target',marker);return {count:1,selector:'[data-cvent-trusted-target="'+marker+'"]',tag:candidates[0].tagName,type:(candidates[0].getAttribute('type')||'').toLowerCase(),value:'value' in candidates[0]?String(candidates[0].value):'',checked:'checked' in candidates[0]?Boolean(candidates[0].checked):null}})()`);
+  const result = await ego.evaluate(`(() => {const labels=${JSON.stringify(labels.map(norm))},kinds=${JSON.stringify(kinds)},marker=${JSON.stringify(marker)},clean=v=>String(v||'').replace(/\\s+/g,' ').trim().toLowerCase(),role=element=>element.getAttribute('role')||'',label=element=>{const id=element.id,direct=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return clean(element.getAttribute('aria-label')||direct?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))};const candidates=[...document.querySelectorAll('input,select,textarea,[role=combobox]')].filter(element=>{const box=element.getBoundingClientRect(),style=getComputedStyle(element);return element.isConnected&&!element.disabled&&!element.readOnly&&(element.getAttribute('type')||'').toLowerCase()!=='hidden'&&box.width>0&&box.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.visibility!=='collapse'&&labels.includes(label(element))&&(!kinds.length||kinds.includes((element.getAttribute('type')||element.tagName||role(element)).toLowerCase()))});if(candidates.length!==1)return {count:candidates.length};candidates[0].setAttribute('data-cvent-trusted-target',marker);return {count:1,selector:'[data-cvent-trusted-target="'+marker+'"]',tag:candidates[0].tagName,type:(candidates[0].getAttribute('type')||'').toLowerCase(),value:'value' in candidates[0]?String(candidates[0].value):'',checked:'checked' in candidates[0]?Boolean(candidates[0].checked):null}})()`);
   return result.count === 1 ? result : null;
 }
 
@@ -137,8 +137,13 @@ async function enterEdit(ego) {
   const edit = await markButton(ego, ['Edit']);
   if (!edit) return false;
   await ego.click(edit);
-  await ego.waitForTimeout(650);
-  return true;
+  // Opening Edit navigates asynchronously. A detail-view hidden input is not
+  // an editable property: require the reviewed Save control before planning.
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await ego.waitForTimeout(500);
+    if (await markButton(ego, ['Save', 'Save and close', 'Save & close'])) return true;
+  }
+  return false;
 }
 
 async function save(ego) {
