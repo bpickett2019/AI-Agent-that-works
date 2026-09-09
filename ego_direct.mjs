@@ -2,7 +2,7 @@
 /** Ego direct-tool adapter pinned to the canonical Steel Chromium target. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { runTrustedCventProcedure } from './trusted_cvent_procedures.mjs';
+import { inspectRegistrationTypeCapabilities, runTrustedCventProcedure } from './trusted_cvent_procedures.mjs';
 const argv=process.argv.slice(2);const arg=n=>argv[argv.indexOf(n)+1];
 const runtimePath=arg('--runtime');const operation=arg('--operation');const params=JSON.parse(arg('--params')||'{}');
 function output(value,ok=true){return new Promise((resolve,reject)=>{process.stdout.write('BROWSER_TOOL_RESULT='+JSON.stringify(ok?{ok:true,tool:'ego',operation,...value}:{ok:false,tool:'ego',operation,error:String(value)})+'\n',error=>error?reject(error):resolve())})}
@@ -17,7 +17,7 @@ function readSnapshotCache(){
 function writeSnapshotCache(value){
   const temporary=`${snapshotCachePath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,snapshotCachePath);fs.chmodSync(snapshotCachePath,0o600);
 }
-if(snapshotCachePath&&['click','activate','fill','type','navigate','selectOption','setChecked','press','drag','uploadDiscountImport','recover','openAuthorizedEvent','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
+if(snapshotCachePath&&['click','activate','fill','type','navigate','selectOption','setChecked','press','drag','uploadDiscountImport','recover','openAuthorizedEvent','inspectRegistrationTypeCapabilities','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
 if(!runtimePath||!operation){await output('Explicit --runtime and --operation are required',false);process.exit(2)}
 const runtime=JSON.parse(fs.readFileSync(runtimePath,'utf8'));
 const cdpOrigin=new URL(runtime.cdpHttpOrigin);process.env.EGO_BROWSER_CDP_HOST=cdpOrigin.hostname;process.env.EGO_BROWSER_CDP_PORT=cdpOrigin.port;
@@ -142,6 +142,7 @@ try{
       }
       break;
     }
+    case 'inspectRegistrationTypeCapabilities': result=await inspectRegistrationTypeCapabilities(ego,runtime,params);break;
     case 'configureAdmissionItems':
     case 'configureRegistrationTypes': result=await runTrustedCventProcedure(ego,runtime,operation,params);break;
     case 'setChecked': result={result:await ego.setChecked(params.target,Boolean(params.checked)),checked:Boolean(params.checked)};break;

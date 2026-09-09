@@ -92,23 +92,69 @@ const block=src.slice(src.indexOf('function booleanValue('),src.indexOf('async f
 const project=new Function('cleanText',stripTypeScriptTypes(block)+';return trustedProcedureRecords;')(value=>String(value??'').trim());
 const item=(group,active='ACTIVATE')=>({fields:{registration_code:{value:'ATT'},registration_name:{value:'Attendee'},active:{value:active},group_registration:{value:group}}});
 const items=['Y','N',undefined,null,'',true,false,'yes','no'].map(x=>item(x));
-assert.deepEqual(project('registration_types',{domains:{registration_types:{items}}}).map(x=>x.groupRegistration),[true,false,null,null,null,true,false,true,false]);
+const projected=project('registration_types',{domains:{registration_types:{items}}});
+assert.deepEqual(projected.map(x=>x.groupRegistration),[true,false,null,null,null,true,false,true,false]);
+assert.deepEqual(projected.map(x=>x.activationDirective),Array(items.length).fill('ACTIVATE'));
 assert.throws(()=>project('registration_types',{domains:{registration_types:{items:[item('maybe')]}}}),/refusing to guess/);
-assert.throws(()=>project('registration_types',{domains:{registration_types:{items:[item('Y','')]}}}),/refusing to guess/);
+assert.throws(()=>project('registration_types',{domains:{registration_types:{items:[item('Y','')]}}}),/activation directive is unsupported/);
 """)
 
     def test_registration_readback_is_observed_not_desired_or_substring(self):
         self.node(r"""
 import assert from 'node:assert/strict';
 import {registrationFacts} from './trusted_cvent_procedures.mjs';
-const desired={code:'ATT',name:'Attendee',active:true,groupRegistration:null,reprintFee:null};
+const desired={code:'ATT',name:'Attendee',activationDirective:'ACTIVATE',groupRegistration:null,reprintFee:null};
 const check=body=>registrationFacts({evaluate:async()=>({title:'Attendee',body,controls:[]})},desired);
 const missing=await check('Attendee\nAdmission codes\nATTED\n');
-assert.equal(missing.matches.active,false);
+assert.equal(missing.matches.activationDirective,true);
 assert.equal(missing.matches.code,false);
+assert.equal(missing.observed.openForRegistration,null);
 assert.equal(missing.all,false);
-assert.equal((await check('Active:\nNo\nCode:\nATT')).all,false);
-assert.equal((await check('Active:\nYes\nCode:\nATT')).all,true);
+const closed=await check('Open for registration:\nNo\nCode:\nATT');
+assert.equal(closed.all,true);assert.equal(closed.observed.openForRegistration,false);
+const open=await check('Open for registration:\nYes\nCode:\nATT');
+assert.equal(open.all,true);assert.equal(open.observed.openForRegistration,true);
+""")
+
+    def test_registration_capability_inspection_never_adds_or_saves(self):
+        self.node(r"""
+import assert from 'node:assert/strict';
+import {inspectRegistrationTypeCapabilities} from './trusted_cvent_procedures.mjs';
+const key='e712e34c-6117-4d13-bf4c-8ed54cf2b495';
+const grid='https://app.cvent.com/Subscribers/Events2/Details/RegistrationTypes/Index/View?evtstub='+key;
+const detail=grid.replace('RegistrationTypes/Index/View','RegistrationTypeDetail/Index/View')+'&registrationtypestub=att';
+let url=grid,mode='view';const clicks=[];
+const ego={
+ goto:async next=>{url=next;mode=next===grid?'view':mode},waitForTimeout:async()=>{},pageInfo:async()=>({url,title:'Registration Types'}),
+ click:async selector=>{clicks.push(selector);if(selector==='#edit')mode=url===grid?'association':'detail';if(selector==='#add-contacts')mode='candidates'},
+ evaluate:async expression=>{
+  if(expression.includes('table tr,[role=row]')){
+   if(mode==='candidates')return [{header:true,cells:['Name','Code'],links:[]},{header:false,cells:['Sponsor | Complimentary','SPONCOMP'],links:[]}];
+   return [{header:true,cells:['Name','Code'],links:[]},{header:false,cells:['Attendee','ATT'],links:[{text:'Attendee',href:detail}]}];
+  }
+  if(expression.includes('getBoundingClientRect')&&expression.includes('readOnly'))return mode==='detail' ? [{label:'Open for registration',tag:'INPUT',type:'radio',value:'Yes',checked:true,disabled:false,readOnly:false}] : [];
+  if(expression.includes('document.body?.innerText'))return {title:'Registration Types',body:mode==='detail'?'Open for registration:\nYes':'',controls:[],buttons:mode==='association'?['Save','Add from Contact Types','Create Contact Type']:mode==='candidates'?['Add','Cancel']:['Save']};
+  if(expression.includes('const wanted=')){
+   if(expression.includes('add from contact types'))return mode==='association'?{count:1,selector:'#add-contacts'}:{count:0};
+   if(expression.includes('save and close'))return {count:1,selector:'#save'};
+   if(expression.includes('["edit"]'))return {count:1,selector:'#edit'};
+  }
+  throw Error('Unexpected expression '+expression.slice(0,80));
+ }
+};
+const result=await inspectRegistrationTypeCapabilities(ego,{authorizedEventKey:key},{records:[{code:'ATT',name:'Attendee'},{code:'SPONCOMP',name:'Sponsor | Complimentary'}],probeCode:'ATT'});
+assert.equal(result.status,'INSPECTED');
+assert.equal(result.configurationWrites,0);assert.equal(result.saveCalls,0);
+assert.deepEqual(clicks,['#edit','#edit','#add-contacts']);
+assert.equal(result.detailEditor.eventLocalNameEditor,false);
+assert.equal(result.detailEditor.groupRegistrationEditor,false);
+assert.equal(result.detailEditor.openForRegistrationEditor,true);
+assert.equal(result.associationEditor.addFromContactTypes,true);
+assert.equal(result.associationEditor.createContactTypeObserved,true);
+assert.equal(result.associationEditor.eventLocalCreationProven,false);
+assert.equal(result.associationEditor.candidateInventory[1].exactCandidateMatches,1);
+assert.equal(result.associationEditor.candidateInventory[1].name,'Sponsor | Complimentary');
+assert.equal(result.associationEditor.candidateInventory[1].literalNameMatches,true);
 """)
 
     def test_large_adapter_result_is_flushed_before_process_exit(self):

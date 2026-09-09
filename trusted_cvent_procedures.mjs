@@ -49,14 +49,26 @@ async function gridRows(ego) {
   return ego.evaluate(`(() => {const clean=v=>String(v||'').replace(/\\s+/g,' ').trim();return [...document.querySelectorAll('table tr,[role=row]')].map(row=>{const cells=[...row.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(cell=>clean(cell.innerText||cell.textContent));const links=[...row.querySelectorAll('a[href]')].map(link=>({text:clean(link.innerText||link.textContent),href:link.href}));return {header:Boolean(row.querySelector('th,[role=columnheader]')),text:clean(row.innerText||row.textContent),cells,links}}).filter(row=>row.cells.length)})()`);
 }
 
-export function exactRow(rows, code) {
-  // A name or unrelated cell equal to the code is not a code identity match.
+function namedColumn(rows, wanted) {
   const cleanHeader = value => norm(String(value ?? '').replace(/[\uE000-\uF8FF]/g, ''));
-  const columns = new Set(rows.filter(row => row.header === true).flatMap(row => (row.cells || []).flatMap((cell, index) => cleanHeader(cell) === 'code' ? [index] : [])));
-  if (columns.size !== 1) return { count: null, identityUnavailable: true };
-  const column = [...columns][0];
-  const matches = rows.filter(row => !row.header && row.links?.length && norm(row.cells[column]) === norm(code));
-  return matches.length === 1 ? { row: matches[0], column } : { count: matches.length };
+  const columns = new Set(rows.filter(row => row.header === true).flatMap(row => (row.cells || []).flatMap((cell, index) => cleanHeader(cell) === wanted ? [index] : [])));
+  return columns.size === 1 ? [...columns][0] : null;
+}
+
+function codeColumn(rows) {
+  return namedColumn(rows, 'code');
+}
+
+export function exactCodeInventory(rows, code, requireLink = false) {
+  // A name or unrelated cell equal to the code is not a code identity match.
+  const column = codeColumn(rows);
+  if (column === null) return { count: null, identityUnavailable: true };
+  const matches = rows.filter(row => !row.header && (!requireLink || row.links?.length) && norm(row.cells?.[column]) === norm(code));
+  return matches.length === 1 ? { row: matches[0], column } : { count: matches.length, column };
+}
+
+export function exactRow(rows, code) {
+  return exactCodeInventory(rows, code, true);
 }
 
 export function safeDetailHref(row, eventKey, pathNeedle) {
@@ -131,6 +143,10 @@ async function chooseExactOption(ego, marked, desired) {
   if (selected.count !== 1) return false;
   await ego.click(selected.selector);
   return true;
+}
+
+async function visibleControlFacts(ego) {
+  return ego.evaluate(`(() => {const clean=v=>String(v||'').replace(/\\s+/g,' ').trim(),label=element=>{const id=element.id,direct=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return clean(element.getAttribute('aria-label')||direct?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))};return [...document.querySelectorAll('input,select,textarea,[role=combobox]')].filter(element=>{const box=element.getBoundingClientRect(),style=getComputedStyle(element);return element.isConnected&&(element.getAttribute('type')||'').toLowerCase()!=='hidden'&&box.width>0&&box.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.visibility!=='collapse'}).slice(0,500).map(element=>({label:label(element),tag:element.tagName,type:(element.getAttribute('type')||'').toLowerCase(),value:(element.getAttribute('type')||'').toLowerCase()==='password'?null:('value' in element?String(element.value).slice(0,1000):''),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):false,readOnly:'readOnly' in element?Boolean(element.readOnly):false}))})()`);
 }
 
 async function enterEdit(ego) {
@@ -293,27 +309,112 @@ async function configureAdmissionItems(ego, runtime, params) {
 export async function registrationFacts(ego, desired) {
   const facts = await pageFacts(ego);
   const feePattern = desired.reprintFee == null ? null : new RegExp(`reprint fee:?\\s*\\$?${String(Number(desired.reprintFee)).replace('.', '\\.')}(?:\\.00)?(?:\\s|$)`, 'i');
+  const openForRegistration = textHasLabeledValue(facts.body, ['Open for registration'], 'Yes') ? true :
+    textHasLabeledValue(facts.body, ['Open for registration'], 'No') ? false : null;
   const result = {
-    active: textHasLabeledValue(facts.body, ['Active'], desired.active ? 'Yes' : 'No') ||
-      textHasLabeledValue(facts.body, ['Status'], desired.active ? 'Active' : 'Inactive'),
+    // ACTIVATE/REQUIRED is the RR association/inclusion directive. Exact
+    // presence in this event's Code column proves it; it is not permission to
+    // reinterpret the directive as Cvent's separate Open for registration.
+    activationDirective: ['ACTIVATE', 'REQUIRED'].includes(String(desired.activationDirective || '').toUpperCase()),
     name: norm(facts.title) === norm(desired.name) || textHasLabeledValue(facts.body, ['Name'], desired.name),
     code: textHasLabeledValue(facts.body, ['Code', 'Registration Code'], desired.code),
-    groupRegistration: desired.groupRegistration == null ? true : textHasLabeledValue(facts.body, ['Allow Group Registration?', 'Group Registration'], desired.groupRegistration ? 'Yes' : 'No'),
+    // Cvent group registration is configured on a registration path in Site
+    // Designer, not on this event-local registration-type detail page.
+    groupRegistration: desired.groupRegistration == null,
     reprintFee: desired.reprintFee == null ? true : textHasLabeledValue(facts.body, ['Reprint Fee'], String(desired.reprintFee)) || feePattern.test(String(facts.body)),
   };
-  return { facts, matches: result, all: Object.values(result).every(Boolean) };
+  return { facts, observed: { openForRegistration }, matches: result, all: Object.values(result).every(Boolean) };
 }
 
-export function partitionRegistrationFields(planned, matches) {
+export function partitionRegistrationFields(planned) {
   return {
     actionable: planned.filter(change => change.marked),
-    fieldGaps: [
-      ...planned.filter(change => !change.marked).map(change => ({ field: change.field,
-        desired: change.value, actual: null, status: 'CONTROL_NOT_AVAILABLE', reason: 'No exact reviewed event-local control' })),
-      ...['active'].filter(field => !matches[field]).map(field => ({ field, actual: null,
-        status: 'CONTROL_NOT_AVAILABLE', reason: 'Independent active-status readback is unavailable; existence is not active status' })),
-    ],
+    fieldGaps: planned.filter(change => !change.marked).map(change => ({ field: change.field,
+      desired: change.value, actual: null, status: change.status || 'CONTROL_NOT_AVAILABLE',
+      reason: change.reason || 'No exact reviewed event-local control' })),
   };
+}
+
+export async function inspectRegistrationTypeCapabilities(ego, runtime, params) {
+  const eventKey = runtime.authorizedEventKey;
+  const desiredRecords = params.records || [];
+  const codes = [...new Set(desiredRecords.map(item => String(item.code).trim()).filter(Boolean))];
+  if (!codes.length || codes.length !== desiredRecords.length || codes.length > 100) throw new Error('Registration capability inspection requires unique bounded exact RR identities');
+  const desiredNames = new Map(desiredRecords.map(item => [String(item.code).trim(), String(item.name).trim()]));
+  const gridUrl = `https://app.cvent.com/Subscribers/Events2/Details/RegistrationTypes/Index/View?evtstub=${encodeURIComponent(eventKey)}`;
+  let disposition = await gotoAuthorized(ego, gridUrl, eventKey);
+  if (disposition.status) return { procedure: 'inspectRegistrationTypeCapabilities', status: disposition.status, configurationWrites: 0, saveCalls: 0 };
+  let rows = await gridRows(ego);
+  const inventory = codes.map(code => {
+    const found = exactRow(rows, code);
+    const actualName = found.row ? found.row.links?.[0]?.text || (namedColumn(rows, 'name') === null ? null : found.row.cells?.[namedColumn(rows, 'name')]) : null;
+    return { code, desiredName: desiredNames.get(code), exactEventMatches: found.row ? 1 : found.count, actualName,
+      literalNameMatches: actualName === desiredNames.get(code), identityUnavailable: Boolean(found.identityUnavailable) };
+  });
+  const probeCode = String(params.probeCode || codes[0]).trim();
+  const probe = exactRow(rows, probeCode);
+  const detailEditor = { probeCode, opened: false, eventLocalNameEditor: false, groupRegistrationEditor: false, openForRegistrationEditor: false, controls: [], buttons: [] };
+  if (probe.row) {
+    const href = safeDetailHref(probe.row, eventKey, 'registrationtype');
+    if (href) {
+      disposition = await gotoAuthorized(ego, href, eventKey);
+      if (!disposition.status && await enterEdit(ego)) {
+        disposition = await pageDisposition(ego, eventKey);
+        if (!disposition.status) {
+          const controls = await visibleControlFacts(ego);
+          const facts = await pageFacts(ego);
+          detailEditor.opened = true;
+          detailEditor.controls = controls;
+          detailEditor.buttons = facts.buttons;
+          detailEditor.eventLocalNameEditor = controls.some(control => ['name', 'registration type name'].includes(norm(control.label)));
+          detailEditor.groupRegistrationEditor = controls.some(control => /group registration/.test(norm(control.label)));
+          detailEditor.openForRegistrationEditor = controls.some(control => norm(control.label) === 'open for registration' || ['yes', 'no'].includes(norm(control.label)) && /open for registration/i.test(facts.body));
+        }
+      }
+    }
+  }
+  // Abandon the untouched detail editor by navigation. No field operation or
+  // Save is available to this inspection procedure.
+  disposition = await gotoAuthorized(ego, gridUrl, eventKey);
+  if (disposition.status) return { procedure: 'inspectRegistrationTypeCapabilities', status: disposition.status, inventory, detailEditor, configurationWrites: 0, saveCalls: 0 };
+  const associationEditor = { opened: false, addFromContactTypes: false, candidateInventory: [], createContactTypeObserved: false, eventLocalCreationProven: false, buttons: [] };
+  if (await enterEdit(ego)) {
+    disposition = await pageDisposition(ego, eventKey);
+    if (!disposition.status) {
+      associationEditor.opened = true;
+      let facts = await pageFacts(ego);
+      associationEditor.buttons = facts.buttons;
+      associationEditor.createContactTypeObserved = facts.buttons.some(button => norm(button) === 'create contact type');
+      const addFromContactTypes = await markButton(ego, ['Add from Contact Types']);
+      associationEditor.addFromContactTypes = Boolean(addFromContactTypes);
+      if (addFromContactTypes) {
+        await ego.click(addFromContactTypes);
+        await ego.waitForTimeout(650);
+        disposition = await pageDisposition(ego, eventKey);
+        if (!disposition.status) {
+          const candidates = await gridRows(ego);
+          associationEditor.candidateInventory = codes.map(code => {
+            const found = exactCodeInventory(candidates, code, false);
+            const nameColumn = namedColumn(candidates, 'name');
+            const name = found.row && nameColumn !== null ? found.row.cells?.[nameColumn] ?? null : null;
+            return { code, desiredName: desiredNames.get(code), exactCandidateMatches: found.row ? 1 : found.count, name,
+              literalNameMatches: name === desiredNames.get(code), identityUnavailable: Boolean(found.identityUnavailable) };
+          });
+          facts = await pageFacts(ego);
+          associationEditor.buttons = facts.buttons;
+          associationEditor.createContactTypeObserved ||= facts.buttons.some(button => norm(button) === 'create contact type');
+        }
+      }
+    }
+  }
+  // Cvent documents Create Contact Type as creating the shared definition.
+  // This path may only prove exact event-local association of an existing
+  // definition; it can never prove event-local creation.
+  associationEditor.eventLocalCreationProven = false;
+  await gotoAuthorized(ego, gridUrl, eventKey);
+  return { procedure: 'inspectRegistrationTypeCapabilities', status: 'INSPECTED', inventory, detailEditor, associationEditor,
+    nameCapability: 'SHARED_CONTACT_TYPE_PROHIBITED', groupRegistrationCapability: 'REGISTRATION_PATH_MAPPING_REQUIRED',
+    configurationWrites: 0, saveCalls: 0 };
 }
 
 async function configureRegistrationTypes(ego, runtime, params) {
@@ -343,49 +444,25 @@ async function configureRegistrationTypes(ego, runtime, params) {
     // Code identity is proven by the grid's Code column and its exact detail
     // link, not by searching the detail body for a possibly incidental code.
     observed.matches.code = true;
+    observed.matches.activationDirective = true;
     observed.all = Object.values(observed.matches).every(Boolean);
     if (observed.all) {
-      records.push({ reference: desired.code, status: 'ALREADY_CORRECT', verified: Object.keys(observed.matches) });
+      records.push({ reference: desired.code, status: 'ALREADY_CORRECT', verified: Object.keys(observed.matches), observed: observed.observed });
       disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
       continue;
     }
-    if (!(await enterEdit(ego))) {
-      records.push({ reference: desired.code, status: 'CONTROL_NOT_FOUND', detail: 'Trusted Edit control not found', mismatches: observed.matches });
-      disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
-      continue;
-    }
-    disposition = await pageDisposition(ego, eventKey);
-    if (disposition.status) return { procedure: 'configureRegistrationTypes', status: disposition.status, records, mutationCount, page: disposition.page };
-    const changes = [];
-    const planned = [];
-    if (!observed.matches.name) planned.push({ field: 'name', marked: await markControl(ego, ['Name:', 'Name', 'Registration Type Name:', 'Registration Type Name']), value: desired.name });
-    if (!observed.matches.groupRegistration) planned.push({ field: 'groupRegistration', marked: await markControl(ego, ['Allow Group Registration?:', 'Allow Group Registration?', 'Group Registration:', 'Group Registration']), value: desired.groupRegistration ? 'Yes' : 'No', option: true });
-    if (!observed.matches.reprintFee) planned.push({ field: 'reprintFee', marked: await markControl(ego, ['Reprint Fee:', 'Reprint Fee']), value: desired.reprintFee });
-    const { actionable, fieldGaps } = partitionRegistrationFields(planned, observed.matches);
-    // An unavailable optional property does not veto independent safe edits.
-    // In particular, never guess a replacement for groupRegistration.
-    if (!actionable.length) {
-      records.push({ reference: desired.code, status: 'CONTROL_NOT_FOUND', configured: [],
-        verified: Object.keys(observed.matches).filter(field => observed.matches[field]), fieldGaps });
-      disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
-      continue;
-    }
-    for (const change of actionable) {
-      const changed = change.option ? await chooseExactOption(ego, change.marked, change.value) : await setControl(ego, change.marked, change.value);
-      if (!changed) throw new Error(`Trusted ${change.field} control changed shape after preflight for ${desired.code}`);
-      changes.push(change.field); mutationCount += 1;
-    }
-    disposition = await pageDisposition(ego, eventKey);
-    if (disposition.status) throw new Error(`Exact event identity was lost before registration-type save for ${desired.code}`);
-    if (!(await save(ego))) throw new Error(`Save control disappeared after registration-type mutation for ${desired.code}`);
-    disposition = await gotoAuthorized(ego, detailHref, eventKey);
-    if (disposition.status) return { procedure: 'configureRegistrationTypes', status: disposition.status, records, mutationCount, page: disposition.page };
-    const verified = await registrationFacts(ego, desired);
-    const changedFieldsVerified = changes.every(field => verified.matches[field]);
-    records.push(changedFieldsVerified ? { reference: desired.code, status: 'CONFIGURED', configured: changes,
-      verified: Object.keys(verified.matches).filter(field => verified.matches[field]), fieldGaps } :
-      { reference: desired.code, status: 'VERIFY_FAILED', configured: changes, mismatches: verified.matches, fieldGaps });
-    if (!changedFieldsVerified) throw new Error(`Registration-type saved changes could not be verified for ${desired.code}; do not replay`);
+    const held = [];
+    if (!observed.matches.name) held.push({ field: 'name', marked: null, value: desired.name,
+      status: 'PROHIBITED', reason: 'Registration type names are shared Contact Type definitions; event-local name editing is unavailable and account/Admin changes are prohibited' });
+    if (!observed.matches.groupRegistration) held.push({ field: 'groupRegistration', marked: null,
+      value: desired.groupRegistration ? 'Yes' : 'No', reason: 'Group Registration is a registration-path Site Designer setting; no exact RR type-to-path mapping was proven' });
+    if (!observed.matches.reprintFee) held.push({ field: 'reprintFee', marked: null, value: desired.reprintFee,
+      reason: 'A registration-type-local reprint fee control has not been proven; fee-table values require the trusted Pricing mission' });
+    const { fieldGaps } = partitionRegistrationFields(held);
+    // Never open or Save an editor for fields whose authoritative Cvent scope
+    // is shared/global or whose event-local mapping has not been established.
+    records.push({ reference: desired.code, status: 'CONTROL_NOT_FOUND', configured: [], observed: observed.observed,
+      verified: Object.keys(observed.matches).filter(field => observed.matches[field]), fieldGaps });
     disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);
   }
   const failures = records.filter(item => item.fieldGaps?.length || !['CONFIGURED', 'ALREADY_CORRECT'].includes(item.status));

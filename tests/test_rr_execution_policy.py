@@ -16,12 +16,12 @@ class RRExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_unspecified_group_setting_passes_gateway_without_becoming_false(self):
-        record = dict(code='ATT', name='Attendee', source='RR!A5', active=True,
+        record = dict(code='ATT', name='Attendee', source='RR!A5', activationDirective='ACTIVATE',
                       groupRegistration=None, reprintFee=None)
         params = dict(intent='write', records=[record], timeoutSeconds=600)
         browser_tool.validate_trusted_procedure('configureRegistrationTypes', params)
         for invalid in ('false', 0, [], {}):
-            with self.assertRaisesRegex(RuntimeError, 'flags are invalid'):
+            with self.assertRaisesRegex(RuntimeError, 'directives are invalid'):
                 browser_tool.validate_trusted_procedure('configureRegistrationTypes',
                     dict(params, records=[dict(record, groupRegistration=invalid)]))
 
@@ -84,6 +84,16 @@ for(const key of ['profileMatch','accountContextMatch','persistedProfile']){
         for extra in ('&event=other', '&evtstub=other', '&evtstub='):
             self.assertIsNone(browser_tool.event_key(base+extra))
 
+    def test_modern_event_origin_auth_requires_the_exact_authorized_key(self):
+        runtime = {'authorizedEventKey':'selected'}
+        self.assertTrue(browser_tool.supported_authenticated_origin(runtime, 'https://app.cvent.com/Subscribers/Events2/EventSelection'))
+        self.assertTrue(browser_tool.supported_authenticated_origin(runtime, 'https://events.app.cvent.com/events/home?evtstub=selected'))
+        for url in ('https://events.app.cvent.com/events/home?evtstub=other',
+                    'https://events.app.cvent.com/events/home',
+                    'http://events.app.cvent.com/events/home?evtstub=selected',
+                    'https://evilcvent.com/events/home?evtstub=selected'):
+            self.assertFalse(browser_tool.supported_authenticated_origin(runtime, url), url)
+
     def test_permanent_denials_include_new_event_and_test_send(self):
         for label in ('Delete', 'Remove', 'Archive', 'Publish', 'Go Live',
                       'Send Email', 'Test-Send', 'Test Send Email', 'Schedule Email',
@@ -139,44 +149,36 @@ assert.throws(()=>verify(rr,[{itemId:'outside',cventEvidence:['read']}],[]));
 assert.throws(()=>verify(rr,[{itemId:'three',cventEvidence:['read']}],[]));
 """)
 
-    def test_registration_mission_updates_available_field_without_guessing_group(self):
+    def test_registration_mission_holds_shared_name_and_path_group_fields_without_opening_edit(self):
         self.node(r"""
 import assert from 'node:assert/strict';
 import {runTrustedCventProcedure} from './trusted_cvent_procedures.mjs';
 const key='e712e34c-6117-4d13-bf4c-8ed54cf2b495';
 const href='https://app.cvent.com/Subscribers/Events2/Details/RegistrationTypeDetail/Index/View?evtstub='+key+'&registrationtypestub=type-one';
-let url=href, title='Old name',pending=null,saves=0,fills=0;
+let url=href, title='Old name',clicks=0,fills=0;
 const ego={
  goto:async next=>{url=next},waitForTimeout:async()=>{},pageInfo:async()=>({url,title}),
  evaluate:async expression=>{
   if(expression.includes('table tr,[role=row]'))return [
    {header:true,cells:['Name','Code'],links:[]},
    {header:false,cells:[title,'ATT'],links:[{text:title,href}]}];
-  if(expression.includes('document.body?.innerText'))return {title,body:'Active:\nYes\nCode:\nATT',controls:[],buttons:['Edit']};
-  if(expression.includes('const labels='))return expression.includes('registration type name') ?
-   {count:1,selector:'#name',tag:'INPUT',type:'text',value:title} : {count:0};
-  if(expression.includes('const wanted='))return {count:1,selector:expression.includes('save and close')?'#save':'#edit'};
-  throw Error('Unexpected browser read in test');
+  if(expression.includes('document.body?.innerText'))return {title,body:'Open for registration:\nYes\nCode:\nATT',controls:[],buttons:['Edit']};
+  throw Error('Mutation preflight must not run for held fields');
  },
- fill:async(selector,value)=>{assert.equal(selector,'#name');pending=value;fills++},
- click:async selector=>{if(selector==='#save'){assert.notEqual(pending,null);title=pending;saves++}},
+ fill:async()=>{fills++},click:async()=>{clicks++},
 };
-const record={code:'ATT',name:'New name',source:'RR!A5',active:true,groupRegistration:true,reprintFee:null};
+const record={code:'ATT',name:'New name',source:'RR!A5',activationDirective:'ACTIVATE',groupRegistration:true,reprintFee:null};
 const result=await runTrustedCventProcedure(ego,{authorizedEventKey:key},'configureRegistrationTypes',
  {records:[record,{...record,code:'SPONCOMP',name:'Sponsor | Complimentary'}]});
-assert.equal(fills,1);assert.equal(saves,1);assert.equal(title,'New name');
-assert.equal(result.records[0].status,'EXACT_MATCH_UPDATED');
-assert.deepEqual(result.records[0].configured,['name']);
-assert.equal(result.records[0].fieldGaps[0].field,'groupRegistration');
+assert.equal(fills,0);assert.equal(clicks,0);assert.equal(title,'Old name');
+assert.equal(result.records[0].status,'CONTROL_NOT_AVAILABLE');
+assert.deepEqual(result.records[0].fieldGaps.map(x=>x.field),['name','groupRegistration']);
+assert.equal(result.records[0].fieldGaps[0].status,'PROHIBITED');
+assert.match(result.records[0].fieldGaps[0].reason,/shared Contact Type/);
+assert.equal(result.records[0].observed.openForRegistration,true);
 assert.equal(result.records[1].status,'MATCH_UNCERTAIN_HUMAN_REVIEW');
-assert.equal(result.counts.updated,1);assert.equal(result.counts.failures,2);
-assert.equal(result.metrics.fullSnapshots,0);assert.ok(result.metrics.egoOperations>10);
-const priorEvaluate=ego.evaluate;
-ego.evaluate=async expression=>expression.includes('const wanted=')&&expression.includes('save and close') ? {count:0} : priorEvaluate(expression);
-const noSave=await runTrustedCventProcedure(ego,{authorizedEventKey:key},'configureRegistrationTypes',
- {records:[{...record,name:'Another name'}]});
-assert.equal(noSave.records[0].status,'CONTROL_NOT_AVAILABLE');
-assert.equal(fills,1);assert.equal(saves,1); // no new field action without a proven Save control
+assert.equal(result.counts.updated,0);assert.equal(result.counts.failures,2);
+assert.equal(result.metrics.fullSnapshots,0);assert.ok(result.metrics.egoOperations>5);
 """)
 
     def test_hidden_or_readonly_controls_are_never_mutation_targets(self):

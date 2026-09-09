@@ -10,8 +10,9 @@ from browser_runtime import command as browser_command, load, local_probe, pages
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
 TRUSTED_PROCEDURES={'configureAdmissionItems','configureRegistrationTypes'}
-EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','sectionState','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport',*TRUSTED_PROCEDURES}
-INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag',*TRUSTED_PROCEDURES}
+TRUSTED_INSPECTIONS={'inspectRegistrationTypeCapabilities'}
+EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','sectionState','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
+INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
 def event_key(url):
     try:
         pairs=parse_qs(urlparse(url).query,keep_blank_values=True)
@@ -68,7 +69,7 @@ def assert_safe_write_target(operation,params,descriptor):
 
 def guard(runtime,operation,params):
     if runtime.get('accessMode')=='read_only_reconciliation':
-        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','controlInventory','readTarget','recover','wait','scroll'}
+        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','controlInventory','readTarget','recover','wait','scroll',*TRUSTED_INSPECTIONS}
         if params.get('intent')=='write' or operation not in readonly:
             raise RuntimeError('Read-only reconciliation cannot dispatch configuration writes')
     current=local_probe(runtime);lock=target_lock()
@@ -107,6 +108,12 @@ def guard(runtime,operation,params):
         if PROTECTED_PAGE.search(parsed.path):raise RuntimeError('Navigation to attendee/contact and communications areas is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
     return current
+def supported_authenticated_origin(runtime,url):
+    parsed=urlparse(url);host=(parsed.hostname or '').lower()
+    if parsed.scheme!='https' or parsed.username or parsed.password or parsed.port not in (None,443):return False
+    if host=='app.cvent.com':return True
+    return host=='events.app.cvent.com' and bool(runtime.get('authorizedEventKey')) and event_key(url)==str(runtime['authorizedEventKey']).lower()
+
 def authenticated_profile_status(runtime):
     current=local_probe(runtime);slot=int(runtime.get('workerSlot',0));workspace=os.environ.get('CVENT_WORKSPACE_ID','')
     expected=browser_profile_dir(workspace,slot) if workspace and slot else None
@@ -114,7 +121,7 @@ def authenticated_profile_status(runtime):
     try:metadata=json.loads(path.read_text()) if path else {}
     except Exception:metadata={}
     profile_match=bool(expected and Path(runtime.get('profilePath','')).resolve()==expected.resolve() and expected.is_dir())
-    host=(urlparse(current.get('url','')).hostname or '').lower();url=current.get('url','')
+    url=current.get('url','')
     page=select_page(browser_pages(runtime['cdpHttpOrigin']),runtime['targetBrowserIdentity']['targetId'])
     organization='';ui={}
     if page:
@@ -122,7 +129,7 @@ def authenticated_profile_status(runtime):
         organization=next((str(c.get('value','')) for c in cookies if c.get('name')=='org-id' and str(c.get('domain','')).endswith('cvent.com')),'')
         ui=browser_command(page['webSocketDebuggerUrl'],'Runtime.evaluate',{'expression':"(() => { const text=(document.body?.innerText||'').slice(0,50000); return {ready:document.readyState,hasUi:/(?:event management|my events|event details|registration|cvent)/i.test(text),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(text)} })()",'returnByValue':True},runtime['cdpHttpOrigin']).get('result',{}).get('value',{})
     context_match=bool(organization and metadata.get('organizationId')==organization)
-    authenticated=bool(metadata.get('authenticated') is True and metadata.get('workerSlot')==slot and profile_match and context_match and host=='app.cvent.com' and not re.search(r'(?:login|signin|authenticate|sso)',url,re.I) and ui.get('ready')=='complete' and ui.get('hasUi') and not ui.get('hasLogin'))
+    authenticated=bool(metadata.get('authenticated') is True and metadata.get('workerSlot')==slot and profile_match and context_match and supported_authenticated_origin(runtime,url) and not re.search(r'(?:login|signin|authenticate|sso)',url,re.I) and ui.get('ready')=='complete' and ui.get('hasUi') and not ui.get('hasLogin'))
     return {'ok':True,'operation':'authStatus','authenticated':authenticated,'persistedProfile':bool(metadata),'workerSlot':slot,'profileMatch':profile_match,'accountContextMatch':context_match,'loginRequired':not authenticated}
 
 def recover_browser(runtime_path,runtime,tool,params):
@@ -156,6 +163,19 @@ def preflight_write_target(runtime_path,operation,params):
         assert_safe_write_target(operation,params,descriptor)
         resolved[key]=result.get('resolvedTarget') or target
     return resolved
+def validate_trusted_inspection(operation,params):
+    if operation not in TRUSTED_INSPECTIONS or set(params)-{'intent','records','probeCode','timeoutSeconds'}:raise RuntimeError('Trusted inspection accepts only exact RR identities')
+    records=params.get('records');probe=params.get('probeCode')
+    if not isinstance(records,list) or not 1<=len(records)<=100:raise RuntimeError('Trusted inspection RR identities are invalid')
+    codes=[]
+    for record in records:
+        if not isinstance(record,dict) or set(record)!={'code','name'} or not isinstance(record.get('code'),str) or not record['code'].strip() or len(record['code'])>200 or not isinstance(record.get('name'),str) or not record['name'].strip() or len(record['name'])>1000:raise RuntimeError('Trusted inspection RR identity is invalid')
+        codes.append(record['code'])
+    if len(set(codes))!=len(codes):raise RuntimeError('Trusted inspection RR identities are duplicated')
+    if probe is not None and (not isinstance(probe,str) or probe not in codes):raise RuntimeError('Trusted inspection probe identity is invalid')
+    timeout=params.get('timeoutSeconds',300)
+    if not isinstance(timeout,int) or not 30<=timeout<=900:raise RuntimeError('Trusted inspection timeout is invalid')
+
 def validate_trusted_procedure(operation,params):
     allowed={'intent','rrSource','records','timeoutSeconds'}
     if set(params)-allowed:raise RuntimeError('Trusted procedure accepts only typed RR configuration records')
@@ -164,7 +184,7 @@ def validate_trusted_procedure(operation,params):
     for record in records:
         if not isinstance(record,dict):raise RuntimeError('Trusted procedure record must be an object')
         common={'code','name','source'}
-        expected=common|({'registrationTypes','knownRegistrationTypes'} if operation=='configureAdmissionItems' else {'active','groupRegistration','reprintFee'})
+        expected=common|({'registrationTypes','knownRegistrationTypes'} if operation=='configureAdmissionItems' else {'activationDirective','groupRegistration','reprintFee'})
         if set(record)-expected:raise RuntimeError('Trusted procedure record contains an unsupported field')
         if not isinstance(record.get('code'),str) or not record['code'].strip() or len(record['code'])>200:raise RuntimeError('Trusted procedure code is invalid')
         if not isinstance(record.get('name'),str) or not record['name'].strip() or len(record['name'])>1000:raise RuntimeError('Trusted procedure name is invalid')
@@ -175,7 +195,7 @@ def validate_trusted_procedure(operation,params):
             for item in values+known:
                 if not isinstance(item,dict) or set(item)-{'code','name'} or not isinstance(item.get('code'),str) or not isinstance(item.get('name'),str):raise RuntimeError('Admission registration-type association is invalid')
         else:
-            if not isinstance(record.get('active'),bool) or (record.get('groupRegistration') is not None and not isinstance(record['groupRegistration'],bool)):raise RuntimeError('Registration-type flags are invalid')
+            if record.get('activationDirective') not in ('ACTIVATE','REQUIRED') or (record.get('groupRegistration') is not None and not isinstance(record['groupRegistration'],bool)):raise RuntimeError('Registration-type directives are invalid')
             if record.get('reprintFee') is not None and (not isinstance(record['reprintFee'],(int,float)) or not 0<=record['reprintFee']<=100000):raise RuntimeError('Registration-type reprint fee is invalid')
     timeout=params.get('timeoutSeconds',600)
     if not isinstance(timeout,int) or not 30<=timeout<=900:raise RuntimeError('Trusted procedure timeout is invalid')
@@ -207,6 +227,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
+        if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
         if is_write:
             params=preflight_write_target(runtime_path,operation,params)

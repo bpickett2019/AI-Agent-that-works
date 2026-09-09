@@ -94,6 +94,18 @@ class ReadonlyReconciliationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'Read-only reconciliation cannot dispatch'):
                 browser_tool.guard(runtime,operation,{'intent':intent})
 
+    def test_readonly_runtime_allows_only_the_fixed_nonmutating_capability_inspection(self):
+        runtime={'accessMode':'read_only_reconciliation','authorizedEventName':'Selected event'}
+        with patch('browser_tool.local_probe',return_value={'url':'https://app.cvent.com/Subscribers/Events2/EventSelection'}), \
+             patch('browser_tool.target_lock',return_value={}):
+            current=browser_tool.guard(runtime,'inspectRegistrationTypeCapabilities',{'intent':'read'})
+        self.assertIn('EventSelection',current['url'])
+        browser_tool.validate_trusted_inspection('inspectRegistrationTypeCapabilities',{
+            'intent':'read','records':[{'code':'ATT','name':'Attendee'}],'probeCode':'ATT','timeoutSeconds':90})
+        with self.assertRaisesRegex(RuntimeError,'duplicated'):
+            browser_tool.validate_trusted_inspection('inspectRegistrationTypeCapabilities',{
+                'intent':'read','records':[{'code':'ATT','name':'One'},{'code':'ATT','name':'Two'}]})
+
     def test_viewer_requires_current_lease_fingerprint_and_exact_runtime(self):
         directory=Path(self.tmp.name)/'job';folder=directory/'reconciliation/atted-0123456789ab';folder.mkdir(parents=True)
         job=self.store.get_job(self.job['id'])

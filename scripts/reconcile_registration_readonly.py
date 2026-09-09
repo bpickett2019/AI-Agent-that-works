@@ -27,7 +27,8 @@ JOB_ID = 'job_03e7e3467f4244ea84bb39b72d9e19e9'
 EVENT_KEY = 'e712e34c-6117-4d13-bf4c-8ed54cf2b495'
 EVENT_NAME = '(C+D) Medtrade Testing Clone 2'
 READ_ACTIONS = {'pageInfo', 'authStatus', 'navigate', 'scanEventList', 'openAuthorizedEvent',
-                'authorizeTarget', 'sectionState', 'snapshotText', 'controlInventory'}
+                'authorizeTarget', 'sectionState', 'snapshotText', 'controlInventory',
+                'inspectRegistrationTypeCapabilities'}
 
 
 @contextmanager
@@ -100,7 +101,7 @@ def private_json(path, value):
 def main():
     # Fixed staging/job boundary, not a generic browser or credential surface.
     data = Path('/var/lib/cvent-agent')
-    if hashlib.sha256((ROOT/'trusted_cvent_procedures.mjs').read_bytes()).hexdigest() != '41b17e81ddf5a815f06ea0a991786ed939506757c600ab924c53768c7fd7c630':
+    if hashlib.sha256((ROOT/'trusted_cvent_procedures.mjs').read_bytes()).hexdigest() != 'e2b7d5a0282c3ae0f5cf162e4c8369241e2deb736a6e1cda5e5a68ebbaa0014f':
         raise RuntimeError('Review this reader against the current trusted procedure before using it')
     os.environ['CVENT_DATA_ROOT'] = str(data)
     from runtime_config import browser_profile_dir, browser_cache_dir
@@ -211,11 +212,17 @@ def main():
                 matches = inventory.get('exactMatches',[])
                 result['eventInventoryMatches']=matches
                 result['inventoryObservedRows']=len(inventory.get('observedRows',[]))
-                if len(matches)!=1 or matches[0].get('status','').strip().lower() != 'draft':
-                    raise RuntimeError('Unique exact Draft event inventory match not established')
+                if len(matches)!=1:
+                    raise RuntimeError('Unique exact event inventory match not established')
                 result['eventInventory'] = matches[0]
+                result['eventLifecycleStatusObserved'] = matches[0].get('status')
                 browser('openAuthorizedEvent',eventName=EVENT_NAME,eventKey=EVENT_KEY)
                 browser('authorizeTarget',eventName=EVENT_NAME)
+                identities=[{'code':item['fields']['registration_code']['value'],
+                             'name':item['fields']['registration_name']['value']} for item in desired]
+                capabilities=browser('inspectRegistrationTypeCapabilities',records=identities,probeCode='ATTED')
+                private_json(folder/'registration-capability-readback.json',capabilities)
+                result['registrationCapabilities']=capabilities
                 grid_url='https://app.cvent.com/Subscribers/Events2/Details/RegistrationTypes/Index/View?evtstub='+EVENT_KEY
                 browser('navigate',url=grid_url); time.sleep(1)
                 grid=browser('sectionState')

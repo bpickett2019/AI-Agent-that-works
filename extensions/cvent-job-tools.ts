@@ -351,15 +351,20 @@ function trustedProcedureRecords(domain: string, expected: any): any[] {
       knownRegistrationTypes,
     }));
   }
-  if (domain === "registration_types") return (section.items ?? []).map((item: any) => ({
-    code: cleanText(item.fields?.registration_code?.value ?? item.matchReference, 200),
-    name: cleanText(item.fields?.registration_name?.value, 1000),
-    source: cleanText(item.fields?.registration_code?.source ?? item.fields?.registration_name?.source, 500),
-    active: booleanValue(item.fields?.active?.value),
-    groupRegistration: item.fields?.group_registration?.value == null || cleanText(item.fields.group_registration.value, 40) === ""
-      ? null : booleanValue(item.fields.group_registration.value),
-    reprintFee: item.fields?.reprint_fee?.value == null ? null : Number(item.fields.reprint_fee.value),
-  }));
+  if (domain === "registration_types") return (section.items ?? []).map((item: any) => {
+    const activationDirective = cleanText(item.fields?.active?.value, 40).toUpperCase();
+    if (!["ACTIVATE", "REQUIRED"].includes(activationDirective))
+      throw new Error("Verified RR registration activation directive is unsupported; refusing to map it to a Cvent status");
+    return {
+      code: cleanText(item.fields?.registration_code?.value ?? item.matchReference, 200),
+      name: cleanText(item.fields?.registration_name?.value, 1000),
+      source: cleanText(item.fields?.registration_code?.source ?? item.fields?.registration_name?.source, 500),
+      activationDirective,
+      groupRegistration: item.fields?.group_registration?.value == null || cleanText(item.fields.group_registration.value, 40) === ""
+        ? null : booleanValue(item.fields.group_registration.value),
+      reprintFee: item.fields?.reprint_fee?.value == null ? null : Number(item.fields.reprint_fee.value),
+    };
+  });
   throw new Error(`No trusted procedure data projection exists for ${domain}`);
 }
 

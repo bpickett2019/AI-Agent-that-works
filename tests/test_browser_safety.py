@@ -210,11 +210,11 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'only typed RR'):
             browser_tool.validate_trusted_procedure('configureAdmissionItems',{**admission,'target':'#arbitrary'})
         registration={'intent':'write','rrSource':'VERIFIED RR domain: registration_types','timeoutSeconds':600,'records':[
-            {'code':'ATT','name':'Attendee','source':'Sheet!A5','active':True,'groupRegistration':False,'reprintFee':125},
+            {'code':'ATT','name':'Attendee','source':'Sheet!A5','activationDirective':'ACTIVATE','groupRegistration':False,'reprintFee':125},
         ]}
         browser_tool.validate_trusted_procedure('configureRegistrationTypes',registration)
-        with self.assertRaisesRegex(RuntimeError,'flags are invalid'):
-            browser_tool.validate_trusted_procedure('configureRegistrationTypes',{**registration,'records':[{**registration['records'][0],'active':'yes'}]})
+        with self.assertRaisesRegex(RuntimeError,'directives are invalid'):
+            browser_tool.validate_trusted_procedure('configureRegistrationTypes',{**registration,'records':[{**registration['records'][0],'activationDirective':'OPEN'}]})
 
     def test_only_fixed_rr_discount_artifact_can_be_uploaded(self):
         artifact=self.base/'discount-import.xlsx';artifact.write_bytes(b'xlsx')
