@@ -136,6 +136,18 @@ function runFixed(executable: string, args: string[], kind: "browser" | "prepare
   });
 }
 
+async function settleAuthenticatedProfile(initial: any, read: () => Promise<any>, pause: () => Promise<void>): Promise<any> {
+  let auth = initial;
+  // A restored, correctly bound profile can reach the SPA before rendering
+  // finishes. Poll only reads, and never waive profile or account checks.
+  for (let attempt = 0; attempt < 8 && !auth.authenticated && auth.persistedProfile === true &&
+       auth.profileMatch === true && auth.accountContextMatch === true; attempt++) {
+    await pause();
+    auth = await read();
+  }
+  return auth;
+}
+
 async function withQueue<T>(key: string, operation: () => Promise<T>): Promise<T> {
   const previous = queues.get(key) ?? Promise.resolve();
   let release!: () => void;
@@ -853,7 +865,11 @@ export default function cventJobTools(pi: any) {
           pageTitle = String(pageResult?.page?.title ?? "");
           try { host = new URL(pageUrl).hostname.toLowerCase(); } catch { host = ""; }
         }
-        const auth = await invokeBrowser("authStatus", { intent: "read" }, signal, 45);
+        const auth = await settleAuthenticatedProfile(
+          await invokeBrowser("authStatus", { intent: "read" }, signal, 45),
+          () => invokeBrowser("authStatus", { intent: "read" }, signal, 45),
+          () => new Promise<void>(resolvePromise => setTimeout(resolvePromise, 500)),
+        );
         if (auth.authenticated === true && auth.workerSlot === Number(requiredEnvironment("CVENT_WORKER_SLOT"))) {
           await appendActivity("Cvent login already active; verified this worker's isolated persisted profile");
           return toolText({ ok: true, loginRequired: false, persistedProfileReused: true,

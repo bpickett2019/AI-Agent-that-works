@@ -47,6 +47,28 @@ for(const kind of ['browser','prepare']){
 }
 """)
 
+    def test_auth_render_settle_never_waives_account_or_profile_binding(self):
+        self.node(r"""
+import fs from 'node:fs';
+import {stripTypeScriptTypes} from 'node:module';
+import assert from 'node:assert/strict';
+const src=fs.readFileSync('extensions/cvent-job-tools.ts','utf8');
+const block=src.slice(src.indexOf('async function settleAuthenticatedProfile('),src.indexOf('async function withQueue'));
+const settle=new Function(stripTypeScriptTypes(block)+';return settleAuthenticatedProfile;')();
+const ready={authenticated:true,persistedProfile:true,profileMatch:true,accountContextMatch:true};
+const loading={...ready,authenticated:false};
+let reads=0;
+assert.equal((await settle(loading,async()=>{reads++;return ready},async()=>{})).authenticated,true);
+assert.equal(reads,1);
+reads=0;
+assert.equal((await settle(loading,async()=>{reads++;return loading},async()=>{})).authenticated,false);
+assert.equal(reads,8);
+for(const key of ['profileMatch','accountContextMatch','persistedProfile']){
+ const rejected={...loading,[key]:false};
+ assert.equal(await settle(rejected,async()=>{throw Error('must not read past failed binding')},async()=>{}),rejected);
+}
+""")
+
     def test_event_titles_and_names_are_immutable(self):
         for label in ('Event Title', 'Event Name', 'Event Code', 'EventTitle', 'event_title'):
             with self.assertRaisesRegex(RuntimeError, 'identity is immutable'):
