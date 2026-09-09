@@ -316,7 +316,10 @@ function desiredSectionRecords(domain: string, expected: any): any[] {
 }
 
 function booleanValue(value: unknown): boolean {
-  return ["yes", "true", "active", "activate", "required", "1"].includes(cleanText(value, 40).toLowerCase());
+  const normalized = cleanText(value, 40).toLowerCase();
+  if (["y", "yes", "true", "active", "activate", "required", "1"].includes(normalized)) return true;
+  if (["n", "no", "false", "inactive", "deactivate", "0"].includes(normalized)) return false;
+  throw new Error("Verified RR boolean has an unsupported or missing value; refusing to guess");
 }
 
 function trustedProcedureRecords(domain: string, expected: any): any[] {
@@ -341,7 +344,8 @@ function trustedProcedureRecords(domain: string, expected: any): any[] {
     name: cleanText(item.fields?.registration_name?.value, 1000),
     source: cleanText(item.fields?.registration_code?.source ?? item.fields?.registration_name?.source, 500),
     active: booleanValue(item.fields?.active?.value),
-    groupRegistration: booleanValue(item.fields?.group_registration?.value),
+    groupRegistration: item.fields?.group_registration?.value == null || cleanText(item.fields.group_registration.value, 40) === ""
+      ? null : booleanValue(item.fields.group_registration.value),
     reprintFee: item.fields?.reprint_fee?.value == null ? null : Number(item.fields.reprint_fee.value),
   }));
   throw new Error(`No trusted procedure data projection exists for ${domain}`);

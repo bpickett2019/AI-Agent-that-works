@@ -13,11 +13,13 @@ const STATUS = new Set([
 const norm = value => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 const token = () => `cvent-trusted-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-function eventKeyFromUrl(value) {
+export function eventKeyFromUrl(value) {
   try {
     const url = new URL(value);
-    const query = new URLSearchParams(url.search);
-    return norm(query.get('evtstub') || query.get('eventid') || query.get('event'));
+    // Cvent's admission grid emits evtStub; detail pages also use evtstub.
+    // Normalize parameter names, not just values. Reject conflicting aliases.
+    const keys = [...url.searchParams].filter(([name]) => ['evtstub', 'eventid', 'event'].includes(name.toLowerCase())).map(([, key]) => norm(key));
+    return keys.length && keys.every(key => key && key === keys[0]) ? keys[0] : '';
   } catch { return ''; }
 }
 
@@ -25,7 +27,7 @@ async function pageDisposition(ego, eventKey) {
   const page = await ego.pageInfo();
   const url = new URL(page.url);
   const host = url.hostname.toLowerCase();
-  const login = /(?:login|signin|authenticate|sso)/i.test(page.url) || !host.endsWith('cvent.com');
+  const login = /(?:login|signin|authenticate|sso)/i.test(page.url) || host !== 'app.cvent.com' || url.protocol !== 'https:';
   if (login) return { status: 'AUTH_REQUIRED', page };
   if (eventKeyFromUrl(page.url) !== norm(eventKey)) {
     return { status: 'UNEXPECTED_UI', page, detail: 'Exact authorized event key is absent from the current Cvent page' };
@@ -35,7 +37,7 @@ async function pageDisposition(ego, eventKey) {
 
 async function gotoAuthorized(ego, url, eventKey) {
   const parsed = new URL(url);
-  if (!parsed.hostname.toLowerCase().endsWith('cvent.com') || eventKeyFromUrl(url) !== norm(eventKey)) {
+  if (parsed.hostname.toLowerCase() !== 'app.cvent.com' || parsed.protocol !== 'https:' || parsed.username || parsed.password || (parsed.port && parsed.port !== '443') || eventKeyFromUrl(url) !== norm(eventKey)) {
     throw new Error('Trusted procedure refused a route outside the exact authorized event');
   }
   await ego.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
@@ -53,12 +55,19 @@ function exactRow(rows, code) {
   return matches.length === 1 ? { row: matches[0] } : { count: matches.length };
 }
 
-function safeDetailHref(row, eventKey, pathNeedle) {
+export function safeDetailHref(row, eventKey, pathNeedle) {
   const links = (row.links || []).filter(item => {
     try {
       const url = new URL(item.href);
-      return url.hostname.toLowerCase().endsWith('cvent.com') && eventKeyFromUrl(item.href) === norm(eventKey) &&
-        url.pathname.toLowerCase().includes(pathNeedle.toLowerCase());
+      const paths = {
+        admissionitem: /^\/subscribers\/events2\/agendaandfees\/admissionitemdetails(?:\/index(?:\/view)?)?\/?$/i,
+        registrationtype: /^\/subscribers\/events2\/details\/registrationtypedetail\/index\/view\/?$/i,
+      };
+      const idName = { admissionitem: 'prodstub', registrationtype: 'registrationtypestub' }[pathNeedle];
+      const ids = [...url.searchParams].filter(([name]) => name.toLowerCase() === idName).map(([, value]) => value.trim());
+      return ids.length === 1 && Boolean(ids[0]) && url.protocol === 'https:' && url.hostname.toLowerCase() === 'app.cvent.com' &&
+        !url.username && !url.password && (!url.port || url.port === '443') &&
+        eventKeyFromUrl(item.href) === norm(eventKey) && Boolean(paths[pathNeedle]?.test(url.pathname));
     } catch { return false; }
   });
   return links.length === 1 ? links[0].href : null;
@@ -269,13 +278,14 @@ async function configureAdmissionItems(ego, runtime, params) {
   return { procedure: 'configureAdmissionItems', status: failures.length ? failures[0].status : (mutationCount ? 'CONFIGURED' : 'ALREADY_CORRECT'), records, mutationCount, finalVerification: { rowCount: rows.length, exactCodes: params.records.map(item => ({ code: item.code, matches: exactRow(rows, item.code).row ? 1 : exactRow(rows, item.code).count || 0 })) } };
 }
 
-async function registrationFacts(ego, desired) {
+export async function registrationFacts(ego, desired) {
   const facts = await pageFacts(ego);
   const feePattern = desired.reprintFee == null ? null : new RegExp(`reprint fee:?\\s*\\$?${String(Number(desired.reprintFee)).replace('.', '\\.')}(?:\\.00)?(?:\\s|$)`, 'i');
   const result = {
-    active: desired.active === true,
+    active: textHasLabeledValue(facts.body, ['Active'], desired.active ? 'Yes' : 'No') ||
+      textHasLabeledValue(facts.body, ['Status'], desired.active ? 'Active' : 'Inactive'),
     name: norm(facts.title) === norm(desired.name) || textHasLabeledValue(facts.body, ['Name'], desired.name),
-    code: textHasLabeledValue(facts.body, ['Code'], desired.code) || norm(facts.body).includes(norm(desired.code)),
+    code: textHasLabeledValue(facts.body, ['Code', 'Registration Code'], desired.code),
     groupRegistration: desired.groupRegistration == null ? true : textHasLabeledValue(facts.body, ['Allow Group Registration?', 'Group Registration'], desired.groupRegistration ? 'Yes' : 'No'),
     reprintFee: desired.reprintFee == null ? true : textHasLabeledValue(facts.body, ['Reprint Fee'], String(desired.reprintFee)) || feePattern.test(String(facts.body)),
   };
@@ -321,7 +331,12 @@ async function configureRegistrationTypes(ego, runtime, params) {
     if (!observed.matches.name) planned.push({ field: 'name', marked: await markControl(ego, ['Name:', 'Name', 'Registration Type Name:', 'Registration Type Name']), value: desired.name });
     if (!observed.matches.groupRegistration) planned.push({ field: 'groupRegistration', marked: await markControl(ego, ['Allow Group Registration?:', 'Allow Group Registration?', 'Group Registration:', 'Group Registration']), value: desired.groupRegistration ? 'Yes' : 'No', option: true });
     if (!observed.matches.reprintFee) planned.push({ field: 'reprintFee', marked: await markControl(ego, ['Reprint Fee:', 'Reprint Fee']), value: desired.reprintFee });
-    const unavailable = planned.filter(change => !change.marked);
+    // Neither desired values nor incidental body substrings establish readback.
+    // No reviewed active/code editor exists here: stop before any field mutation.
+    const unavailable = [
+      ...planned.filter(change => !change.marked),
+      ...['active', 'code'].filter(field => !observed.matches[field]).map(field => ({ field })),
+    ];
     if (unavailable.length) {
       records.push({ reference: desired.code, status: 'CONTROL_NOT_FOUND', detail: `Trusted controls absent: ${unavailable.map(item => item.field).join(', ')}`, mismatches: observed.matches });
       disposition = await gotoAuthorized(ego, gridUrl, eventKey); rows = await gridRows(ego);

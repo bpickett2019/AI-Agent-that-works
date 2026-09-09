@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runTrustedCventProcedure } from './trusted_cvent_procedures.mjs';
 const argv=process.argv.slice(2);const arg=n=>argv[argv.indexOf(n)+1];
 const runtimePath=arg('--runtime');const operation=arg('--operation');const params=JSON.parse(arg('--params')||'{}');
-function output(value,ok=true){process.stdout.write('BROWSER_TOOL_RESULT='+JSON.stringify(ok?{ok:true,tool:'ego',operation,...value}:{ok:false,tool:'ego',operation,error:String(value)})+'\n')}
+function output(value,ok=true){return new Promise((resolve,reject)=>{process.stdout.write('BROWSER_TOOL_RESULT='+JSON.stringify(ok?{ok:true,tool:'ego',operation,...value}:{ok:false,tool:'ego',operation,error:String(value)})+'\n',error=>error?reject(error):resolve())})}
 function roleRequest(target){
   const match=String(target||'').match(/^role:([a-z][a-z0-9_-]*)\[name=(?:"([^"]+)"|'([^']+)'|([^\]]+))\]$/i);
   return match?{role:match[1].toLowerCase(),name:(match[2]??match[3]??match[4]??'').trim()}:null;
@@ -18,7 +18,7 @@ function writeSnapshotCache(value){
   const temporary=`${snapshotCachePath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,snapshotCachePath);fs.chmodSync(snapshotCachePath,0o600);
 }
 if(snapshotCachePath&&['click','activate','fill','type','navigate','selectOption','setChecked','press','drag','uploadDiscountImport','recover','openAuthorizedEvent','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
-if(!runtimePath||!operation){output('Explicit --runtime and --operation are required',false);process.exit(2)}
+if(!runtimePath||!operation){await output('Explicit --runtime and --operation are required',false);process.exit(2)}
 const runtime=JSON.parse(fs.readFileSync(runtimePath,'utf8'));
 const cdpOrigin=new URL(runtime.cdpHttpOrigin);process.env.EGO_BROWSER_CDP_HOST=cdpOrigin.hostname;process.env.EGO_BROWSER_CDP_PORT=cdpOrigin.port;
 try{
@@ -65,7 +65,18 @@ try{
       break;
     }
     case 'sectionState': {
-      result=await ego.evaluate(`(() => {const norm=v=>String(v||'').replace(/\\s+/g,' ').trim(),labelFor=element=>{const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return norm(element.getAttribute('aria-label')||label?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))},selectorFor=element=>element.id?'#'+CSS.escape(element.id):(element.getAttribute('name')?'[name="'+CSS.escape(element.getAttribute('name'))+'"]':null),rows=[...document.querySelectorAll('table tr,[role=row]')].slice(0,2000).map(row=>({text:norm(row.innerText||row.textContent).slice(0,5000),cells:[...row.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(cell=>norm(cell.innerText||cell.textContent).slice(0,2000)),links:[...row.querySelectorAll('a[href]')].map(link=>({text:norm(link.innerText||link.textContent).slice(0,1000),href:link.href})).slice(0,20)})).filter(row=>row.text),controls=[...document.querySelectorAll('input,select,textarea,[role=combobox]')].slice(0,500).map(element=>{const type=(element.getAttribute('type')||'').toLowerCase();return {selector:selectorFor(element),label:labelFor(element),type:type||element.tagName.toLowerCase(),value:type==='password'?null:('value' in element?String(element.value).slice(0,5000):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null,options:element.tagName==='SELECT'?[...element.options].map(option=>({label:norm(option.textContent),value:option.value,selected:option.selected})).slice(0,500):undefined}}),headings:[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(element=>norm(element.innerText||element.textContent)).filter(Boolean).slice(0,100),buttons:[...document.querySelectorAll('button,[role=button],input[type=submit]')].map(element=>({text:norm(element.innerText||element.value||element.getAttribute('aria-label')),disabled:Boolean(element.disabled)})).filter(item=>item.text).slice(0,200);return {url:location.href,title:document.title,rows,controls,headings,buttons}})()`);break;
+      if(params.domain==='pricing'){
+        // The planner SPA navigates before its fee tables render. Never turn a
+        // loading shell into a complete-but-empty RR reconciliation result.
+        let ready=false;
+        for(let attempt=0;attempt<60;attempt++){
+          ready=await ego.evaluate(`Boolean([...document.querySelectorAll('h1,h2,h3,[role=heading]')].some(element=>String(element.innerText||element.textContent||'').trim()==='Pricing')&&document.querySelector('table tr,[role=row]'))`);
+          if(ready)break;
+          await ego.waitForTimeout(500);
+        }
+        if(!ready)throw new Error('Pricing fee tables did not render; section state is unavailable, not empty');
+      }
+      result=await ego.evaluate(`(() => {const norm=v=>String(v||'').replace(/\\s+/g,' ').trim(),labelFor=element=>{const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return norm(element.getAttribute('aria-label')||label?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))},selectorFor=element=>element.id?'#'+CSS.escape(element.id):(element.getAttribute('name')?'[name="'+CSS.escape(element.getAttribute('name'))+'"]':null),rows=[...document.querySelectorAll('table tr,[role=row]')].slice(0,2000).map(row=>({text:norm(row.innerText||row.textContent).slice(0,5000),cells:[...row.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(cell=>norm(cell.innerText||cell.textContent).slice(0,2000)),links:[...row.querySelectorAll('a[href]')].map(link=>({text:norm(link.innerText||link.textContent).slice(0,1000),href:link.href})).slice(0,20)})).filter(row=>row.text),controls=[...document.querySelectorAll('input,select,textarea,[role=combobox]')].slice(0,500).map(element=>{const type=(element.getAttribute('type')||'').toLowerCase();return {selector:selectorFor(element),label:labelFor(element),type:type||element.tagName.toLowerCase(),value:type==='password'?null:('value' in element?String(element.value).slice(0,5000):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null,options:element.tagName==='SELECT'?[...element.options].map(option=>({label:norm(option.textContent),value:option.value,selected:option.selected})).slice(0,500):undefined}}),headings=[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(element=>norm(element.innerText||element.textContent)).filter(Boolean).slice(0,100),buttons=[...document.querySelectorAll('button,[role=button],input[type=submit]')].map(element=>({text:norm(element.innerText||element.value||element.getAttribute('aria-label')),disabled:Boolean(element.disabled)})).filter(item=>item.text).slice(0,200);return {url:location.href,title:document.title,rows,controls,headings,buttons}})()`);break;
     }
     case 'controlInventory': {
       const inventory=await ego.evaluate(`(() => {const controls=[],seen=new Set();const walk=(root,path)=>{for(const element of root.querySelectorAll('*')){if(element.shadowRoot)walk(element.shadowRoot,path+' > '+element.tagName.toLowerCase()+(element.id?'#'+element.id:''));if(!element.matches('a,button,input,select,textarea,[role],[contenteditable=true]')||seen.has(element))continue;seen.add(element);const type=(element.getAttribute('type')||'').toLowerCase();controls.push({path,tag:element.tagName,role:element.getAttribute('role'),text:(element.innerText||element.textContent||'').trim().slice(0,500),id:element.id||null,name:element.getAttribute('name'),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),testId:element.getAttribute('data-cvent-id')||element.getAttribute('data-testid'),href:element instanceof HTMLAnchorElement?element.href:null,type:type||null,value:type==='password'?null:('value' in element?String(element.value).slice(0,500):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null})}};walk(document,'document');return {url:location.href,title:document.title,controls}})()`);
@@ -162,5 +173,5 @@ try{
   const after=await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || (window.name.startsWith('cvent-runtime-') ? window.name : null)");
   if(after!==runtime.browserRuntimeId)throw new Error('Runtime marker changed after Ego action');
   const page=await ego.pageInfo();
-  output({marker:after,targetId:wanted,observedAt:new Date().toISOString(),page,...result});process.exit(0);
-}catch(e){output(e?.stack||e?.message||String(e),false);process.exit(1)}
+  await output({marker:after,targetId:wanted,observedAt:new Date().toISOString(),page,...result});process.exit(0);
+}catch(e){await output(e?.stack||e?.message||String(e),false);process.exit(1)}
