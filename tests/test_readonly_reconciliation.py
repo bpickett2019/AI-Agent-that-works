@@ -4,7 +4,8 @@ import hashlib
 import json
 import ast
 import __future__
-from unittest.mock import Mock
+import os
+from unittest.mock import Mock, patch
 from fastapi import HTTPException
 from browser_gate import BrowserGate
 import browser_tool
@@ -13,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from control_store import ControlStore
-from scripts.reconcile_registration_readonly import readonly_lease, verified_detail, READ_ACTIONS
+from scripts.reconcile_registration_readonly import readonly_lease, verified_detail, READ_ACTIONS, private_json
 
 
 class ReadonlyReconciliationTests(unittest.TestCase):
@@ -52,6 +53,15 @@ class ReadonlyReconciliationTests(unittest.TestCase):
                 with readonly_lease(self.store,self.job['id'],'event-one',slot):pass
         with self.assertRaisesRegex(RuntimeError,'binding mismatch'):
             with readonly_lease(self.store,self.job['id'],'another-event'):pass
+
+    def test_private_evidence_is_atomic_and_owned_by_the_workspace_owner(self):
+        path=Path(self.tmp.name)/'reader.json';owner=path.parent.stat()
+        with patch('scripts.reconcile_registration_readonly.os.chown',wraps=os.chown) as chown:
+            private_json(path,{'readOnly':True})
+            self.assertEqual(chown.call_args.args[1:],(owner.st_uid,owner.st_gid))
+        self.assertEqual(json.loads(path.read_text()),{'readOnly':True})
+        self.assertEqual(path.stat().st_mode & 0o777,0o600)
+        self.assertFalse(list(path.parent.glob('reader.json.*.tmp')))
 
     def test_dispatcher_cannot_mutate_or_save(self):
         self.assertTrue(READ_ACTIONS.isdisjoint({'click','activate','fill','type','setChecked','selectOption',

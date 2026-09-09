@@ -88,7 +88,13 @@ def verified_detail(row, key):
 
 
 def private_json(path, value):
-    path.write_text(json.dumps(value, indent=2)); path.chmod(0o600)
+    owner = path.parent.stat()
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    with temporary.open('x') as output:
+        json.dump(value, output, indent=2)
+    temporary.chmod(0o600)
+    os.chown(temporary, owner.st_uid, owner.st_gid)
+    temporary.replace(path)
 
 
 def main():
@@ -116,6 +122,8 @@ def main():
                  ('input.xlsx','rr-validation.json','expected-domains.json','configuration-plan.json',
                   'browser-mutation-uncertain.json','scope-write-audit.jsonl','browser-runtime.json')}
     folder = original/'reconciliation'/('atted-'+uuid.uuid4().hex[:12]); folder.mkdir(parents=True,mode=0o700)
+    owner = original.stat()
+    os.chown(folder, owner.st_uid, owner.st_gid)
     # Retain a write veto even though the dispatcher below only accepts reads.
     (folder/'browser-mutation-uncertain.json').write_bytes((original/'browser-mutation-uncertain.json').read_bytes())
     result = {'jobId':JOB_ID,'mode':'READ_ONLY','rrSha256':digest,'desired':wanted[0],
@@ -161,6 +169,11 @@ def main():
                 runtime['accessMode']='read_only_reconciliation'
                 private_json(folder/'browser-runtime.json',runtime)
                 BrowserGate(folder).initialize()
+                # The service must be able to read this runtime and lock its
+                # gate even when the operator coordinator was launched by root.
+                for file in folder.iterdir():
+                    if file.is_file() and not file.is_symlink():
+                        os.chown(file, owner.st_uid, owner.st_gid)
                 private_json(original/'read-only-reconciliation.json',{
                     'jobId':JOB_ID,'directory':folder.name,'browserRuntimeId':runtime['browserRuntimeId'],
                     'leaseFingerprint':hashlib.sha256(token.encode()).hexdigest()})
