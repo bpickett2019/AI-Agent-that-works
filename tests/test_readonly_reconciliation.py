@@ -71,6 +71,19 @@ class ReadonlyReconciliationTests(unittest.TestCase):
         self.assertIn("'readPaused':True",source)
         self.assertLess(source.index("'readPaused':True"),source.index("released=steel('release')"))
 
+    def test_active_readback_never_calls_a_configuration_operation(self):
+        source=(Path(__file__).resolve().parents[1]/'scripts/inspect_active_reconciliation.py').read_text()
+        tree=ast.parse(source)
+        calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='browser']
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIsInstance(call.args[0],ast.Constant)
+            self.assertIn(call.args[0].value,READ_ACTIONS)
+        self.assertIn('resolve_readonly_session(store,job,original)',source)
+        self.assertIn("gate['ownership']!='AGENT'",source)
+        self.assertIn("params.update(intent='read'",source)
+        self.assertNotIn("steel('ensure')",source)
+
     def test_dispatcher_cannot_mutate_or_save(self):
         self.assertTrue(READ_ACTIONS.isdisjoint({'click','activate','fill','type','setChecked','selectOption',
                                                'configureRegistrationTypes','configureAdmissionItems','save'}))

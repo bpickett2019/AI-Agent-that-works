@@ -188,7 +188,7 @@ const element=(overrides={})=>({id:'',tagName:'INPUT',isConnected:true,disabled:
  getAttribute:name=>({type:'text',name:'Name'})[name]??null,closest:()=>null,
  getBoundingClientRect:()=>({width:100,height:20}),setAttribute:()=>{},...overrides});
 const check=(element,style={display:'block',visibility:'visible'})=>markControl({evaluate:async code=>vm.runInNewContext(code,{
- document:{querySelectorAll:()=>[element]},getComputedStyle:()=>style})},['Name']);
+ document:{querySelectorAll:()=>[element],querySelector:()=>null},CSS:{escape:value=>value},getComputedStyle:()=>style})},['Name']);
 assert.ok(await check(element()));
 assert.equal(await check(element({readOnly:true})),null);
 assert.equal(await check(element({disabled:true})),null);
@@ -196,6 +196,14 @@ assert.equal(await check(element({getBoundingClientRect:()=>({width:0,height:0})
 assert.equal(await check(element(),{display:'none',visibility:'visible'}),null);
 assert.equal(await check(element(),{display:'block',visibility:'hidden'}),null);
 assert.equal(await check(element({getAttribute:name=>({type:'hidden',name:'Name'})[name]??null})),null);
+// Fresh ATTED readback: the only Name control is hidden #Name, not an editor.
+const liveAttedName=element({id:'Name',value:'Attendee | Educator',
+ getAttribute:name=>({type:'hidden',name:'Name'})[name]??null,
+ getBoundingClientRect:()=>({width:0,height:0})});
+const retiredPredicateAccepts=liveAttedName.isConnected&&!liveAttedName.disabled&&
+ ['name'].includes(liveAttedName.getAttribute('name').toLowerCase());
+assert.equal(retiredPredicateAccepts,true);
+assert.equal(await check(liveAttedName),null);
 """)
 
     def test_reviewed_or_unread_domains_do_not_appear_completed(self):
