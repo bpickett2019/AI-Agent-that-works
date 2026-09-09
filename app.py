@@ -93,7 +93,13 @@ def directory_for(job: dict) -> Path:
 
 
 def active_job(job: dict):
-    return runner.active(job["id"])
+    from readonly_session import resolve_readonly_session
+    return runner.active(job["id"]) or resolve_readonly_session(store, job, directory_for(job))
+
+
+def browser_directory_for(job: dict) -> Path:
+    active = active_job(job)
+    return active.runtime_dir if getattr(active, "read_only", False) else directory_for(job)
 
 
 def verified_auth_metadata(job: dict, slot_id: int) -> dict:
@@ -322,8 +328,11 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     state["automation_scope"] = scope_summary()
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)
-    state["browser_gate"] = BrowserGate(directory).read()
+    state["browser_gate"] = BrowserGate(browser_directory_for(job)).read()
     active = active_job(job)
+    if getattr(active, "read_only", False):
+        state["current_action"] = "READ-ONLY ATTED reconciliation: refresh login if needed, then Return to Agent; no configuration writes are enabled"
+        state["read_only_reconciliation"] = True
     state["agent_process_running"] = bool(active and active.process and active.process.poll() is None)
     state["agent_pid"] = active.process.pid if state["agent_process_running"] else None
     state["agent_session_saved"] = bool(state.get("pi_session"))
@@ -424,7 +433,7 @@ def save_auth_settings(request: Request, job_id: str | None = None):
     """Compatibility endpoint; normal UX persists automatically on Return."""
     identity = current_user(request, mutate=True)
     job, active = require_active(identity, authorize_job(identity, job_id)["id"])
-    directory = directory_for(job)
+    directory = browser_directory_for(job)
     try:
         metadata, _ = verify_authenticated_cvent(job, active, directory)
     except Exception as exc:
@@ -483,6 +492,10 @@ def continue_job(request: Request, job_id: str | None = None):
 def stop_agent(request: Request, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
+    active = active_job(job)
+    if getattr(active, "read_only", False):
+        atomic_json(active.runtime_dir / "stop-requested.json", {"at": now()})
+        return {"ok": True, "stopping": True, "readOnly": True}
     try:
         runner.stop(job["id"], identity["subject"], uncertain=job["state"] in ACTIVE_STATES)
     except ValueError as exc:
@@ -505,7 +518,7 @@ def open_browser(request: Request, job_id: str | None = None):
     active = active_job(job)
     if not active:
         raise HTTPException(409, "Start or continue the job to acquire an isolated browser worker")
-    runtime_path = directory_for(job) / "browser-runtime.json"
+    runtime_path = browser_directory_for(job) / "browser-runtime.json"
     if not runtime_path.exists():
         return {"running": False, "starting": True, "worker_slot": active.slot_id}
     runtime = load_browser_runtime(runtime_path)
@@ -561,7 +574,7 @@ async def steel_websocket_proxy(websocket: WebSocket, job_id: str, path: str):
     upstream_url = f"ws://127.0.0.1:{slot.api_port}/{path}"
     if websocket.url.query:
         upstream_url += "?" + websocket.url.query
-    gate = BrowserGate(directory_for(authorize_job(identity, job_id)))
+    gate = BrowserGate(browser_directory_for(authorize_job(identity, job_id)))
     await websocket.accept()
     try:
         async with websockets.connect(upstream_url, origin=slot.api_origin, max_size=16 * 1024 * 1024) as upstream:
@@ -603,7 +616,7 @@ async def steel_websocket_proxy(websocket: WebSocket, job_id: str, path: str):
 def browser_ownership(request: Request, job_id: str | None = None):
     identity = current_user(request)
     job = authorize_job(identity, job_id)
-    return JSONResponse(BrowserGate(directory_for(job)).read(), headers={"Cache-Control": "no-store"})
+    return JSONResponse(BrowserGate(browser_directory_for(job)).read(), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/browser/take-control")
@@ -611,6 +624,14 @@ def take_control(request: Request, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
     active = active_job(job)
+    if getattr(active, "read_only", False):
+        gate = BrowserGate(active.runtime_dir)
+        gate.request_user()
+        with gate.lock_file():
+            value = gate.read()
+            value.update({"ownership": "USER", "desiredOwnership": "USER", "activeActor": "USER", "agentPaused": True})
+            gate.write(value)
+        return {"ok": True, "gate": gate.read(), "readOnly": True}
     if not active or not active.process or active.process.poll() is not None:
         raise HTTPException(409, "CVENT Agent is not actively running")
     runtime = load_browser_runtime(directory_for(job) / "browser-runtime.json")
@@ -634,9 +655,26 @@ def take_control(request: Request, job_id: str | None = None):
 def return_to_agent(request: Request, job_id: str | None = None):
     identity = current_user(request, mutate=True)
     job = authorize_job(identity, job_id)
-    directory = directory_for(job)
+    directory = browser_directory_for(job)
     gate = BrowserGate(directory)
     active = active_job(job)
+    if getattr(active, "read_only", False):
+        gate.shield_agent()
+        with gate.lock_file():
+            try:
+                metadata, evidence = verify_authenticated_cvent(job, active, directory)
+                persist_authenticated_cvent(job, directory, metadata)
+                atomic_json(directory / "human-handoff-state.json", evidence)
+                value = gate.read()
+                value.update({"ownership": "AGENT", "desiredOwnership": "AGENT", "activeActor": "NONE", "automationOwner": "PI_EGO", "agentPaused": False})
+                gate.write(value)
+            except Exception as exc:
+                value = gate.read()
+                value.update({"ownership": "USER", "desiredOwnership": "USER", "activeActor": "USER", "agentPaused": True})
+                gate.write(value)
+                raise HTTPException(409, "Complete Cvent SSO/MFA before returning the read-only browser") from exc
+        store.audit(identity["subject"], "reconciliation.login_verified", job["id"], {"readOnly": True})
+        return {"ok": True, "verified": True, "worker_slot": 1, "readOnly": True, "gate": gate.read()}
     if not active or not active.process or active.process.poll() is not None:
         # A prior login handoff may outlive its worker. There is no process or
         # live browser to resume, so clear only this stale gate and require a

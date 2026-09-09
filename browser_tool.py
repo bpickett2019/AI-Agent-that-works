@@ -67,6 +67,10 @@ def assert_safe_write_target(operation,params,descriptor):
         raise RuntimeError('Write blocked: attendee/contact and communications areas are protected')
 
 def guard(runtime,operation,params):
+    if runtime.get('accessMode')=='read_only_reconciliation':
+        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','controlInventory','readTarget','recover','wait','scroll'}
+        if params.get('intent')=='write' or operation not in readonly:
+            raise RuntimeError('Read-only reconciliation cannot dispatch configuration writes')
     current=local_probe(runtime);lock=target_lock()
     locked=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
     valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId']) and lock.get('browser_runtime_id')==runtime.get('browserRuntimeId')
