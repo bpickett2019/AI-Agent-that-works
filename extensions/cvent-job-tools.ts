@@ -106,7 +106,7 @@ function safeChildEnvironment(kind: "browser" | "prepare"): NodeJS.ProcessEnv {
   environment.CVENT_REPO_ROOT = repoRoot;
   environment.CVENT_JOB_DIR = jobDir;
   for (const name of [
-    "CVENT_ENV", "CVENT_JOB_ID", "CVENT_WORKSPACE_ID", "CVENT_WORKER_SLOT",
+    "CVENT_ENV", "CVENT_DATA_ROOT", "CVENT_JOB_ID", "CVENT_WORKSPACE_ID", "CVENT_WORKER_SLOT",
     "CVENT_STEEL_API_ORIGIN", "CVENT_CDP_ORIGIN", "CVENT_AUTHORIZED_EVENT_ID",
     "CVENT_AUTHORIZED_EVENT_NAME", "CVENT_AUTHORIZED_EVENT_KEY", "CVENT_AUTHORIZED_EVENT_CODE",
   ]) if (process.env[name]) environment[name] = process.env[name];

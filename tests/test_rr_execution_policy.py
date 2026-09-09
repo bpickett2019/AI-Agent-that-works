@@ -25,6 +25,28 @@ class RRExecutionPolicyTests(unittest.TestCase):
                 browser_tool.validate_trusted_procedure('configureRegistrationTypes',
                     dict(params, records=[dict(record, groupRegistration=invalid)]))
 
+    def test_browser_child_keeps_profile_root_without_inheriting_secrets(self):
+        self.node(r"""
+import fs from 'node:fs';
+import {stripTypeScriptTypes} from 'node:module';
+import assert from 'node:assert/strict';
+const src=fs.readFileSync('extensions/cvent-job-tools.ts','utf8');
+const block=src.slice(src.indexOf('function safeChildEnvironment('),src.indexOf('function runFixed('));
+const env={CVENT_DATA_ROOT:'/var/lib/cvent-agent',CVENT_WORKSPACE_ID:'ws_one',CVENT_WORKER_SLOT:'1',
+ CVENT_LEASE_VALIDATE_URL:'http://127.0.0.1/validate',CVENT_LEASE_TOKEN:'test-lease',
+ ANTHROPIC_API_KEY:'must-not-inherit',CVENT_SESSION_SECRET:'must-not-inherit'};
+const child=new Function('process','repoRoot','jobDir','requiredEnvironment',stripTypeScriptTypes(block)+';return safeChildEnvironment;')(
+ {env},'/opt/release','/var/lib/cvent-agent/workspaces/ws_one/jobs/job_one',name=>env[name]);
+assert.equal(child('browser').CVENT_DATA_ROOT,'/var/lib/cvent-agent');
+assert.equal(child('browser').CVENT_WORKSPACE_ID,'ws_one');
+assert.equal(child('browser').CVENT_LEASE_TOKEN,'test-lease');
+assert.equal(child('prepare').CVENT_LEASE_TOKEN,undefined);
+for(const kind of ['browser','prepare']){
+ assert.equal(child(kind).ANTHROPIC_API_KEY,undefined);
+ assert.equal(child(kind).CVENT_SESSION_SECRET,undefined);
+}
+""")
+
     def test_event_titles_and_names_are_immutable(self):
         for label in ('Event Title', 'Event Name', 'Event Code', 'EventTitle', 'event_title'):
             with self.assertRaisesRegex(RuntimeError, 'identity is immutable'):

@@ -186,7 +186,7 @@ class JobRunner:
         slot = slot_by_id(slot_id)
         environment = os.environ.copy()
         environment.update({
-            "CVENT_REPO_ROOT": str(ROOT), "CVENT_JOB_DIR": str(directory), "CVENT_JOB_ID": job["id"],
+            "CVENT_REPO_ROOT": str(ROOT), "CVENT_DATA_ROOT": str(DATA_ROOT), "CVENT_JOB_DIR": str(directory), "CVENT_JOB_ID": job["id"],
             "CVENT_WORKSPACE_ID": job["workspace_id"], "CVENT_WORKER_SLOT": str(slot_id),
             "CVENT_BROWSER_PROFILE_DIR": str(browser_profile_dir(job["workspace_id"], slot_id)),
             "CVENT_BROWSER_CACHE_DIR": str(browser_cache_dir(job["workspace_id"], slot_id)),
