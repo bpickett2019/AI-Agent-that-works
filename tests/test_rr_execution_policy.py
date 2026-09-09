@@ -25,6 +25,14 @@ class RRExecutionPolicyTests(unittest.TestCase):
                 browser_tool.validate_trusted_procedure('configureRegistrationTypes',
                     dict(params, records=[dict(record, groupRegistration=invalid)]))
 
+    def test_event_titles_and_names_are_immutable(self):
+        for label in ('Event Title', 'Event Name', 'Event Code', 'EventTitle', 'event_title'):
+            with self.assertRaisesRegex(RuntimeError, 'identity is immutable'):
+                browser_tool.assert_safe_write_target('fill', {}, {'role':'textbox', 'label':label})
+        with self.assertRaisesRegex(RuntimeError, 'identity is immutable'):
+            browser_tool.assert_safe_write_target('fill', {'target':'#EventTitle'}, {'role':'textbox'})
+        browser_tool.assert_safe_write_target('fill', {}, {'role':'textbox', 'label':'Admission Item Name'})
+
     def test_event_query_alias_conflicts_fail_closed(self):
         base = 'https://app.cvent.com/item?evtStub=selected'
         self.assertEqual(browser_tool.event_key(base), 'selected')

@@ -51,7 +51,7 @@ def assert_event_lease(runtime):
     if not lease_is_valid(url,job_id,token,event_id):raise RuntimeError('Write blocked: canonical event lease is absent, stale, mismatched, or owned by another job')
 PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?|account(?:settings)?|organization|admin|global|library|profiles?)(?:/|$)',re.I)
 PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
-PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|code)|evtstub|eventid)',re.I)
+PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|title|code)|evtstub|eventid)',re.I)
 
 def assert_safe_write_target(operation,params,descriptor):
     target=str(params.get('target','')).strip()
