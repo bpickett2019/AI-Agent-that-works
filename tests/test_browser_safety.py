@@ -356,6 +356,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('snapshotCacheHit',EGO_DIRECT)
         self.assertIn('MutationObserver',EGO_DIRECT)
         self.assertIn('fallbackUsed',EGO_DIRECT)
+        self.assertIn('navigationTarget:{name:chosen.name,code:chosen.code,status:chosen.status,href:chosen.href',EGO_DIRECT)
         self.assertIn("ego.setInputFiles(params.target,params.filePath)",EGO_DIRECT)
         self.assertIn('params.artifact = "discount-import.xlsx"',extension)
         self.assertNotIn('name: "cvent_configure"',extension)
