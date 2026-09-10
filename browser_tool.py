@@ -28,8 +28,10 @@ def target_lock():
 def selected_event_inventory():
     try:return json.loads((CURRENT/'selected-event-inventory.json').read_text())
     except Exception:return {}
+def canonical_lifecycle_status(value):
+    return re.sub(r'\s+',' ',str(value or '').strip().lower())
 def writable_event_statuses():
-    values={value.strip().lower() for value in os.environ.get('CVENT_WRITABLE_EVENT_STATUSES','draft').split(',') if value.strip()}
+    values={canonical_lifecycle_status(value) for value in os.environ.get('CVENT_WRITABLE_EVENT_STATUSES','draft,active,open,completed').split(',') if value.strip()}
     if not values:raise RuntimeError('Write blocked: product policy defines no writable Cvent event statuses')
     return values
 def atomic_private_json(path,value):
@@ -109,7 +111,7 @@ def guard(runtime,operation,params):
             raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
         if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
             raise RuntimeError('Write blocked: visible event key does not match the server-authorized event')
-        status=str(lock.get('event_status') or '').strip().lower()
+        status=canonical_lifecycle_status(lock.get('event_status'))
         if status not in writable_event_statuses():
             raise RuntimeError(f'Write blocked: selected event lifecycle status {status or "UNPROVEN"} is not writable under approved product policy')
         assert_event_lease(runtime)

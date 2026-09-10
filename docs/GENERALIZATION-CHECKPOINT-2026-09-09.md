@@ -43,10 +43,12 @@ Current event findings are test evidence, not defaults:
 Event inventory status is now application evidence. `openAuthorizedEvent`
 retains the exact row's status; `authorizeTarget` binds that status into the
 runtime target lock; every write checks it against
-`CVENT_WRITABLE_EVENT_STATUSES`. The approved default remains `draft`.
-Completed is therefore read-only under current product policy. Supporting a
-Completed event requires an explicit policy decision/configuration change, not
-a browser workaround or lifecycle mutation.
+`CVENT_WRITABLE_EVENT_STATUSES`. The initial checkpoint defaulted to `draft`.
+The subsequent product decision explicitly allows `draft`, `active`, `open`,
+and `completed`, provided each trusted procedure independently proves its
+requested event-local controls are currently editable. Cancelled, canceled,
+archived, and unknown labels fail closed. No procedure may change lifecycle to
+proceed.
 
 ## Remaining capability gaps
 

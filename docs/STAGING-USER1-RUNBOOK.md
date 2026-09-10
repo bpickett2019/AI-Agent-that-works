@@ -45,7 +45,7 @@ normal tester workflow and SSH remains restricted to the operator source IP.
 
 1. Open Forge at the URL supplied by the operator.
 2. Confirm the header says **RESTRICTED STAGING ACCESS** and select **USER 1**.
-3. Enter/select the exact operator-authorized Draft/unpublished Cvent event.
+3. Enter/select the exact operator-authorized existing Cvent event. Inventory must prove its canonical identity and lifecycle. Draft, Active/Open, and Completed may proceed only when Cvent exposes the requested event-local controls as editable; Cancelled/Archived/unknown locked statuses fail closed. Never change lifecycle to proceed.
 4. Upload the approved `.xlsx` RR workbook.
 5. Start the build.
 6. If Forge says login is required, click **TAKE CONTROL**.

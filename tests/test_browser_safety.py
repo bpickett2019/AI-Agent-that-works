@@ -151,13 +151,19 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
 
-    def test_completed_event_is_explicitly_blocked_by_default_product_policy(self):
+    def test_lifecycle_policy_allows_configurable_statuses_and_blocks_locked_or_unknown(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
+        for status in ('Draft','Active','Open','Completed'):
+            self.write_lock(status)
+            browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
+        for status in ('Cancelled','Canceled','Archived','Lifecycle Surprise'):
+            self.write_lock(status)
+            with self.assertRaisesRegex(RuntimeError,'not writable under approved product policy'):
+                browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
         self.write_lock('Completed')
-        with self.assertRaisesRegex(RuntimeError,'completed.*not writable under approved product policy'):
-            browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
-        with patch.dict(os.environ,{'CVENT_WRITABLE_EVENT_STATUSES':'draft,completed'}):
-            browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
+        with patch.dict(os.environ,{'CVENT_WRITABLE_EVENT_STATUSES':'draft'}):
+            with self.assertRaisesRegex(RuntimeError,'completed.*not writable'):
+                browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
     def test_uncertain_mutation_blocks_automatic_replay(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
         self.write_lock()

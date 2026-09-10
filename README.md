@@ -34,11 +34,10 @@ python3 -m uvicorn app:app --host 127.0.0.1 --port 8877
 Open <http://127.0.0.1:8877>. Docker must be running. Local development auth is
 explicit and cannot activate when `CVENT_ENV=production`.
 
-The default server allowlist contains only the unpublished protected event
-`(C+D) Medtrade Testing Clone 2`, event key
-`e712e34c-6117-4d13-bf4c-8ed54cf2b495`. Additional test events must be supplied
-through the deployment's server-side allowlist and explicitly authorized; RR
-uploads never choose or authorize arbitrary Cvent targets.
+Development uses a non-Cvent placeholder allowlist entry. Staging and production
+must receive explicitly authorized existing events through the deployment's
+server-side allowlist; RR uploads never choose or authorize arbitrary Cvent
+targets.
 
 ## Safety model
 
@@ -48,8 +47,9 @@ scope IDs. Immediately before every write, `browser_tool.py` verifies:
 
 1. the per-job BrowserActionGate is agent-owned;
 2. the canonical event lease exists, is unexpired, and belongs to this job/token;
-3. runtime, authorized-target, and live-page event identities match;
-4. the target is not a protected publish, communication-send, attendee/contact,
+3. runtime, authorized-target, live-page event identity, and observed lifecycle match;
+4. the lifecycle label is explicitly allowed and the requested event-local controls are visibly editable;
+5. the target is not a protected publish, communication-send, attendee/contact,
    delete/archive, event-identity, or account-global action.
 
 Only Ego direct in the job's canonical Steel Chromium may automate Cvent. The

@@ -31,7 +31,7 @@ TARGET = {
     "eventCode": os.environ.get("CVENT_AUTHORIZED_EVENT_CODE", ""),
     "lifecyclePolicy": {
         "mustPreserveObservedStatus": True,
-        "writableStatuses": [value.strip() for value in os.environ.get("CVENT_WRITABLE_EVENT_STATUSES", "draft").split(",") if value.strip()],
+        "writableStatuses": [value.strip() for value in os.environ.get("CVENT_WRITABLE_EVENT_STATUSES", "draft,active,open,completed").split(",") if value.strip()],
     },
 }
 
@@ -551,7 +551,7 @@ try:
         "communications": {"requirements": communication_requirements, "constraint": "Event-scoped templates and triggered-confirmation settings may be configured; never manually send, test-send, schedule a blast, or access recipients."},
         "badges_onsite": {"badgeRequirements": badge_requirements, "scanAndGoText": scan_go_requirements},
         "associations": {"approvalRequirements": approval_requirements},
-        "final_qa": {"checks": ["selected event identity unchanged", "event remains unpublished", "all RR-requested event configuration reread", "no unintended duplicates", "no communications sent", "no attendee/contact access"]},
+        "final_qa": {"checks": ["selected event identity and lifecycle unchanged", "all RR-requested event configuration reread", "no unintended duplicates", "no communications sent", "no attendee/contact access"]},
     }
 
     def count_fields(item):
