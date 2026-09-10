@@ -897,7 +897,13 @@ export default function cventJobTools(pi: any) {
         let host = "";
         try { host = new URL(pageUrl).hostname.toLowerCase(); } catch { /* fixed navigation below */ }
         const recognizedLoginHost = host.endsWith("cvent.com") || host.includes("microsoftonline.com") || host.includes("login.windows.net") || host.includes("login.live.com");
-        if (!pageUrl || pageUrl === "about:blank" || !recognizedLoginHost) {
+        let modernPageOutsideAuthorizedEvent = false;
+        try {
+          const parsed = new URL(pageUrl);
+          const key = (parsed.searchParams.get("evtstub") ?? parsed.searchParams.get("eventid") ?? parsed.searchParams.get("event") ?? "").toLowerCase();
+          modernPageOutsideAuthorizedEvent = host === "events.app.cvent.com" && key !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY").toLowerCase();
+        } catch { /* fixed navigation below */ }
+        if (!pageUrl || pageUrl === "about:blank" || !recognizedLoginHost || modernPageOutsideAuthorizedEvent) {
           await invokeBrowser("navigate", { intent: "read", url: "https://app.cvent.com/subscribers/default.aspx" }, signal, 60);
           pageResult = await invokeBrowser("pageInfo", { intent: "read" }, signal, 45);
           pageUrl = String(pageResult?.page?.url ?? "");

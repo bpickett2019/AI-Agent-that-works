@@ -385,6 +385,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('name: "bash"',extension)
         self.assertNotIn('name: "read"',extension)
         self.assertIn('name: "cvent_login_handoff"',extension)
+        self.assertIn('modernPageOutsideAuthorizedEvent',extension)
         self.assertIn('https://app.cvent.com/subscribers/default.aspx',extension)
         self.assertIn('await invokeBrowser("pageInfo"',extension)
         ui=(ROOT/'templates/index.html').read_text()
