@@ -59,9 +59,8 @@ try{
       break;
     }
     case 'readTarget': {
-      const locator=ego.locator(params.target);
-      const optional=async(fn)=>{try{return await fn()}catch{return null}};
-      result={target:params.target,text:await optional(()=>locator.innerText()),value:await optional(()=>locator.inputValue()),checked:await optional(()=>locator.isChecked()),enabled:await optional(()=>locator.isEnabled()),visible:await optional(()=>locator.isVisible())};
+      const state=await ego.evaluateLocator(params.target,(element)=>{const rect=element.getBoundingClientRect(),style=getComputedStyle(element),type=(element.getAttribute('type')||'').toLowerCase();return {text:(element.innerText||element.textContent||'').trim(),value:type==='password'?null:('value' in element?String(element.value):null),checked:'checked' in element?Boolean(element.checked):null,enabled:!(('disabled' in element&&element.disabled)||element.getAttribute('aria-disabled')==='true'),visible:element.isConnected&&rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'}});
+      result={target:params.target,...state};
       break;
     }
     case 'sectionState': {

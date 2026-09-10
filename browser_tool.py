@@ -124,6 +124,8 @@ def guard(runtime,operation,params):
         if re.search(r'/(account|organization|admin|global)(/|$)',parsed.path,re.I):raise RuntimeError('Navigation to account-global Cvent settings is blocked')
         if PROTECTED_PAGE.search(parsed.path):raise RuntimeError('Navigation to attendee/contact and communications areas is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
+        if valid_lock and not key and '/events2/eventselection' not in parsed.path.lower():
+            raise RuntimeError('Navigation outside the exact authorized event context is blocked')
     return current
 def supported_authenticated_origin(runtime,url):
     parsed=urlparse(url);host=(parsed.hostname or '').lower()
@@ -257,7 +259,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         is_write=params.get('intent')=='write'
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
-        if params.get('target') and operation in {'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}:
+        if params.get('target') and operation in {'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','readTarget'}:
             params=preflight_action_target(runtime_path,operation,params)
         if is_write:
             if operation=='uploadDiscountImport':params['filePath']=str(fixed_upload_artifact(params))

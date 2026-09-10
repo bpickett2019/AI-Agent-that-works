@@ -586,7 +586,7 @@ function pageArrays(value: any, offset: number, limit: number): any {
 const optionalStrings = Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 200 }));
 const browserActionFields = {
   intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
-  target: Type.Optional(Type.String({ maxLength: 4000 })),
+  target: Type.Optional(Type.String({ maxLength: 4000, description: 'An exact target: role:<role>[name="<exact accessible name>"] or a stable CSS selector returned by controlInventory. Never use XPath-style text(), a bare element type, or snapshot prose such as menuitem "Details".' })),
   targetContext: Type.Optional(Type.String({ maxLength: 1000 })),
   targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
   text: Type.Optional(Type.String({ maxLength: 20000 })),
@@ -1032,7 +1032,7 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_ego_actions",
     label: "Execute adaptive Ego actions",
-    description: "Execute one model-planned, bounded sequence of ordinary Ego browser actions against the exact authorized event. Use after inspecting the live UI to group an editor's clicks/fills/selects/checks/Save and readback without a Claude round-trip per primitive. Safety, lease, lifecycle, target preflight, write audit, uncertainty, and protected-action blocks apply to every step. Specialized section procedures are optional optimizations, not prerequisites.",
+    description: "Execute one model-planned, bounded sequence of ordinary Ego browser actions against the exact authorized event. Use exact role:<role>[name=\"<accessible name>\"] targets or stable CSS from controlInventory. Entering a section or edit mode is a read_only mission; changing configuration is a save/autosave mission. A save mission must include the actual explicit Save click/press followed by readback—not merely an Edit click. Group an editor's actions without a Claude round-trip per primitive. Safety, lease, lifecycle, target preflight, write audit, uncertainty, and protected-action blocks apply to every step. Specialized section procedures are optional optimizations, not prerequisites.",
     parameters: Type.Object({
       domain: literalUnion(DOMAIN_NAMES),
       objective: Type.String({ minLength: 1, maxLength: 1200 }),

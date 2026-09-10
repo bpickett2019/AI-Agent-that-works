@@ -291,6 +291,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/subscribers/events2/EventSelection'}
         with self.assertRaisesRegex(RuntimeError,'non-authorized'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/event?evtstub=other','intent':'read'})
+        self.write_lock('Completed')
+        with self.assertRaisesRegex(RuntimeError,'outside the exact authorized event context'):
+            browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/home','intent':'read'})
+        browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/details?evtstub=locked','intent':'read'})
         with self.assertRaisesRegex(RuntimeError,'account-global'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/account/settings','intent':'read'})
         with self.assertRaisesRegex(RuntimeError,'attendee/contact'):
@@ -356,6 +360,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('snapshotCacheHit',EGO_DIRECT)
         self.assertIn('MutationObserver',EGO_DIRECT)
         self.assertIn('fallbackUsed',EGO_DIRECT)
+        self.assertNotIn('ego.locator(',EGO_DIRECT)
+        self.assertIn("case 'readTarget'",EGO_DIRECT)
         self.assertIn('navigationTarget:{name:chosen.name,code:chosen.code,status:chosen.status,href:chosen.href',EGO_DIRECT)
         self.assertIn("ego.setInputFiles(params.target,params.filePath)",EGO_DIRECT)
         self.assertIn('params.artifact = "discount-import.xlsx"',extension)
@@ -390,8 +396,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('use `cvent_login_handoff` for human SSO/MFA',SKILL)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
-        self.assertIn('`scanEventList` and `openAuthorizedEvent`',PROMPT)
+        self.assertIn('`scanEventList` → successful `openAuthorizedEvent` → `authorizeTarget`',PROMPT)
         self.assertIn('Require exactly one exact name/key match',PROMPT)
+        self.assertIn('role:button[name="Edit"]',PROMPT)
+        self.assertIn('an Edit click alone is not a save mission',PROMPT)
 
 class BrowserGateTests(unittest.TestCase):
     def setUp(self):
