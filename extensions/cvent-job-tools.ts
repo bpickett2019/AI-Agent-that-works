@@ -8,7 +8,8 @@ const BROWSER_OPERATION_NAMES = [
   "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport",
 ];
-const PI_BROWSER_OPERATION_NAMES = ["probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "controlInventory", "pageInfo", "scanEventList"];
+const PI_BROWSER_OPERATION_NAMES = BROWSER_OPERATION_NAMES;
+const EGO_ACTION_OPERATIONS = ["pageInfo", "snapshotText", "readTarget", "sectionState", "controlInventory", "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport"] as const;
 const TRUSTED_SECTION_PROCEDURES: Record<string, string> = {
   admission_items: "configureAdmissionItems", registration_types: "configureRegistrationTypes",
 };
@@ -42,7 +43,7 @@ const ARTIFACTS: Record<string, string> = {
 };
 const ALLOWED_TOOLS = new Set([
   "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section",
+  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_ego_actions", "cvent_section_state", "cvent_execute_section",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
@@ -108,7 +109,7 @@ function safeChildEnvironment(kind: "browser" | "prepare"): NodeJS.ProcessEnv {
   for (const name of [
     "CVENT_ENV", "CVENT_DATA_ROOT", "CVENT_JOB_ID", "CVENT_WORKSPACE_ID", "CVENT_WORKER_SLOT",
     "CVENT_STEEL_API_ORIGIN", "CVENT_CDP_ORIGIN", "CVENT_AUTHORIZED_EVENT_ID",
-    "CVENT_AUTHORIZED_EVENT_NAME", "CVENT_AUTHORIZED_EVENT_KEY", "CVENT_AUTHORIZED_EVENT_CODE",
+    "CVENT_AUTHORIZED_EVENT_NAME", "CVENT_AUTHORIZED_EVENT_KEY", "CVENT_AUTHORIZED_EVENT_CODE", "CVENT_WRITABLE_EVENT_STATUSES",
   ]) if (process.env[name]) environment[name] = process.env[name];
   if (kind === "browser") {
     environment.CVENT_LEASE_VALIDATE_URL = requiredEnvironment("CVENT_LEASE_VALIDATE_URL");
@@ -471,6 +472,18 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
   return params;
 }
 
+function validateGeneralBrowserAction(operation: string, params: any): void {
+  if (!BROWSER_OPERATIONS.has(operation)) throw new Error("Capability denied: browser operation is not approved");
+  if (!new Set(["read", "write"]).has(params.intent)) throw new Error("Capability denied: explicit read or write intent is required");
+  if (READ_ONLY_OPERATIONS.has(operation) && params.intent !== "read") throw new Error(`${operation} is a read-only capability`);
+  if (["fill", "type", "selectOption", "setChecked", "drag", "uploadDiscountImport"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
+  if (operation === "press" && !ALLOWED_KEYS.has(String(params.key))) throw new Error("Capability denied: keyboard key is not approved");
+  if (operation === "press" && ["Backspace", "Delete"].includes(String(params.key)) && params.intent !== "write") throw new Error(`${params.key} requires write intent`);
+  if (operation === "selectOption" && !["label", "value", undefined].includes(params.optionBy)) throw new Error("Capability denied: optionBy must be label or value");
+  if (operation === "drag" && !params.destination) throw new Error("Capability denied: drag destination is required");
+  if (params.intent === "write" && !cleanText(params.rrSource, 500)) throw new Error("Dynamic Cvent writes require verified RR source evidence");
+}
+
 function utf8Chunks(text: string, maxBytes: number): string[] {
   const chunks: string[] = [];
   let current = "";
@@ -571,6 +584,27 @@ function pageArrays(value: any, offset: number, limit: number): any {
 }
 
 const optionalStrings = Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 200 }));
+const browserActionFields = {
+  intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
+  target: Type.Optional(Type.String({ maxLength: 4000 })),
+  targetContext: Type.Optional(Type.String({ maxLength: 1000 })),
+  targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
+  text: Type.Optional(Type.String({ maxLength: 20000 })),
+  option: Type.Optional(Type.String({ maxLength: 2000 })),
+  optionBy: Type.Optional(Type.Union([Type.Literal("label"), Type.Literal("value")])),
+  checked: Type.Optional(Type.Boolean()),
+  key: Type.Optional(literalUnion([...ALLOWED_KEYS])),
+  destination: Type.Optional(Type.String({ maxLength: 4000 })),
+  url: Type.Optional(Type.String({ maxLength: 8000 })),
+  loadState: Type.Optional(Type.Union([Type.Literal("load"), Type.Literal("domcontentloaded"), Type.Literal("networkidle")])),
+  deltaY: Type.Optional(Type.Integer({ minimum: -10000, maximum: 10000 })),
+  settleMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 5000 })),
+  ms: Type.Optional(Type.Integer({ minimum: 50, maximum: 30000 })),
+  domain: Type.Optional(literalUnion(DOMAIN_NAMES)),
+  rrSource: Type.Optional(Type.String({ maxLength: 500 })),
+  timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
+};
+const egoActionSchema = Type.Object({ operation: literalUnion(EGO_ACTION_OPERATIONS), ...browserActionFields });
 
 export default function cventJobTools(pi: any) {
   let turnStarted = 0;
@@ -996,25 +1030,73 @@ export default function cventJobTools(pi: any) {
   });
 
   pi.registerTool({
+    name: "cvent_ego_actions",
+    label: "Execute adaptive Ego actions",
+    description: "Execute one model-planned, bounded sequence of ordinary Ego browser actions against the exact authorized event. Use after inspecting the live UI to group an editor's clicks/fills/selects/checks/Save and readback without a Claude round-trip per primitive. Safety, lease, lifecycle, target preflight, write audit, uncertainty, and protected-action blocks apply to every step. Specialized section procedures are optional optimizations, not prerequisites.",
+    parameters: Type.Object({
+      domain: literalUnion(DOMAIN_NAMES),
+      objective: Type.String({ minLength: 1, maxLength: 1200 }),
+      commitMode: Type.Union([Type.Literal("save"), Type.Literal("autosave"), Type.Literal("read_only")]),
+      steps: Type.Array(egoActionSchema, { minItems: 1, maxItems: 80 }),
+    }),
+    async execute(_id: string, params: any, signal: AbortSignal) {
+      return withQueue("browser", async () => {
+        await assertSnapshotConsumed();
+        const domain = String(params.domain), steps = params.steps as any[];
+        const writeIndexes = steps.flatMap((step, index) => step.intent === "write" ? [index] : []);
+        if (params.commitMode === "read_only" && writeIndexes.length) throw new Error("Read-only Ego action mission cannot contain writes");
+        if (params.commitMode !== "read_only" && !writeIndexes.length) throw new Error("Configuration Ego action mission contains no writes");
+        if (writeIndexes.length) {
+          await assertCompiledExpectations();
+          await assertDomainEvidenceVerified(domain);
+          const lastWrite = writeIndexes[writeIndexes.length - 1];
+          const readbacks = new Set(["readTarget", "sectionState", "controlInventory", "snapshotText"]);
+          if (!steps.slice(lastWrite + 1).some(step => step.intent === "read" && readbacks.has(step.operation))) {
+            throw new Error("Adaptive Ego write mission requires an explicit post-write readback step");
+          }
+          if (steps.slice(writeIndexes[0] + 1).some(step => step.operation === "navigate")) {
+            throw new Error("Adaptive Ego write mission cannot navigate away before Claude evaluates its readback");
+          }
+          if (params.commitMode === "save" && !steps.some(step => step.intent === "write" && ["click", "activate", "press"].includes(step.operation) && /save/i.test(String(step.target ?? step.key ?? "")))) {
+            throw new Error("Adaptive Ego save mission requires an explicit reviewed Save action");
+          }
+        }
+        await updateBrowserProgress(`Ego dynamically executing ${domain}: ${cleanText(params.objective, 500)}`);
+        const results: any[] = [];
+        for (let index = 0; index < steps.length; index++) {
+          const step = steps[index], operation = String(step.operation);
+          validateGeneralBrowserAction(operation, step);
+          if (step.intent === "write") {
+            const pending = await pendingWriteReadback() ?? {};
+            await atomicJson(WRITE_READBACK_PENDING, {
+              operations: [...(pending.operations ?? []), operation].slice(-100),
+              rrSources: [...(pending.rrSources ?? []), cleanText(step.rrSource, 500)].slice(-100),
+              requiredAt: pending.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
+            });
+          }
+          const result = await invokeBrowser(operation, browserParams(operation, step), signal, Number(step.timeoutSeconds ?? 90));
+          results.push({ index, operation, intent: step.intent, result });
+        }
+        if (writeIndexes.length) await clearWriteReadback();
+        await appendActivity(`Adaptive Ego ${domain} mission completed ${steps.length} browser actions in one model tool call: ${cleanText(params.objective, 500)}`);
+        await updateBrowserProgress(`Adaptive Ego ${domain} mission returned with post-write readback`);
+        return toolText({ ok: true, domain, objective: params.objective, commitMode: params.commitMode, actions: results });
+      });
+    },
+  });
+
+  pi.registerTool({
     name: "cvent_browser",
-    label: "Read-only Cvent browser",
-    description: "Read identity, inventory, snapshots, or recovery state in the canonical Steel browser. This Pi-facing tool exposes no primitive writes, selectors, URLs, JavaScript, or CDP; configuration uses trusted section procedures.",
+    label: "General Cvent Ego browser",
+    description: "Dynamically inspect and operate the real Cvent UI in the canonical browser. Ordinary exact-event navigation, create/update controls, Save, and readback are available; the application independently enforces RR provenance, lease/lifecycle, target preflight, auditing, uncertainty, and permanent protected-action blocks.",
     parameters: Type.Object({
       operation: Type.Union(PI_BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
-      intent: Type.Literal("read"),
+      ...browserActionFields,
       maxScrolls: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })),
-      timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
     }),
     async execute(_id: string, params: any, signal: AbortSignal) {
       const operation = String(params.operation);
-      if (!BROWSER_OPERATIONS.has(operation)) throw new Error("Capability denied: browser operation is not approved");
-      if (!new Set(["read", "write"]).has(params.intent)) throw new Error("Capability denied: explicit read or write intent is required");
-      if (READ_ONLY_OPERATIONS.has(operation) && params.intent !== "read") throw new Error(`${operation} is a read-only capability`);
-      if (["fill", "type", "selectOption", "setChecked", "drag", "uploadDiscountImport"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
-      if (operation === "press" && !ALLOWED_KEYS.has(String(params.key))) throw new Error("Capability denied: keyboard key is not approved");
-      if (operation === "press" && ["Backspace", "Delete"].includes(String(params.key)) && params.intent !== "write") throw new Error(`${params.key} requires write intent`);
-      if (operation === "selectOption" && !["label", "value", undefined].includes(params.optionBy)) throw new Error("Capability denied: optionBy must be label or value");
-      if (operation === "drag" && !params.destination) throw new Error("Capability denied: drag destination is required");
+      validateGeneralBrowserAction(operation, params);
       return withQueue("browser", async () => {
         const write = params.intent === "write";
         await updateBrowserProgress(write ? `Validating scoped Cvent write: ${operation}` : `Reading Cvent browser: ${operation}`);

@@ -40,7 +40,7 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("bash", tools)
         self.assertEqual(tools, {
             "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section", "cvent_login_handoff",
+            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_ego_actions", "cvent_section_state", "cvent_execute_section", "cvent_login_handoff",
             "cvent_snapshot_chunk", "cvent_finish",
         })
         self.assertEqual(command[-1], "job prompt")

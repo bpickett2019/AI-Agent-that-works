@@ -295,16 +295,25 @@ class BrowserTargetSafetyTests(unittest.TestCase):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/account/settings','intent':'read'})
         with self.assertRaisesRegex(RuntimeError,'attendee/contact'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/attendees?evtstub=locked','intent':'read'})
+        with self.assertRaisesRegex(RuntimeError,'attendee/contact'):
+            browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/Subscribers/ContactTypes?evtstub=locked','intent':'read'})
 
     def test_protected_mutation_controls_are_rejected_before_dispatch(self):
-        for label in ('Publish', 'Go Live', 'Send Email', 'Delete', 'Archive', 'Attendees', 'Contacts'):
+        for label in ('Publish', 'Go Live', 'Send Email', 'Delete', 'Archive', 'Create Contact Type', 'Attendees', 'Contacts'):
             with self.subTest(label=label), patch.object(browser_tool.subprocess,'run',return_value=subprocess.CompletedProcess(
                 ['node'],0,'BROWSER_TOOL_RESULT='+json.dumps({'ok':True,'resolved':{'tag':'BUTTON','text':label,'connected':True,'disabled':False}})+'\n','')):
                 with self.assertRaisesRegex(RuntimeError,'protected|immutable'):
                     browser_tool.preflight_write_target(self.base/'runtime.json','click',{'intent':'write','target':f'role:button[name="{label}"]'})
+    def test_read_intent_cannot_disguise_a_save_mutation(self):
+        resolved=subprocess.CompletedProcess(['node'],0,
+            'BROWSER_TOOL_RESULT='+json.dumps({'ok':True,'resolved':{'tag':'BUTTON','text':'Save','connected':True,'disabled':False}})+'\n','')
+        with patch.object(browser_tool.subprocess,'run',return_value=resolved):
+            with self.assertRaisesRegex(RuntimeError,'requires write intent'):
+                browser_tool.preflight_action_target(self.base/'runtime.json','click',{'intent':'read','target':'role:button[name="Save"]'})
+
     def test_ego_inside_steel_is_the_only_active_router(self):
         self.assertIn('Use only the fixed `cvent_*` tools',PROMPT)
-        self.assertIn('Use `cvent_browser` only for read-only identity, inventory, snapshot, and recovery operations',SKILL)
+        self.assertIn('Ego is the default live Cvent UI operator',SKILL)
         self.assertFalse((ROOT/'browser_use_operator.py').exists())
         self.assertFalse((ROOT/'browser_use_direct.py').exists())
         self.assertIn("choices=['auto','ego']",ROUTER)
@@ -313,7 +322,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('The uploaded RR is the source of truth',PROMPT)
         self.assertNotIn("scopeIds",ROUTER)
         self.assertIn('Do not require per-field scope IDs',PROMPT)
-        self.assertIn('Use complete `snapshotText` reads',PROMPT)
+        self.assertIn('Use Ego semantically against the current UI',PROMPT)
         self.assertIn('no shell, generic filesystem',PROMPT)
         extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
         self.assertIn('this production agent has no shell or general filesystem tools',extension)
@@ -326,6 +335,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('params.expression',extension)
         self.assertNotIn('params.method',extension)
         self.assertIn('name: "cvent_execute_section"',extension)
+        self.assertIn('name: "cvent_ego_actions"',extension)
+        self.assertIn('General Cvent Ego browser',extension)
         self.assertIn('PI_BROWSER_OPERATION_NAMES',extension)
         self.assertIn('trustedProcedureRecords',extension)
         self.assertNotIn('cvent_run_js',extension)

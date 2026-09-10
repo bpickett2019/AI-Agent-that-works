@@ -63,9 +63,10 @@ def assert_event_lease(runtime):
     if not job_id and os.environ.get('CVENT_ENV','development')!='production':return
     if not job_id or not token or not url or not event_id:raise RuntimeError('Write blocked: job event-lease context is absent')
     if not lease_is_valid(url,job_id,token,event_id):raise RuntimeError('Write blocked: canonical event lease is absent, stale, mismatched, or owned by another job')
-PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?|account(?:settings)?|organization|admin|global|library|profiles?)(?:/|$)',re.I)
-PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
-PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|title|code)|evtstub|eventid)',re.I)
+PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?|contact[-_]?types?|account(?:settings)?|organization|admin|global|library|profiles?)(?:/|$)',re.I)
+PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|create\s+contact\s+type(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
+MUTATING_CONTROL=re.compile(r'^(?:save(?:\s|$)|save\s*(?:&|and)\s*close(?:\s|$)|create(?:\s|$)|add(?:\s|$)|update(?:\s|$)|apply(?:\s|$)|confirm(?:\s|$)|submit(?:\s|$))',re.I)
+PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|title|code)|evtstub|eventid|contact[-_ ]?type[-_ ]?(?:name|code))',re.I)
 
 def assert_safe_write_target(operation,params,descriptor):
     target=str(params.get('target','')).strip()
@@ -167,7 +168,7 @@ def recover_browser(runtime_path,runtime,tool,params):
         except Exception as error:last=str(error)
         time.sleep(3)
     raise RuntimeError(f'Browser renderer did not recover within the bounded wait: {last[-500:]}')
-def preflight_write_target(runtime_path,operation,params):
+def preflight_action_target(runtime_path,operation,params):
     keys=['target']
     if operation=='drag':keys.append('destination')
     resolved=dict(params)
@@ -182,8 +183,13 @@ def preflight_write_target(runtime_path,operation,params):
         if not descriptor.get('connected') or descriptor.get('disabled'):
             raise RuntimeError('Write rejected before browser dispatch: target is disconnected or disabled')
         assert_safe_write_target(operation,params,descriptor)
+        labels=[descriptor.get(key) for key in ('text','label','aria','title','name')]
+        if params.get('intent')!='write' and any(MUTATING_CONTROL.search(re.sub(r'\s+',' ',str(value)).strip()) for value in labels if value):
+            raise RuntimeError('Action rejected before browser dispatch: mutating control requires write intent and RR source evidence')
         resolved[key]=result.get('resolvedTarget') or target
     return resolved
+# Backward-compatible name; all interactive targets now share this preflight.
+preflight_write_target=preflight_action_target
 def validate_trusted_inspection(operation,params):
     if operation not in TRUSTED_INSPECTIONS or set(params)-{'intent','records','probeCode','timeoutSeconds'}:raise RuntimeError('Trusted inspection accepts only exact RR identities')
     records=params.get('records');probe=params.get('probeCode')
@@ -251,8 +257,9 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         is_write=params.get('intent')=='write'
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
+        if params.get('target') and operation in {'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag'}:
+            params=preflight_action_target(runtime_path,operation,params)
         if is_write:
-            params=preflight_write_target(runtime_path,operation,params)
             if operation=='uploadDiscountImport':params['filePath']=str(fixed_upload_artifact(params))
             audit_scope_write(operation,params,current,'attempted')
         try:
