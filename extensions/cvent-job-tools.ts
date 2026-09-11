@@ -3,7 +3,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { open, readFile, realpath, rename, mkdir, appendFile, lstat, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
-import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget } from "./prewrite-orchestration.mjs";
+import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget, firstIncompleteDomain, staleRefWithoutWrite, adapterNeedsNativeFallback, DomainProgressGuard } from "./prewrite-orchestration.mjs";
 
 const rrCache = new ValidatedRRCache();
 const recoveryBudget = new BrowserRecoveryBudget();
@@ -61,15 +61,20 @@ const SNAPSHOT_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "br
 const WRITE_READBACK_PENDING = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "browser-write-readback-required.json");
 const PERFORMANCE_EVENTS = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "performance-events.jsonl");
 const ROUTE_CACHE = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "cvent-route-cache.json");
+const DOMAIN_PROGRESS = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "domain-progress.json");
+const NATIVE_FALLBACK = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "native-ego-fallback-required.json");
 const queues = new Map<string, Promise<unknown>>();
 const extensionStarted = performance.now();
 let firstBrowserActionRecorded = false;
 type TurnProgress = {
   turnIndex: number; section: string; browserOperations: number; browserActions: number; egoRounds: number;
   toolNames: string[]; requiredVerification: boolean; ambiguityResolved: boolean; humanOrSecurityBoundary: boolean;
-  repeatedRead: boolean; modelDurationMs: number; toolCalls: Map<string, { name: string; args: any }>;
+  repeatedRead: boolean; meaningfulProgress: boolean; progressReasons: string[]; modelDurationMs: number; toolCalls: Map<string, { name: string; args: any }>;
 };
 let activeTurnProgress: TurnProgress | null = null;
+const domainProgress = new DomainProgressGuard(3);
+const domainPageUrls = new Map<string, string>();
+const domainSeenPages = new Set<string>();
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -278,6 +283,100 @@ async function updateBrowserProgress(action: string): Promise<void> {
   });
 }
 
+async function readJsonLines(path: string): Promise<any[]> {
+  try {
+    return (await readJobFile(path)).toString("utf8").split(/\r?\n/).filter(Boolean).flatMap(line => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function resumeDomain(): Promise<string | null> {
+  const [plan, results, verification, state] = await Promise.all([
+    readJson(join(jobDir, "configuration-plan.json"), { mission: [] }),
+    readJson(join(jobDir, "domain-results.json"), { domains: {} }),
+    readJson(join(jobDir, "final-verification.json"), { domains: {} }),
+    readJson(join(jobDir, "state.json"), {}),
+  ]);
+  return firstIncompleteDomain(plan, results, verification, state);
+}
+
+async function assessedDomains(): Promise<string[]> {
+  const [plan, results, verification, state] = await Promise.all([
+    readJson(join(jobDir, "configuration-plan.json"), { mission: [] }),
+    readJson(join(jobDir, "domain-results.json"), { domains: {} }),
+    readJson(join(jobDir, "final-verification.json"), { domains: {} }),
+    readJson(join(jobDir, "state.json"), {}),
+  ]);
+  return (plan.mission ?? []).map((item: any) => item.domain).filter((domain: string) =>
+    firstIncompleteDomain({ mission: [{ domain }] }, results, verification, state) === null);
+}
+
+async function domainTelemetry(domain: string): Promise<{ browserOperations: number; writes: number; saves: number; readbacks: number }> {
+  const events = await readJsonLines(PERFORMANCE_EVENTS);
+  const operations = events.filter(event => event.kind === "browser_operation" && event.section === domain);
+  const totals = { browserOperations: operations.length, writes: 0, saves: 0, readbacks: 0 };
+  for (const event of operations) {
+    totals.writes += Number(event.writes ?? 0); totals.saves += Number(event.saves ?? 0); totals.readbacks += Number(event.readbacks ?? 0);
+  }
+  return totals;
+}
+
+function strategyOperation(operation: string, objective = ""): boolean {
+  return ["snapshotText", "screenshot", "sectionState", "navigate", "openAuthorizedEvent", "recover"].includes(operation) ||
+    /fresh snapshot|new locator|direct navigation|visual|hold|independent item|strategy/i.test(objective);
+}
+
+async function assertDomainStrategy(domain: string, operation: string, objective = ""): Promise<void> {
+  const persisted = await readJson(DOMAIN_PROGRESS, { domains: {} });
+  const required = domainProgress.requireStrategy(domain) || persisted.domains?.[domain]?.strategyRequired === true;
+  if (!required) return;
+  if (!strategyOperation(operation, objective)) throw new Error(`DOMAIN_PROGRESS_STALLED: ${domain} has 3 consecutive zero-progress rounds. Change strategy with a fresh semantic snapshot, new locator/direct route, visual Ego, an item hold, or another independent item.`);
+  domainProgress.strategyChanged(domain);
+  persisted.domains ??= {}; persisted.domains[domain] = { ...(persisted.domains[domain] ?? {}), consecutiveZeroProgressRounds: 0,
+    strategyRequired: false, strategyChangedAt: new Date().toISOString(), strategy: cleanText(`${operation}: ${objective}`, 500) };
+  persisted.updatedAt = new Date().toISOString(); await atomicJson(DOMAIN_PROGRESS, persisted);
+  await appendActivity(`DOMAIN_PROGRESS_STRATEGY_CHANGED ${domain}: ${cleanText(`${operation} ${objective}`, 500)}`);
+}
+
+async function recordDomainRoundProgress(domain: string, result: any, objective = ""): Promise<any> {
+  const pageUrl = cleanText(result?.page?.url, 4000);
+  const previousUrl = domainPageUrls.get(domain) ?? "";
+  const pageChanged = Boolean(pageUrl && previousUrl && pageUrl !== previousUrl);
+  const pageIdentity = `${domain}\u0000${pageUrl}`;
+  const newRelevantPage = Boolean(pageUrl && !domainSeenPages.has(pageIdentity));
+  if (pageUrl) { domainPageUrls.set(domain, pageUrl); domainSeenPages.add(pageIdentity); }
+  const writes = Number(result?.writesAttempted ?? result?.mutationCount ?? 0), saves = Number(result?.saves ?? 0), readbacks = Number(result?.readbacks ?? 0);
+  const meaningful = writes > 0 || saves > 0 || readbacks > 0 || newRelevantPage || (pageChanged && newRelevantPage) || ["CONFIGURED", "ALREADY_CORRECT"].includes(String(result?.status));
+  const progress = domainProgress.observe(domain, meaningful);
+  const persisted = await readJson(DOMAIN_PROGRESS, { schemaVersion: 1, domains: {} }); persisted.domains ??= {};
+  persisted.domains[domain] = { consecutiveZeroProgressRounds: progress.consecutive, maximumConsecutiveZeroProgressRounds: progress.maximum,
+    strategyRequired: progress.strategyRequired, meaningful: progress.meaningful, lastObjective: cleanText(objective, 500), updatedAt: new Date().toISOString() };
+  persisted.updatedAt = new Date().toISOString(); await atomicJson(DOMAIN_PROGRESS, persisted);
+  if (progress.stalled) {
+    await appendActivity(`DOMAIN_PROGRESS_STALLED ${domain}: 3 consecutive rounds without meaningful progress; strategy change required`);
+    result.domainProgress = { status: "DOMAIN_PROGRESS_STALLED", consecutiveZeroProgressRounds: progress.consecutive,
+      instruction: "Do not repeat this inspection. Use a fresh semantic snapshot, discard stale refs, choose a new/direct locator, switch to visual Ego, hold only the problematic item, or move to another independent item." };
+  } else result.domainProgress = { status: progress.meaningful ? "PROGRESSED" : "NO_PROGRESS", consecutiveZeroProgressRounds: progress.consecutive };
+  if (activeTurnProgress && progress.meaningful) { activeTurnProgress.meaningfulProgress = true; activeTurnProgress.progressReasons.push("domain_round"); }
+  return result;
+}
+
+async function markNativeFallback(domain: string, result: any): Promise<void> {
+  await atomicJson(NATIVE_FALLBACK, { schemaVersion: 1, domain, reason: result.status, writes: Number(result.mutationCount ?? 0),
+    requiredAt: new Date().toISOString(), instruction: "Native Ego must inspect the live controls before this domain can be completed or held." });
+}
+
+async function clearNativeFallback(domain: string): Promise<void> {
+  const marker = await readJson(NATIVE_FALLBACK, null);
+  if (!marker || marker.domain !== domain) return;
+  try { await unlink(NATIVE_FALLBACK); } catch (error: any) { if (error?.code !== "ENOENT") throw error; }
+  await appendActivity(`Native Ego fallback entered for ${domain} after trusted adapter limitation`);
+}
+
 function hash(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -345,8 +444,15 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
     activeTurnProgress.browserActions += actionCount;
     if (coherent) activeTurnProgress.egoRounds += 1;
     if (!activeTurnProgress.section && typeof params.domain === "string") activeTurnProgress.section = params.domain;
+    if (Number(result.writesAttempted ?? result.mutationCount ?? 0) > 0 || Number(result.saves ?? 0) > 0 || Number(result.readbacks ?? 0) > 0 || ["openAuthorizedEvent", "recover"].includes(operation)) {
+      activeTurnProgress.meaningfulProgress = true; activeTurnProgress.progressReasons.push(operation);
+    }
   }
-  await appendPerformance("browser_operation", started, { operation, section: activeTurnProgress?.section || params.domain || "", intent: params.intent, navigation: ["navigate", "openAuthorizedEvent"].includes(operation), snapshot: operation === "snapshotText", fullSnapshot: operation === "snapshotText", egoExecutionRound: coherent, actionCount, responseBytes: Buffer.byteLength(JSON.stringify(result)) });
+  await appendPerformance("browser_operation", started, { operation, section: params.domain || activeTurnProgress?.section || "", intent: params.intent,
+    navigation: ["navigate", "openAuthorizedEvent"].includes(operation), snapshot: operation === "snapshotText", fullSnapshot: operation === "snapshotText",
+    egoExecutionRound: coherent, actionCount, writes: Number(result.writesAttempted ?? result.mutationCount ?? 0), saves: Number(result.saves ?? 0),
+    readbacks: Number(result.readbacks ?? 0), status: result.status ?? null, pageUrl: result.page?.url ?? null,
+    responseBytes: Buffer.byteLength(JSON.stringify(result)) });
   return result;
 }
 
@@ -520,6 +626,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
   if (["authorizeTarget", "openAuthorizedEvent"].includes(operation)) {
     params.eventName = requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME");
     params.eventKey = requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY");
+    params.eventCode = process.env.CVENT_AUTHORIZED_EVENT_CODE ?? "";
   }
   if (["scanEventList", "openAuthorizedEvent"].includes(operation)) {
     params.maxScrolls = Math.max(1, Math.min(Number(input.maxScrolls ?? 30), 60));
@@ -584,13 +691,20 @@ function validateGeneralBrowserAction(operation: string, params: any): void {
 function validateActionRound(commitMode: string, steps: any[]): void {
   let unverifiedWrite = false;
   let saveObserved = false;
+  let refsFresh = true;
   const readbacks = new Set(["readTarget", "sectionState", "controlInventory", "snapshotText", "screenshot"]);
+  const ephemeralRef = (value: unknown) => /^(?:@\d+|\[?ref=\d+\]?)$/.test(String(value ?? "").trim());
   for (const step of steps) {
     validateGeneralBrowserAction(String(step.operation), step);
+    if (ephemeralRef(step.target) && !refsFresh) throw new Error("STALE_REF_PREVENTED: navigation/Save invalidated prior Ego refs; take a fresh snapshot and re-resolve before continuing");
     if (step.operation === "navigate" && unverifiedWrite) throw new Error("Verify the saved configuration group before navigating within an Ego action round");
+    if (step.operation === "navigate") refsFresh = false;
+    if (step.operation === "snapshotText") refsFresh = true;
     if (step.intent === "write") {
       unverifiedWrite = true;
-      if (["click", "activate", "press", "visualClick"].includes(step.operation) && /save/i.test(String(step.target ?? step.key ?? step.label ?? ""))) saveObserved = true;
+      if (["click", "activate", "press", "visualClick"].includes(step.operation) && /save/i.test(String(step.target ?? step.key ?? step.label ?? ""))) {
+        saveObserved = true; refsFresh = false;
+      }
     } else if (unverifiedWrite && readbacks.has(step.operation) && (commitMode === "autosave" || saveObserved)) {
       unverifiedWrite = false;
       saveObserved = false;
@@ -739,7 +853,11 @@ export default function cventJobTools(pi: any) {
     try { await appendPerformance(kind, started, details); } catch { /* metrics never block configuration */ }
   };
   const sectionFrom = (toolName: string, args: any): string => {
-    const candidate = toolName === "cvent_plan" || toolName === "cvent_expectations" ? args?.section : args?.domain ?? args?.stage;
+    let candidate = toolName === "cvent_plan" || toolName === "cvent_expectations" ? args?.section : args?.domain ?? args?.stage;
+    if (toolName === "bash") {
+      const match = String(args?.command ?? "").match(/^\s*\/\/ cvent: (\{[^\n]+\})/m);
+      try { candidate = match ? JSON.parse(match[1]).domain : candidate; } catch { /* tool validation reports malformed metadata */ }
+    }
     return DOMAINS.has(String(candidate ?? "")) ? String(candidate) : "";
   };
   const planDeliveryKey = (args: any): string =>
@@ -759,7 +877,7 @@ export default function cventJobTools(pi: any) {
     turnStarted = performance.now(); firstTokenRecorded = false;
     activeTurnProgress = { turnIndex: Number(event.turnIndex ?? 0), section: currentSection, browserOperations: 0, browserActions: 0, egoRounds: 0,
       toolNames: [], requiredVerification: false, ambiguityResolved: false, humanOrSecurityBoundary: false,
-      repeatedRead: false, modelDurationMs: 0, toolCalls: new Map() };
+      repeatedRead: false, meaningfulProgress: false, progressReasons: [], modelDurationMs: 0, toolCalls: new Map() };
   });
   pi.on("message_update", async (event: any) => {
     if (!firstTokenRecorded && event.message?.role === "assistant") {
@@ -808,12 +926,13 @@ export default function cventJobTools(pi: any) {
     }
     if (name === "cvent_snapshot_chunk") activeTurnProgress.ambiguityResolved = true;
     if (["cvent_prepare_rr", "cvent_verify_domain", "cvent_finish"].includes(name)) activeTurnProgress.requiredVerification = true;
+    if (["cvent_verify_domain", "cvent_record_domain"].includes(name)) { activeTurnProgress.meaningfulProgress = true; activeTurnProgress.progressReasons.push(name); }
     if (name === "cvent_login_handoff") activeTurnProgress.humanOrSecurityBoundary = true;
   });
   pi.on("turn_end", async () => {
     const progress = activeTurnProgress;
     if (!progress) return;
-    const zeroProgress = progress.browserOperations === 0 && !progress.ambiguityResolved && !progress.requiredVerification && !progress.humanOrSecurityBoundary;
+    const zeroProgress = !progress.meaningfulProgress && !progress.ambiguityResolved && !progress.requiredVerification && !progress.humanOrSecurityBoundary;
     let sectionTurn = 0;
     if (DOMAINS.has(progress.section)) {
       sectionTurn = (sectionTurns.get(progress.section) ?? 0) + 1;
@@ -821,7 +940,8 @@ export default function cventJobTools(pi: any) {
     }
     const details = { turnIndex: progress.turnIndex, section: progress.section, sectionTurn, browserOperations: progress.browserOperations,
       browserActions: progress.browserActions, egoRounds: progress.egoRounds, toolNames: progress.toolNames,
-      modelDurationMs: progress.modelDurationMs, repeatedRead: progress.repeatedRead, zeroProgress };
+      modelDurationMs: progress.modelDurationMs, repeatedRead: progress.repeatedRead, meaningfulProgress: progress.meaningfulProgress,
+      progressReasons: progress.progressReasons, zeroProgress };
     await safeMetric("model_response_progress", turnStarted || performance.now(), details);
     if (zeroProgress) await safeMetric("MODEL_RESPONSE_WITH_ZERO_PROGRESS", performance.now(), details);
     if (["event_settings", "registration_types", "admission_items", "pricing"].includes(progress.section) && sectionTurn > 3)
@@ -844,6 +964,25 @@ export default function cventJobTools(pi: any) {
     // Reporting a real job-wide blocker must remain available even when the
     // browser circuit breaker is open. It cannot perform browser mutations.
     if (event.toolName === "cvent_finish") return undefined;
+    const requestedDomain = sectionFrom(String(event.toolName), event.input);
+    if (requestedDomain) {
+      const next = await resumeDomain();
+      const completed = await assessedDomains();
+      const browserWork = event.toolName === "bash" || ["cvent_browser", "cvent_section_state", "cvent_execute_section"].includes(event.toolName);
+      if (browserWork && completed.includes(requestedDomain)) {
+        return { block: true, reason: `DOMAIN_ALREADY_COMPLETE: ${requestedDomain} is durably checkpointed. Resume ${next ?? "final QA"}; do not replay the completed domain.` };
+      }
+      if (browserWork) {
+        const operation = event.toolName === "bash" ? "bash" : String(event.input?.operation ?? event.toolName);
+        const objective = event.toolName === "bash" ? String(event.input?.command ?? "") : String(event.input?.objective ?? "");
+        try { await assertDomainStrategy(requestedDomain, operation, objective); }
+        catch (error: any) { return { block: true, reason: error.message }; }
+      }
+      if (event.toolName === "cvent_record_domain" && ["completed", "review_required"].includes(String(event.input?.status))) {
+        const fallback = await readJson(NATIVE_FALLBACK, null);
+        if (fallback?.domain === requestedDomain) return { block: true, reason: `NATIVE_EGO_REQUIRED: trusted adapter ${fallback.reason} is not a domain conclusion. Inspect ${requestedDomain} with native Ego first.` };
+      }
+    }
     const decision = recoveryBudget.allow(event.toolName, event.input);
     if (!decision.allowed) {
       if (decision.terminal) await atomicJson(join(jobDir, `controller-failure-${process.pid}.json`), recoveryBudget.terminalFailure);
@@ -889,6 +1028,10 @@ export default function cventJobTools(pi: any) {
       if (!DOMAINS.has(meta.domain) || !["save", "autosave", "read_only"].includes(meta.commitMode)) throw new Error("Invalid Ego round domain/commitMode");
       return withQueue("browser", async () => {
         await assertSnapshotConsumed();
+        await assertDomainStrategy(meta.domain, "bash", match[2]);
+        const next = await resumeDomain();
+        if ((await assessedDomains()).includes(meta.domain))
+          throw new Error(`DOMAIN_ALREADY_COMPLETE: ${meta.domain} is checkpointed; resume ${next ?? "final QA"}`);
         const write = meta.commitMode !== "read_only";
         await assertCompiledExpectations();
         if (write) {
@@ -896,11 +1039,22 @@ export default function cventJobTools(pi: any) {
           await assertNoHeldReplay(meta.domain, { sources: meta.rrSources, script: match[2] });
         }
         await appendActivity(`${write ? "Configuring" : "Inspecting"} ${meta.domain} with native Ego`);
-        const result = await invokeBrowser("script", { intent: write ? "write" : "read", domain: meta.domain,
-          commitMode: meta.commitMode, rrSources: meta.rrSources ?? [], script: match[2] }, signal, params.timeout ?? 180);
+        let result: any;
+        try {
+          result = await invokeBrowser("script", { intent: write ? "write" : "read", domain: meta.domain,
+            commitMode: meta.commitMode, rrSources: meta.rrSources ?? [], script: match[2] }, signal, params.timeout ?? 180);
+        } catch (error: any) {
+          if (!staleRefWithoutWrite(error?.message)) throw error;
+          const fresh = await saveLargeSnapshot(await invokeBrowser("snapshotText", { intent: "read", domain: meta.domain }, signal, 90));
+          await appendActivity(`STALE_REF_RECOVERED ${meta.domain}: discarded ephemeral Ego ref after zero dispatched writes and captured a fresh snapshot`);
+          result = { ok: true, status: "STALE_REF_RECOVERED", writesAttempted: 0, saves: 0, readbacks: 0, freshSnapshot: fresh,
+            instruction: "Re-resolve the intended control from this fresh snapshot and continue the same domain. No mutation was dispatched." };
+        }
+        await clearNativeFallback(meta.domain);
         await appendPerformance("ego_execution_round", performance.now(), { domain: meta.domain,
-          actionCount: result.actionCount, writeCount: result.writesAttempted, saves: result.saves, readbacks: result.readbacks });
-        await appendActivity(`Ego ${meta.domain}: ${result.actionCount} actions, ${result.writesAttempted} writes, ${result.saves} saves, ${result.readbacks} readbacks`);
+          actionCount: result.actionCount ?? 0, writeCount: result.writesAttempted ?? 0, saves: result.saves ?? 0, readbacks: result.readbacks ?? 0 });
+        await appendActivity(`Ego ${meta.domain}: ${result.actionCount ?? 0} actions, ${result.writesAttempted ?? 0} writes, ${result.saves ?? 0} saves, ${result.readbacks ?? 0} readbacks`);
+        await recordDomainRoundProgress(meta.domain, result, "native Ego outcome mission");
         return toolBrowserResult(result);
       });
     },
@@ -916,16 +1070,21 @@ export default function cventJobTools(pi: any) {
         try {
           const existing = await verifiedCompiledExpectations();
           const alreadyPrepared = preparedRR === existing;
-          if (alreadyPrepared) return toolText({ ok: true, reusedPreflight: true, alreadyPrepared: true, instruction: "The validated RR plan is still in context. Continue at the browser boundary; do not repeat setup." });
+          if (alreadyPrepared) {
+            const next = await resumeDomain();
+            return toolText({ ok: true, reusedPreflight: true, alreadyPrepared: true, resumeDomain: next,
+              instruction: `The validated RR plan remains current. Continue at ${next ?? "final QA"}; do not repeat setup or a completed domain.` });
+          }
           const plan = await readJson(join(jobDir, "configuration-plan.json"), null);
           const validation = await readJson(join(jobDir, "rr-validation.json"), null);
           const firstDomain = plan.mission?.[0]?.domain;
-          await appendActivity(`RR plan ready: ${existing.counts?.applicableFields ?? 0} RR evidence fields; server preflight reused`);
+          const nextDomain = await resumeDomain() ?? firstDomain;
+          await appendActivity(`RR plan ready: ${existing.counts?.applicableFields ?? 0} RR evidence fields; server preflight reused; resume domain ${nextDomain}`);
           preparedRR = existing;
           return toolText({ ok: true, reusedPreflight: true, counts: existing.counts, target: plan.target,
             mission: plan.mission.map((section: any) => ({ order: section.order, domain: section.domain, verifiedItems: section.verifiedItemIds?.length ?? 0, heldItems: section.heldItems })),
-            firstDomain, items: validation.items.filter((item: any) => item.domain === firstDomain),
-            instruction: "Setup and the first domain plan are complete. Check authentication and open the exact authorized event next. Do not reread summary or mission." });
+            firstDomain, resumeDomain: nextDomain, completedDomains: await assessedDomains(), items: validation.items.filter((item: any) => item.domain === nextDomain),
+            instruction: `Setup is complete. After authentication and exact-event reopening, resume ${nextDomain}; never replay a completed domain.` });
         } catch {
           // Missing or stale artifacts are rebuilt only by the same fixed approved helpers below.
         }
@@ -989,6 +1148,9 @@ export default function cventJobTools(pi: any) {
       if (section === "summary") return toolText({ counts: validation.counts, target: plan.target, executionRule: plan.executionRule });
       if (section === "mission") return toolText(plan.mission);
       if (!DOMAINS.has(section)) throw new Error("Capability denied: unknown plan section");
+      const next = await resumeDomain();
+      if ((await assessedDomains()).includes(section) && next && next !== section)
+        return toolText({ ok: true, section, checkpoint: "COMPLETE", resumeDomain: next, instruction: `Do not replay ${section}; continue ${next}.` });
       const items = validation.items.filter((item: any) => item.domain === section);
       return toolText(pageArrays(items, params.offset ?? 0, params.limit ?? 25));
     },
@@ -1059,17 +1221,26 @@ export default function cventJobTools(pi: any) {
         }
         const path = join(jobDir, "state.json");
         const state = await readJson(path, {});
+        const completed = await assessedDomains();
+        const next = await resumeDomain();
         if (params.status) state.status = params.status;
-        if (params.stage) state.current_stage = params.stage;
-        if (params.action) state.current_action = cleanText(params.action, 1200);
-        if (params.completed) state.completed = params.completed;
-        if (params.pending) state.pending = params.pending;
+        let corrected = false;
+        if (params.stage) {
+          if (completed.includes(params.stage)) { state.current_stage = next ?? "final_qa"; corrected = true; }
+          else state.current_stage = params.stage;
+        }
+        if (params.action) state.current_action = corrected ? `Resume ${next ?? "final QA"}; completed domain ${params.stage} will not be replayed` : cleanText(params.action, 1200);
+        state.completed = completed;
+        const plan = await readJson(join(jobDir, "configuration-plan.json"), { mission: [] });
+        if (plan.mission?.length) state.pending = plan.mission.map((item: any) => item.domain).filter((domain: string) => !completed.includes(domain));
         if (params.reviewRequired) state.review_required = params.reviewRequired.map((item: unknown) => cleanText(item, 2000));
         state.updated_at = new Date().toISOString();
         await atomicJson(path, state);
-        await appendPerformance("stage_marker", performance.now(), { stage: state.current_stage, action: state.current_action, status: state.status });
-        if (params.log) await appendActivity(params.log);
-        return toolText({ ok: true, status: state.status, stage: state.current_stage, action: state.current_action });
+        await appendPerformance("stage_marker", performance.now(), { stage: state.current_stage, action: state.current_action, status: state.status, correctedCompletedDomainReplay: corrected });
+        if (corrected) await appendActivity(`DOMAIN_RESUME_CORRECTED: ${params.stage} is COMPLETE; resuming ${next}`);
+        else if (params.log) await appendActivity(params.log);
+        return toolText({ ok: true, status: state.status, stage: state.current_stage, action: state.current_action,
+          completedDomains: completed, resumeDomain: next, completedDomainReplayPrevented: corrected });
       });
     },
   });
@@ -1092,23 +1263,27 @@ export default function cventJobTools(pi: any) {
       if (!DOMAINS.has(params.domain)) throw new Error("Capability denied: unknown domain");
       if (!["in_progress", "completed", "review_required", "incomplete"].includes(params.status)) throw new Error("Capability denied: invalid domain status");
       return withQueue("job-files", async () => {
+        const fallback = await readJson(NATIVE_FALLBACK, null);
+        if (fallback?.domain === params.domain && ["completed", "review_required"].includes(params.status))
+          throw new Error(`NATIVE_EGO_REQUIRED: ${params.domain} cannot conclude from adapter ${fallback.reason}`);
+        const verification = await readJson(join(jobDir, "final-verification.json"), { domains: {} });
+        if (["completed", "review_required"].includes(params.status) && !verification.domains?.[params.domain]?.cventEvidence?.length)
+          throw new Error("Domain completion requires persisted desired-state verification evidence from cvent_verify_domain");
         const path = join(jobDir, "domain-results.json");
         const document = await readJson(path, { schemaVersion: 1, domains: {} });
         document.domains ??= {};
+        const telemetry = await domainTelemetry(params.domain);
         document.domains[params.domain] = {
-          status: params.status,
-          created: params.created ?? [],
-          updated: params.updated ?? [],
-          already_correct: params.alreadyCorrect ?? [],
-          verified_reads: params.verifiedReads ?? [],
-          verified_writes: params.verifiedWrites ?? [],
-          blocked: params.blocked ?? [],
-          updated_at: new Date().toISOString(),
+          ...(document.domains[params.domain] ?? {}), status: params.status,
+          checkpoint: ["completed", "review_required"].includes(params.status) ? "COMPLETE" : params.status.toUpperCase(),
+          created: params.created ?? [], updated: params.updated ?? [], already_correct: params.alreadyCorrect ?? [],
+          verified_reads: params.verifiedReads ?? [], verified_writes: params.verifiedWrites ?? [], blocked: params.blocked ?? [],
+          telemetry, updated_at: new Date().toISOString(),
         };
         document.updatedAt = new Date().toISOString();
         await atomicJson(path, document);
-        await appendPerformance("domain_result", performance.now(), { domain: params.domain, status: params.status });
-        return toolText({ ok: true, domain: params.domain, status: params.status });
+        await appendPerformance("domain_result", performance.now(), { domain: params.domain, status: params.status, checkpoint: document.domains[params.domain].checkpoint, ...telemetry });
+        return toolText({ ok: true, domain: params.domain, status: params.status, checkpoint: document.domains[params.domain].checkpoint, telemetry });
       });
     },
   });
@@ -1137,6 +1312,10 @@ export default function cventJobTools(pi: any) {
         if (!validation) throw new Error("Run cvent_prepare_rr first");
         const domainItems = validation.items.filter((item: any) => item.domain === params.domain);
         const items = verificationItemResults(domainItems, params.matches ?? [], params.exceptions);
+        if (await pendingWriteReadback()) throw new Error("Domain completion requires Save/readback completion; a write-readback marker is still pending");
+        const telemetry = await domainTelemetry(params.domain);
+        if (telemetry.writes > 0 && (telemetry.saves < 1 || telemetry.readbacks < 1))
+          throw new Error("Domain completion requires persisted Save and readback telemetry for dispatched writes");
         const document = await readJson(join(jobDir, "final-verification.json"), { schemaVersion: 1, domains: {} });
         document.domains[params.domain] = {
           verifiedAt: new Date().toISOString(), cventEvidence: params.cventEvidence,
@@ -1146,7 +1325,25 @@ export default function cventJobTools(pi: any) {
         await atomicJson(join(jobDir, "final-verification.json"), document);
         const counts: Record<string, number> = {};
         for (const item of document.domains[params.domain].items) counts[item.status] = (counts[item.status] ?? 0) + 1;
-        return toolText({ ok: true, domain: params.domain, counts });
+        const resultPath = join(jobDir, "domain-results.json");
+        const results = await readJson(resultPath, { schemaVersion: 1, domains: {} }); results.domains ??= {};
+        const prior = results.domains[params.domain] ?? {};
+        const held = document.domains[params.domain].items.filter((item: any) => item.status !== "MATCH").map((item: any) => `${item.itemId}: ${item.status} - ${item.reason ?? "item exception"}`);
+        results.domains[params.domain] = { ...prior, status: held.length ? "review_required" : "completed", checkpoint: "COMPLETE",
+          requested_items: domainItems.length, created: prior.created ?? [], updated: prior.updated ?? [], already_correct: prior.already_correct ?? [],
+          verified_reads: params.cventEvidence, verified_writes: prior.verified_writes ?? [], held,
+          prohibited: document.domains[params.domain].items.filter((item: any) => item.status === "PROHIBITED").map((item: any) => item.itemId),
+          telemetry, verified_at: document.domains[params.domain].verifiedAt, updated_at: new Date().toISOString() };
+        results.updatedAt = new Date().toISOString(); await atomicJson(resultPath, results);
+        const statePath = join(jobDir, "state.json"), state = await readJson(statePath, {});
+        state.completed = await assessedDomains();
+        const plan = await readJson(join(jobDir, "configuration-plan.json"), { mission: [] });
+        state.pending = (plan.mission ?? []).map((item: any) => item.domain).filter((domain: string) => !state.completed.includes(domain));
+        const next = await resumeDomain(); state.current_stage = next ?? "final_qa";
+        state.current_action = next ? `${params.domain} COMPLETE; continue with ${next}` : "All configured domains assessed; perform final QA";
+        state.updated_at = new Date().toISOString(); await atomicJson(statePath, state);
+        await appendActivity(`DOMAIN_CHECKPOINT ${params.domain}=COMPLETE; writes=${telemetry.writes}, saves=${telemetry.saves}, readbacks=${telemetry.readbacks}; next=${next ?? "final_qa"}`);
+        return toolText({ ok: true, domain: params.domain, checkpoint: "COMPLETE", counts, telemetry, resumeDomain: next });
       });
     },
   });
@@ -1219,15 +1416,16 @@ export default function cventJobTools(pi: any) {
           const current = await readJson(gatePath, {});
           if (current.ownership === "AGENT" && current.desiredOwnership === "AGENT") {
             const resumed = await readJson(statePath, {});
+            const next = await resumeDomain();
             resumed.status = "running";
-            resumed.current_stage = "target_discovery";
-            resumed.current_action = "Verifying Cvent login and resuming exact-event discovery";
+            resumed.current_stage = next ?? "target_discovery";
+            resumed.current_action = `Verifying Cvent login, reopening the exact event, then resuming ${next ?? "the first incomplete domain"}`;
             resumed.updated_at = new Date().toISOString();
             await atomicJson(statePath, resumed);
-            await appendActivity("User returned browser control; authenticated slot profile verified and persisted automatically");
+            await appendActivity(`User returned browser control; authenticated slot profile verified; resume domain ${next ?? "unresolved"}`);
             await safeMetric("human_handoff", humanHandoffStarted, { boundary: "cvent_sso_mfa", completed: true });
-            return toolText({ ok: true, resumed: true, profilePersisted: true,
-              instruction: "Forge verified and persisted this slot's Cvent login. Fresh-read pageInfo and a complete snapshot before continuing." });
+            return toolText({ ok: true, resumed: true, profilePersisted: true, resumeDomain: next,
+              instruction: `Forge verified this slot's Cvent login. Reopen the exact selected event, take a fresh snapshot, and resume ${next ?? "the first incomplete domain"}.` });
           }
           if (current.ownership === "NONE") throw new Error("Browser return was blocked; human review is required");
         }
@@ -1244,6 +1442,8 @@ export default function cventJobTools(pi: any) {
     parameters: Type.Object({ domain: literalUnion(DOMAIN_NAMES) }),
     async execute(_id: string, params: any, signal: AbortSignal) {
       const domain = String(params.domain);
+      const next = await resumeDomain();
+      if ((await assessedDomains()).includes(domain)) throw new Error(`DOMAIN_ALREADY_COMPLETE: ${domain} is checkpointed; resume ${next ?? "final QA"}`);
       await assertSnapshotConsumed();
       if (await pendingWriteReadback()) throw new Error("Complete pending write readback before changing sections");
       const expected = await verifiedCompiledExpectations();
@@ -1265,8 +1465,11 @@ export default function cventJobTools(pi: any) {
         // Browser policy has already proved canonical event identity on this
         // exact route, including legitimate keyless planner transitions.
         const comparison = compactSectionComparison(domain, expected, observed);
+        await clearNativeFallback(domain);
+        if (activeTurnProgress) { activeTurnProgress.meaningfulProgress = true; activeTurnProgress.progressReasons.push("section_state"); }
         await appendActivity(`Collected complete ${domain} section state in one bounded mission: ${comparison.counts.PRESENT} present, ${comparison.counts.DIFFERS} differing, ${comparison.counts.MISSING} missing`);
-        return toolText({ ok: true, route: observed.url ?? observed.page?.url ?? navigation.page?.url ?? base, ...comparison });
+        return toolText({ ok: true, route: observed.url ?? observed.page?.url ?? navigation.page?.url ?? base, ...comparison,
+          outcomeInstruction: `Configure ${domain} to match verified RR values; update only actual differences, Save, read back, and return item-level exceptions.` });
       });
     },
   });
@@ -1280,6 +1483,8 @@ export default function cventJobTools(pi: any) {
       const domain = String(params.domain);
       const operation = TRUSTED_SECTION_PROCEDURES[domain];
       if (!operation) throw new Error(`No trusted Cvent procedure is registered for ${domain}`);
+      const next = await resumeDomain();
+      if ((await assessedDomains()).includes(domain)) throw new Error(`DOMAIN_ALREADY_COMPLETE: ${domain} is checkpointed; resume ${next ?? "final QA"}`);
       return withQueue("browser", async () => {
         await assertSnapshotConsumed();
         if (await pendingWriteReadback()) throw new Error("Complete the pending Cvent write readback before starting a trusted section procedure");
@@ -1299,6 +1504,15 @@ export default function cventJobTools(pi: any) {
         await atomicJson(join(jobDir, `trusted-${domain}-result.json`), { ...result,
           rrSha256: expected.rr?.sha256, recordedAt: new Date().toISOString() });
         await appendActivity(`Trusted ${domain} Ego mission returned ${result.status}: ${result.records?.length ?? 0} records, ${result.mutationCount ?? 0} mutations`);
+        if (adapterNeedsNativeFallback(result)) {
+          await markNativeFallback(domain, result);
+          const freshSnapshot = await saveLargeSnapshot(await invokeBrowser("snapshotText", { intent: "read", domain }, signal, 90));
+          await appendActivity(`ADAPTER_NATIVE_FALLBACK ${domain}: CONTROL_NOT_FOUND with 0 writes; native Ego received a fresh live snapshot`);
+          await updateBrowserProgress(`Native Ego taking over ${domain} after optional accelerator limitation`);
+          return toolText({ ok: true, domain, replayHolds: holds, ...result, acceleratorOnly: true,
+            fallback: "NATIVE_EGO_REQUIRED", freshSnapshot,
+            instruction: `The optional accelerator could not locate controls and dispatched 0 writes. Continue ${domain} immediately with native Ego using this fresh snapshot; hold only proven item-level exceptions.` });
+        }
         await updateBrowserProgress(result.status === "AUTH_REQUIRED" ? `Cvent authentication required while entering ${domain}` : `Trusted ${domain} mission finished: ${result.status}`);
         return toolText({ ok: true, domain, replayHolds: holds, ...result });
       });
@@ -1329,6 +1543,9 @@ export default function cventJobTools(pi: any) {
           if (params.commitMode !== "read_only" && !writeIndexes.length) throw new Error("Configuration Ego action round contains no writes");
           validateActionRound(params.commitMode, steps);
           await assertSnapshotConsumed();
+          await assertDomainStrategy(domain, "actions", String(params.objective));
+          const next = await resumeDomain();
+          if ((await assessedDomains()).includes(domain)) throw new Error(`DOMAIN_ALREADY_COMPLETE: ${domain} is checkpointed; resume ${next ?? "final QA"}`);
           if (writeIndexes.length) {
             await assertCompiledExpectations();
             await assertSourcesVerified(domain, writeIndexes.map(index => steps[index].rrSource));
@@ -1342,12 +1559,24 @@ export default function cventJobTools(pi: any) {
           }
           await updateBrowserProgress(`Ego executing coherent ${domain} work: ${cleanText(params.objective, 500)}`);
           const boundedSteps = steps.map(step => ({ operation: String(step.operation), ...browserParams(String(step.operation), step) }));
-          const result = await invokeBrowser("actions", { intent: writeIndexes.length ? "write" : "read", domain, objective: cleanText(params.objective, 1200), commitMode: params.commitMode, steps: boundedSteps }, signal, Number(params.timeoutSeconds ?? 780));
+          let result: any;
+          try {
+            result = await invokeBrowser("actions", { intent: writeIndexes.length ? "write" : "read", domain, objective: cleanText(params.objective, 1200), commitMode: params.commitMode, steps: boundedSteps }, signal, Number(params.timeoutSeconds ?? 780));
+          } catch (error: any) {
+            if (!staleRefWithoutWrite(error?.message)) throw error;
+            const fresh = await saveLargeSnapshot(await invokeBrowser("snapshotText", { intent: "read", domain }, signal, 90));
+            await appendActivity(`STALE_REF_RECOVERED ${domain}: zero-write action round received a fresh snapshot for re-resolution`);
+            result = { ok: true, status: "STALE_REF_RECOVERED", writesAttempted: 0, saves: 0, readbacks: 0, freshSnapshot: fresh,
+              instruction: "Re-resolve from the fresh snapshot and continue; no mutation was dispatched." };
+          }
           if (writeIndexes.length) await clearWriteReadback();
-          await appendPerformance("ego_execution_round", performance.now(), { domain, actionCount: steps.length, writeCount: writeIndexes.length, fullSnapshots: steps.filter(step => step.operation === "snapshotText").length });
-          await appendPerformance("EGO_ROUND_ACTION_DENSITY", performance.now(), { domain, actionCount: steps.length, writeCount: writeIndexes.length, objective: cleanText(params.objective, 500) });
+          await clearNativeFallback(domain);
+          await appendPerformance("ego_execution_round", performance.now(), { domain, actionCount: result.actionCount ?? steps.length, writeCount: result.writesAttempted ?? 0,
+            saves: result.saves ?? 0, readbacks: result.readbacks ?? 0, fullSnapshots: steps.filter(step => step.operation === "snapshotText").length });
+          await appendPerformance("EGO_ROUND_ACTION_DENSITY", performance.now(), { domain, actionCount: result.actionCount ?? steps.length, writeCount: result.writesAttempted ?? 0, objective: cleanText(params.objective, 500) });
           if (steps.length < 4) await appendPerformance("LOW_ACTION_DENSITY", performance.now(), { domain, actionCount: steps.length, commitMode: params.commitMode, objective: cleanText(params.objective, 500) });
-          await appendActivity(`Ego ${domain} round completed ${steps.length} continuous browser actions: ${cleanText(params.objective, 500)}`);
+          await appendActivity(`Ego ${domain} round completed ${result.actionCount ?? steps.length} continuous browser actions: ${cleanText(params.objective, 500)}`);
+          await recordDomainRoundProgress(domain, result, String(params.objective));
           await updateBrowserProgress(`Ego ${domain} round verified and returned`);
           return toolBrowserResult(result);
         }
@@ -1368,7 +1597,33 @@ export default function cventJobTools(pi: any) {
           }
           const input = browserParams(operation, params);
           const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 35 : 90)), operation === "recover" ? 35 : 180));
-          const result = await invokeBrowser(operation, input, signal, timeout);
+          let result: any;
+          try { result = await invokeBrowser(operation, input, signal, timeout); }
+          catch (error: any) {
+            if (!staleRefWithoutWrite(error?.message)) throw error;
+            const fresh = await saveLargeSnapshot(await invokeBrowser("snapshotText", { intent: "read", domain: String(params.domain ?? currentSection) }, signal, 90));
+            await appendActivity(`STALE_REF_RECOVERED ${String(params.domain ?? currentSection)}: locator failure had 0 dispatched writes; fresh snapshot captured`);
+            return toolBrowserResult({ ok: true, status: "STALE_REF_RECOVERED", writesAttempted: 0, saves: 0, readbacks: 0,
+              freshSnapshot: fresh, instruction: "Re-resolve the target from this fresh snapshot and continue." });
+          }
+          if (operation === "recover") {
+            const next = await resumeDomain();
+            const opened = await invokeBrowser("openAuthorizedEvent", browserParams("openAuthorizedEvent", { intent: "read", refreshInventory: true }), signal, 120);
+            const fresh = await saveLargeSnapshot(await invokeBrowser("snapshotText", { intent: "read", domain: next ?? currentSection }, signal, 90));
+            const statePath = join(jobDir, "state.json"), state = await readJson(statePath, {});
+            state.current_stage = next ?? state.current_stage; state.current_action = `Browser recovered, exact event reopened, fresh snapshot captured; resume ${next ?? "current domain"}`;
+            state.updated_at = new Date().toISOString(); await atomicJson(statePath, state);
+            await appendActivity(`BROWSER_RECOVERED: exact event reopened from live/recollected inventory; resuming ${next ?? "current domain"}; completed domains preserved`);
+            return toolBrowserResult({ ...result, reopenedEvent: opened.authorizedTarget ?? opened.navigationTarget, freshSnapshot: fresh,
+              resumeDomain: next, instruction: `Continue ${next ?? "the first incomplete domain"}; do not restart a completed domain.` });
+          }
+          if (operation === "openAuthorizedEvent") {
+            const next = await resumeDomain();
+            const statePath = join(jobDir, "state.json"), state = await readJson(statePath, {});
+            state.current_stage = next ?? state.current_stage; state.current_action = `Exact event opened; resume ${next ?? "final QA"}`;
+            state.updated_at = new Date().toISOString(); await atomicJson(statePath, state);
+            result.resumeDomain = next; result.instruction = `Exact canonical event is open. Take a fresh snapshot and resume ${next ?? "final QA"}; completed domains are checkpointed.`;
+          }
           if (operation === "navigate" && params.url) await rememberSectionRoute(String(params.url));
           const packaged = await saveLargeSnapshot(result);
           if (write) {
@@ -1383,6 +1638,7 @@ export default function cventJobTools(pi: any) {
             const transport = await pendingSnapshot();
             if (!transport || transport.complete === true) await clearWriteReadback();
           }
+          if (params.domain && ["snapshotText", "sectionState", "controlInventory", "screenshot", "readTarget"].includes(operation)) await clearNativeFallback(String(params.domain));
           await updateBrowserProgress(write ? `Configuring selected Cvent event: ${operation}` : `Cvent browser read complete: ${operation}`);
           return toolBrowserResult(packaged);
         } catch (error) {

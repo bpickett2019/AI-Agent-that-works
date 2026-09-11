@@ -43,6 +43,50 @@ export class ValidatedRRCache {
   }
 }
 
+export function normalizedDomainStatus(value) {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+export function firstIncompleteDomain(plan, domainResults = {}, verification = {}, state = {}) {
+  const assessed = new Set();
+  for (const [domain, result] of Object.entries(domainResults?.domains ?? {})) {
+    if (['COMPLETE', 'COMPLETED', 'REVIEW_REQUIRED'].includes(normalizedDomainStatus(result?.checkpoint ?? result?.status))) assessed.add(domain);
+  }
+  for (const [domain, result] of Object.entries(verification?.domains ?? {})) {
+    if (Array.isArray(result?.cventEvidence) && result.cventEvidence.length) assessed.add(domain);
+  }
+  for (const domain of state?.completed ?? []) assessed.add(domain);
+  return (plan?.mission ?? []).map(item => item?.domain).find(domain => domain && !assessed.has(domain)) ?? null;
+}
+
+export function staleRefWithoutWrite(message) {
+  const text = String(message ?? '');
+  return /(?:ElementResolutionError:\s*)?Unknown ref:\s*\d+/i.test(text) && /dispatched writes=0/i.test(text);
+}
+
+export function adapterNeedsNativeFallback(result) {
+  return result?.status === 'CONTROL_NOT_FOUND' && Number(result?.mutationCount ?? 0) === 0;
+}
+
+export class DomainProgressGuard {
+  constructor(limit = 3) { this.limit = limit; this.domains = new Map(); }
+  observe(domain, meaningful, signature = '') {
+    const previous = this.domains.get(domain) ?? { consecutive: 0, maximum: 0, signature: '', strategyRequired: false };
+    const changed = Boolean(signature && signature !== previous.signature);
+    const madeProgress = Boolean(meaningful || changed);
+    const consecutive = madeProgress ? 0 : previous.consecutive + 1;
+    const next = { consecutive, maximum: Math.max(previous.maximum, consecutive), signature: signature || previous.signature,
+      strategyRequired: consecutive >= this.limit };
+    this.domains.set(domain, next);
+    return { ...next, meaningful: madeProgress, stalled: next.strategyRequired };
+  }
+  requireStrategy(domain) { return Boolean(this.domains.get(domain)?.strategyRequired); }
+  strategyChanged(domain) {
+    const previous = this.domains.get(domain) ?? { maximum: 0, signature: '' };
+    this.domains.set(domain, { ...previous, consecutive: 0, strategyRequired: false });
+  }
+}
+
 export class BrowserRecoveryBudget {
   firstFailure = null;
   terminalFailure = null;

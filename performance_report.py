@@ -145,8 +145,12 @@ def main(directory):
             "responseP95Ms": percentile([item.get("durationMs", 0) for item in model], .95), "firstTokenP50Ms": percentile(first_tokens, .5), "firstTokenP95Ms": percentile(first_tokens, .95)},
         "browser": {"operations": len(browser), "totalMs": round(sum(item.get("durationMs", 0) for item in browser), 1),
             "snapshots": sum(bool(item.get("snapshot")) for item in browser), "fullSnapshots": sum(bool(item.get("fullSnapshot")) for item in browser),
-            "navigations": sum(bool(item.get("navigation")) for item in browser), "writes": sum(item.get("intent") == "write" for item in browser),
+            "navigations": sum(bool(item.get("navigation")) for item in browser),
+            "writes": sum(int(item.get("writes", 0) or 0) for item in browser),
+            "saves": sum(int(item.get("saves", 0) or 0) for item in browser),
+            "readbacks": sum(int(item.get("readbacks", 0) or 0) for item in browser),
             "targetedReadbacks": sum(item.get("intent") == "read" and not item.get("fullSnapshot") for item in browser)},
+
         "executionLoop": {"timeToFirstBrowserActionMs": first_browser.get("durationMs", 0),
             "modelTurns": len(model_turns), "modelTurnsWithAction": sum(event.get("browserOperations", 0) > 0 for event in model_turns),
             "modelTurnsWithZeroProgress": sum(bool(event.get("zeroProgress")) for event in model_turns),
@@ -156,7 +160,10 @@ def main(directory):
             "contextPrunes": sum(event.get("kind") == "context_pruned" for event in events),
             "trustedSectionProcedures": [{"domain": event.get("domain"), "status": event.get("status"),
                 "records": event.get("records", 0), "mutations": event.get("mutationCount", 0), "durationMs": event.get("durationMs", 0)}
-                for event in trusted_procedures]},
+                for event in trusted_procedures],
+            "maximumConsecutiveZeroProgressRounds": max((int(value.get("maximumConsecutiveZeroProgressRounds", 0) or 0)
+                for value in read_json(directory / "domain-progress.json", {}).get("domains", {}).values()), default=0)},
+
         "sections": sections,
         "stageDurationsMs": stage_times, "forgeStatusUpdates": len(stage_markers), "api": {"reads": 0, "writes": 0}, "computeAndDisk": compute,
         "securitySoftware": {"observedProcessMetrics": compute.get("security", {}), "causalOverheadEstablished": False, "exclusionsApplied": False},

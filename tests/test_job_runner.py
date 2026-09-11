@@ -168,6 +168,27 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertEqual(unresolved[0], "failed_uncertain")
         self.assertTrue(unresolved[1])
 
+    def test_recoverable_retry_preserves_completed_domain_checkpoint(self):
+        job = {**self.job, "state": "failed_recoverable", "uncertain": 0, "original_filename": "rr.xlsx"}
+        (self.directory / "state.json").write_text(json.dumps({
+            "status": "failed_recoverable", "current_stage": "optional_items", "resume_requested": True,
+            "pi_session": "old-session", "completed": ["event_settings", "registration_types", "admission_items"],
+            "pending": ["optional_items", "pricing"],
+        }))
+        optional_evidence = self.directory / "optional-items-inventory.json"
+        optional_evidence.write_text(json.dumps({"categories": 8, "items": 35, "proof": "live"}))
+        with patch.object(self.runner.store, "get_job", return_value=job), \
+             patch("job_runner.job_dir", return_value=self.directory), \
+             patch("job_runner.mutation_outcome", return_value={"unresolved": False}), \
+             patch.object(self.runner, "start") as start:
+            self.runner.retry_recoverable(job["id"], "operator")
+        state = json.loads((self.directory / "state.json").read_text())
+        self.assertEqual(state["completed"], ["event_settings", "registration_types", "admission_items"])
+        self.assertEqual(state["pending"][0], "optional_items")
+        self.assertIsNone(state["pi_session"])
+        self.assertEqual(json.loads(optional_evidence.read_text())["items"], 35)
+        start.assert_called_once_with(job["id"], "operator")
+
     def test_failed_prewrite_retry_uses_a_fresh_session_only_without_write_evidence(self):
         job = {**self.job, "state": "failed_prewrite", "uncertain": 0, "original_filename": "rr.xlsx"}
         (self.directory / "state.json").write_text(json.dumps({

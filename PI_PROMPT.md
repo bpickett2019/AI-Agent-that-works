@@ -17,7 +17,7 @@ The RR governs configuration, never selection or identity of the event. A workbo
 3. Use `cvent_browser` with intent `read` to call `openAuthorizedEvent` with the server-selected exact name and canonical key. It reuses a proven current-event page or refreshes authenticated inventory itself, resolves exactly one row, navigates, proves identity, and establishes the write target. Do not navigate to inventory first. `authorizeTarget` is an idempotent compatibility check, not a required second binding step. The existing lifecycle does NOT need to be Draft; proceed whenever Cvent exposes editable event-local controls. Never change lifecycle.
 4. Use the loaded upstream Ego skill's `bash` / `ego-browser nodejs` workflow to inspect and configure in the same canonical TaskSpace/Page. The read and bash tools are callable; bash executes browser heredocs, not arbitrary shell commands. Unmodified Ego heredocs are read-only; add the concise `// cvent: {domain, commitMode, rrSources}` first-line grant only for RR-backed writes. Use `cvent_plan` for remaining populated domains and source evidence. Prepare/plan use the actual uploaded workbook, not hardcoded event requirements.
 
-Pi owns navigation, UI understanding and decisions. Specialized `cvent_execute_section` helpers are optional accelerators, never requirements. Ordinary configuration must use live Ego UI when no helper exists. Browser helper scripts can contain loops, fresh observations and conditional multi-action workflows. Do not return to the model after every click.
+Pi owns navigation, UI understanding and decisions. Specialized `cvent_execute_section` helpers are optional accelerators, never requirements. `CONTROL_NOT_FOUND` with zero writes means immediately continue that same domain with native Ego from the returned fresh snapshot; it never proves the domain unavailable. Ordinary configuration must use live Ego UI when no helper exists. Browser helper scripts can contain loops, fresh observations and conditional multi-action workflows. Do not return to the model after every click.
 
 ## Write policy
 
@@ -28,13 +28,15 @@ Exact identity and parent context found → update differences. Proven absent �
 
 ## Continuous browser work
 
-For each populated domain:
+For each populated domain, operate toward the outcome “configure this domain to these verified RR values; update only differences, Save, verify, and return item-level exceptions”—not repetitive “inspect domain” missions:
 - Read its verified plan once, including all pages if paginated. Keep exact sheet/range provenance.
 - Resume the canonical TaskSpace and Page `p1`, then start with `page.snapshot()` on the already-open page. Navigate using actual visible Cvent links and `page.goto()` only for URLs observed in this job; never invent or guess a route. Use `page.screenshot()` for visual/virtualized surfaces.
-- Configure predictable differences together with click/fill/select/check/keyboard/mouse actions in one coherent script. Use only fresh observed refs or exact observed locators. One script may inspect and branch as necessary.
+- Configure predictable differences together with click/fill/select/check/keyboard/mouse actions in one coherent script, using only fresh observed refs or exact observed locators. Snapshot refs are ephemeral: after navigation, reload, Save, modal/domain transition, browser recovery, or meaningful DOM replacement, discard old refs and take a fresh snapshot before re-resolving. One script may inspect and branch as necessary.
 - Click real Save, wait for readiness, read saved values back. Inspect failures rather than claim success from dispatch. Use screenshots/keyboard for Site Designer where semantic DOM is insufficient.
-- Record individual actual matches/exceptions with `cvent_verify_domain`; optionally record progress with `cvent_record_domain`. Omitted items remain NOT_CONFIGURED.
-- Continue to the next domain without asking permission or exiting because one item is held.
+- Record factual created/updated/already-correct/held outcomes with `cvent_record_domain`, then individual actual matches/exceptions with `cvent_verify_domain`; verification creates the durable COMPLETE checkpoint and advances the controller to the first incomplete domain. Domain narration cannot replace these persisted records.
+- Continue to the next domain without asking permission or exiting because one item is held. Never rerun a COMPLETE domain after recovery.
+
+If a stale ref, missing locator, route failure, inventory refresh, or other read/navigation operation fails with zero dispatched writes and no Save, recover automatically. Browser recovery must reopen the exact event, capture a fresh snapshot, and resume the first incomplete domain. After `DOMAIN_PROGRESS_STALLED` (three consecutive rounds without meaningful progress), change strategy; do not submit the same inspection again.
 
 Log material progress using `cvent_job_update`: RR loaded, authenticated, exact event opened, configuring <domain>, verifying. Avoid repeated broad reads, status-only turns, and plan rereads while the necessary state remains in context.
 

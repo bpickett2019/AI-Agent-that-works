@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { createHash } from 'node:crypto';
-import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget } from '../extensions/prewrite-orchestration.mjs';
+import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget, firstIncompleteDomain, staleRefWithoutWrite, adapterNeedsNativeFallback, DomainProgressGuard } from '../extensions/prewrite-orchestration.mjs';
 
 const pair = (id, name, args = {}, text = '{}') => [
   { role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }] },
@@ -51,6 +51,24 @@ assert.equal(invalid.allow('cvent_plan', {}).terminal, false);
 assert.equal(invalid.allow('cvent_prepare_rr', {}).terminal, true);
 const locator = new BrowserRecoveryBudget(); locator.failure('fill', 'target could not be resolved');
 assert.equal(locator.allow('cvent_browser', { operation: 'snapshotText' }).allowed, true);
+
+// Exact live regression: event settings and intervening domains are durable;
+// optional-items failure/recovery resumes optional_items, never domain one.
+const recoveryPlan = { mission: ['event_settings', 'registration_types', 'admission_items', 'optional_items', 'pricing'].map(domain => ({ domain })) };
+assert.equal(firstIncompleteDomain(recoveryPlan, { domains: { event_settings: { checkpoint: 'COMPLETE' } } }, {},
+  { completed: ['event_settings', 'registration_types', 'admission_items'], current_stage: 'optional_items' }), 'optional_items');
+assert.equal(staleRefWithoutWrite('ElementResolutionError: Unknown ref: 8723; dispatched writes=0, completed actions=0'), true);
+assert.equal(staleRefWithoutWrite('Unknown ref: 8723; dispatched writes=1'), false);
+assert.equal(adapterNeedsNativeFallback({ status: 'CONTROL_NOT_FOUND', mutationCount: 0 }), true);
+assert.equal(adapterNeedsNativeFallback({ status: 'CONTROL_NOT_FOUND', mutationCount: 1 }), false);
+const progressGuard = new DomainProgressGuard(3);
+assert.equal(progressGuard.observe('event_settings', false).stalled, false);
+assert.equal(progressGuard.observe('event_settings', false).stalled, false);
+assert.equal(progressGuard.observe('event_settings', false).stalled, true);
+assert.equal(progressGuard.requireStrategy('event_settings'), true);
+progressGuard.strategyChanged('event_settings');
+assert.equal(progressGuard.requireStrategy('event_settings'), false);
+assert.equal(progressGuard.observe('event_settings', true).consecutive, 0);
 
 const root = process.cwd(), directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'prewrite-offline-'));
 try {
@@ -101,7 +119,15 @@ try {
   const native = source => ({ command: `ego-browser nodejs <<'EOF'\n// cvent: {"domain":"event_settings","commitMode":"save","rrSources":["${source}"]}\nawait fillInput('@1','value'); await click('@2'); cliLog(await snapshotText());\nEOF` });
   await tools.get('bash').execute('independent-safe-write', native('RR!B1'));
   await assert.rejects(tools.get('bash').execute('ambiguous-write', native('RR!B2')), /Item held/);
-  save('final-verification.json', { domains: {event_settings: {cventEvidence:['actual page'],items:[]}} });
+  await tools.get('cvent_verify_domain').execute('verify-domain', {
+    domain: 'event_settings', cventEvidence: ['actual saved page'],
+    matches: [{ itemId: 'one', cventEvidence: ['A2Z Event ID=2123 after Save'] }],
+    exceptions: [{ itemId: 'two', status: 'AMBIGUOUS', reason: 'held independently' }],
+  });
+  const checkpoint = JSON.parse(fs.readFileSync(path.join(directory, 'domain-results.json'), 'utf8')).domains.event_settings;
+  assert.equal(checkpoint.checkpoint, 'COMPLETE');
+  assert.deepEqual(checkpoint.telemetry, { browserOperations: 1, writes: 2, saves: 1, readbacks: 1 });
+  await assert.rejects(() => tools.get('cvent_section_state').execute('no-replay', { domain: 'event_settings' }), /DOMAIN_ALREADY_COMPLETE/);
   assert.equal((await tools.get('cvent_finish').execute('review-after-work', finalArgs)).terminate, true);
   fs.writeFileSync(helper, failedHelper);
   await assert.rejects(tools.get('cvent_browser').execute('auth', { operation: 'authStatus', intent: 'read' }, undefined), /timeout: timed out/);

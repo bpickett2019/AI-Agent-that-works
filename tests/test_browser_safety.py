@@ -309,6 +309,45 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertTrue(result['accountContextMatch'])
         self.assertNotIn('org-private',json.dumps(result))
 
+    def test_same_canonical_event_route_transition_uses_bound_event_context(self):
+        self.write_lock()
+        browser_tool.local_probe=lambda runtime:{'url':'https://planner.app.cvent.com/event/configuration'}
+        (self.base/'authorized-event-context.json').write_text(json.dumps({
+            'schemaVersion':1,'browserRuntimeId':'runtime-current','eventKey':'locked',
+            'url':'https://planner.app.cvent.com/event/configuration','provenAt':'2999-01-01T00:00:00+00:00',
+        }))
+        browser_tool.guard(self.runtime,'click',{'intent':'write'})
+        browser_tool.local_probe=lambda runtime:{'url':'https://planner.app.cvent.com/event/configuration?evtstub=other'}
+        with self.assertRaisesRegex(RuntimeError,'exact selected event'):
+            browser_tool.guard(self.runtime,'click',{'intent':'write'})
+        self.assertIn('stageAuthorizedTransition',EGO_DIRECT)
+        self.assertIn('transitionBound',EGO_DIRECT)
+        self.assertIn('safeTransitionDestination',EGO_DIRECT)
+        self.assertIn('protectedCurrent',EGO_DIRECT)
+        self.assertIn('conflictingKey',EGO_DIRECT)
+
+    def test_missing_inventory_after_recovery_is_recollected_by_open(self):
+        self.assertFalse((self.base/'selected-event-inventory.json').exists())
+        block=EGO_DIRECT[EGO_DIRECT.index("case 'openAuthorizedEvent'"):EGO_DIRECT.index("case 'script'")]
+        self.assertIn("const inventoryUrl='https://app.cvent.com/Subscribers/Events2/EventSelection'",block)
+        self.assertIn('await ego.goto(inventoryUrl',block)
+        self.assertIn('collectEventRows',block)
+        self.assertIn('currentEvidence.proven&&!params.refreshInventory',block)
+        self.assertNotIn('selected_event_inventory',block)
+        extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
+        self.assertIn('refreshInventory: true',extension)
+        self.assertIn("result['authorizedTarget']=establish_target_lock",ROUTER)
+
+    def test_stale_refs_adapter_fallback_and_progress_stall_are_controller_recoverable(self):
+        extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
+        self.assertIn('STALE_REF_RECOVERED',extension)
+        self.assertIn('dispatched 0 writes. Continue',extension)
+        self.assertIn('ADAPTER_NATIVE_FALLBACK',extension)
+        self.assertIn('DOMAIN_PROGRESS_STALLED',extension)
+        self.assertIn('DomainProgressGuard(3)',extension)
+        self.assertIn('DOMAIN_ALREADY_COMPLETE',extension)
+        self.assertIn('resumeDomain',extension)
+
     def test_navigation_fails_closed(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/subscribers/events2/EventSelection'}
         with self.assertRaisesRegex(RuntimeError,'non-authorized'):

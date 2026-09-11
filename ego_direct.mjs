@@ -43,16 +43,36 @@ try{
   }
   const eventKey=url=>{try{const parsed=new URL(url),keys=[...parsed.searchParams].filter(([name])=>['evtstub','eventid','event'].includes(name.toLowerCase())).map(([,value])=>value.trim().toLowerCase());if(keys.length)return keys[0]&&keys.every(key=>key===keys[0])?keys[0]:null;return parsed.pathname.match(/\/events\/([0-9a-f-]{20,})/i)?.[1]?.toLowerCase()??null}catch{return null}};
   const protectedPath=/(?:^|\/)(?:attendees?|invitees?|contacts?|contact[-_]?types?|communications?|emails?|messages?|account(?:settings)?|organization|admin|global|library|profiles?)(?:\/|$)/i;
+  const contextPath=path.join(path.dirname(runtimePath),'authorized-event-context.json'),transitionPath=path.join(path.dirname(runtimePath),'authorized-event-transition.json');
+  const privateJson=file=>{try{const stat=fs.lstatSync(file);return stat.isFile()&&!stat.isSymbolicLink()&&stat.size<1024*1024?JSON.parse(fs.readFileSync(file,'utf8')):null}catch{return null}};
+  const sameRoute=(left,right)=>{try{const a=new URL(left),b=new URL(right);return a.origin===b.origin&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search}catch{return false}};
   async function eventIdentityEvidence(){
     const info=await ego.pageInfo(),url=new URL(info.url),expected=String(runtime.authorizedEventKey||'').toLowerCase();
-    const visible=await ego.evaluate(`(() => {const expected=${JSON.stringify(String(runtime.authorizedEventName||''))},key=${JSON.stringify(String(runtime.authorizedEventKey||'').toLowerCase())},keys=[],push=value=>{try{const u=new URL(value,location.href);for(const [name,item] of u.searchParams)if(['evtstub','eventid','event'].includes(name.toLowerCase())&&item)keys.push(item.toLowerCase());const match=u.pathname.match(/\\/events\\/([0-9a-f-]{20,})/i);if(match)keys.push(match[1].toLowerCase())}catch{}};for(const element of document.querySelectorAll('a[href],form[action]'))push(element.href||element.action);for(const input of document.querySelectorAll('input[type=hidden]'))if(/^(?:evtstub|eventid|event)$/i.test(input.name||input.id||''))keys.push(String(input.value||'').toLowerCase());const body=(document.body?.innerText||'').slice(0,100000),headings=[document.title,...document.querySelectorAll('h1,h2,[role=heading]')].map(value=>typeof value==='string'?value:value.innerText||value.textContent||'');return {ready:document.readyState,hasSelectedName:Boolean(expected)&&body.includes(expected),hasSelectedHeading:Boolean(expected)&&headings.some(value=>String(value).includes(expected)),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(body),keys:[...new Set(keys)].slice(0,200),hasExpectedKey:keys.includes(key)}})()`);
-    const direct=eventKey(info.url)===expected,isInventory=/\/events2\/eventselection/i.test(url.pathname),proven=Boolean(expected)&&!isInventory&&!visible.hasLogin&&(direct||(visible.hasExpectedKey&&visible.hasSelectedHeading));
-    return {proven,page:info,direct,isInventory,visible};
+    const visibleResult=await ego.evaluate(`(() => {const expected=${JSON.stringify(String(runtime.authorizedEventName||''))},key=${JSON.stringify(String(runtime.authorizedEventKey||'').toLowerCase())},keys=[],push=value=>{try{const u=new URL(value,location.href);for(const [name,item] of u.searchParams)if(['evtstub','eventid','event'].includes(name.toLowerCase())&&item)keys.push(item.toLowerCase());const match=u.pathname.match(/\\/events\\/([0-9a-f-]{20,})/i);if(match)keys.push(match[1].toLowerCase())}catch{}};for(const element of document.querySelectorAll('a[href],form[action]'))push(element.href||element.action);for(const input of document.querySelectorAll('input[type=hidden]'))if(/^(?:evtstub|eventid|event)$/i.test(input.name||input.id||''))keys.push(String(input.value||'').toLowerCase());const body=(document.body?.innerText||'').slice(0,100000),headings=[document.title,...document.querySelectorAll('h1,h2,[role=heading]')].map(value=>typeof value==='string'?value:value.innerText||value.textContent||'');return {ready:document.readyState,hasSelectedName:Boolean(expected)&&body.includes(expected),hasSelectedHeading:Boolean(expected)&&headings.some(value=>String(value).includes(expected)),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(body),keys:[...new Set(keys)].slice(0,200),hasExpectedKey:keys.includes(key)}})()`);
+    const visible={keys:[],hasLogin:false,hasExpectedKey:false,...(visibleResult??{})};
+    const direct=eventKey(info.url)===expected,isInventory=/\/events2\/eventselection/i.test(url.pathname),protectedCurrent=protectedPath.test(url.pathname),conflictingKey=visible.keys.some(key=>key!==expected);
+    const context=privateJson(contextPath),transition=privateJson(transitionPath),now=Date.now();
+    const contextBound=context?.schemaVersion===1&&context.browserRuntimeId===runtime.browserRuntimeId&&String(context.eventKey||'').toLowerCase()===expected&&now-Date.parse(context.provenAt||0)<=30*60*1000;
+    const safeTransitionDestination=sameRoute(info.url,transition?.toUrl)||((url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))&&!protectedCurrent);
+    const transitionBound=transition?.schemaVersion===1&&transition.browserRuntimeId===runtime.browserRuntimeId&&String(transition.eventKey||'').toLowerCase()===expected&&now-Date.parse(transition.createdAt||0)<=5*60*1000&&contextBound&&context.url===transition.fromUrl&&safeTransitionDestination;
+    const persistedCurrent=contextBound&&context.url===info.url;
+    const proven=Boolean(expected)&&!isInventory&&!protectedCurrent&&!visible.hasLogin&&!conflictingKey&&(direct||visible.hasExpectedKey||persistedCurrent||transitionBound);
+    return {proven,page:info,direct,isInventory,protectedCurrent,visible,conflictingKey,persistedCurrent,transitionBound};
   }
   async function rememberAuthorizedPage(evidence){
     if(!evidence?.proven)return;
-    const ledgerPath=path.join(path.dirname(runtimePath),'authorized-event-context.json'),temporary=`${ledgerPath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary,JSON.stringify({schemaVersion:1,browserRuntimeId:runtime.browserRuntimeId,eventKey:String(runtime.authorizedEventKey).toLowerCase(),eventName:runtime.authorizedEventName,url:evidence.page.url,title:evidence.page.title,provenAt:new Date().toISOString(),evidence:{direct:evidence.direct,hasExpectedKey:evidence.visible?.hasExpectedKey,hasSelectedName:evidence.visible?.hasSelectedName,hasSelectedHeading:evidence.visible?.hasSelectedHeading}}),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,ledgerPath);fs.chmodSync(ledgerPath,0o600);
+    const temporary=`${contextPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary,JSON.stringify({schemaVersion:1,browserRuntimeId:runtime.browserRuntimeId,eventKey:String(runtime.authorizedEventKey).toLowerCase(),eventName:runtime.authorizedEventName,url:evidence.page.url,title:evidence.page.title,provenAt:new Date().toISOString(),evidence:{direct:evidence.direct,hasExpectedKey:evidence.visible?.hasExpectedKey,hasSelectedName:evidence.visible?.hasSelectedName,hasSelectedHeading:evidence.visible?.hasSelectedHeading,persistedCurrent:evidence.persistedCurrent,transitionBound:evidence.transitionBound}}),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,contextPath);fs.chmodSync(contextPath,0o600);try{fs.unlinkSync(transitionPath)}catch(error){if(error?.code!=='ENOENT')throw error}
+  }
+  async function stageAuthorizedTransition(destination){
+    const before=await eventIdentityEvidence();if(!before.proven)throw Error('Navigation blocked: source page does not prove the exact selected event');
+    const to=new URL(destination,before.page.url),host=to.hostname.toLowerCase(),expected=String(runtime.authorizedEventKey||'').toLowerCase(),key=eventKey(to.href);
+    if(to.protocol!=='https:'||!(host==='cvent.com'||host.endsWith('.cvent.com'))||protectedPath.test(to.pathname)||key&&key!==expected)throw Error('Navigation outside exact selected event blocked');
+    let observed=Boolean(key===expected);
+    if(!observed)observed=await ego.evaluate(`(() => {const wanted=${JSON.stringify(to.href)},same=(value)=>{try{const a=new URL(value,location.href),b=new URL(wanted);return a.origin===b.origin&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search}catch{return false}};return [...document.querySelectorAll('a[href],form[action]')].some(element=>same(element.href||element.action))})()`);
+    if(!observed){const routes=privateJson(path.join(path.dirname(runtimePath),'cvent-route-cache.json'));observed=Object.values(routes?.routes||{}).some(route=>route?.browserRuntimeId===runtime.browserRuntimeId&&sameRoute(route.url,to.href))}
+    if(!observed)throw Error('Navigation blocked: keyless Cvent route has no verified event-local relationship');
+    const temporary=`${transitionPath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify({schemaVersion:1,browserRuntimeId:runtime.browserRuntimeId,eventKey:expected,fromUrl:before.page.url,toUrl:to.href,createdAt:new Date().toISOString()}),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,transitionPath);fs.chmodSync(transitionPath,0o600);return to.href;
   }
   async function assertLease(){
     const endpoint=process.env.CVENT_LEASE_VALIDATE_URL,jobId=process.env.CVENT_JOB_ID,token=process.env.CVENT_LEASE_TOKEN,eventId=runtime.authorizedEventId;
@@ -89,7 +109,7 @@ try{
     const mutating=/^(?:save(?:\s|$)|save\s*(?:&|and)\s*close(?:\s|$)|create(?:\s|$)|add(?:\s|$)|update(?:\s|$)|apply(?:\s|$)|confirm(?:\s|$)|submit(?:\s|$))/i;
     if(identity.test(target)||labels.some(label=>identity.test(label)))throw new Error('Write blocked: selected event identity is immutable');
     if(labels.some(label=>protectedControl.test(label))||descriptor.href&&protectedPath.test(new URL(descriptor.href).pathname))throw new Error('Action blocked: protected Cvent control');
-    if(descriptor.href){const url=new URL(descriptor.href),key=eventKey(url.href);if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==String(runtime.authorizedEventKey).toLowerCase())throw Error('Navigation outside exact authorized event blocked');}
+    if(descriptor.href){const url=new URL(descriptor.href),key=eventKey(url.href);if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==String(runtime.authorizedEventKey).toLowerCase())throw Error('Navigation outside exact authorized event blocked');if(['click','dblclick','activate'].includes(step.operation))await stageAuthorizedTransition(url.href);}
     if(step.intent!=='write'&&(labels.some(label=>mutating.test(label))||['checkbox','radio','switch'].includes(String(descriptor.role).toLowerCase())||descriptor.tag==='INPUT'&&['click','activate'].includes(step.operation)))throw new Error('Mutating control requires write intent and RR evidence');
     if(step.intent==='write'){await assertLease();await assertAuthorizedPage();}
   }
@@ -128,7 +148,7 @@ try{
       case 'drag':await dispatch(step,()=>ego.drag([step.target,step.destination],{delay:75}));return {dragged:true};
       case 'visualDrag':await dispatch(step,()=>ego.drag([[step.x,step.y],[step.toX,step.toY]],{delay:75,label:step.label}));return {dragged:[[step.x,step.y],[step.toX,step.toY]]};
       case 'uploadDiscountImport':await dispatch(step,()=>ego.setInputFiles(step.target,step.filePath));return {uploadedArtifact:'discount-import.xlsx'};
-      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase();if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==expected||protectedPath.test(url.pathname))throw new Error('Navigation outside exact selected event blocked');await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});await assertAuthorizedPage();return {navigated:url.href}}
+      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase();if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==expected||protectedPath.test(url.pathname))throw new Error('Navigation outside exact selected event blocked');await stageAuthorizedTransition(url.href);await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});await assertAuthorizedPage();return {navigated:url.href}}
       case 'wait':if(step.target)await ego.waitForSelector(step.target,{timeout:step.ms??30000});else if(step.loadState)await ego.waitForLoadState(step.loadState,{timeout:step.ms??30000});else await ego.waitForTimeout(step.ms??1000);return {waitedMs:step.ms??1000};
       default:throw new Error(`Unsupported coherent Ego action: ${op}`);
     }
@@ -207,7 +227,7 @@ try{
       const before=await ego.pageInfo(),beforeUrl=new URL(before.url);
       if(beforeUrl.protocol!=='https:'||!(beforeUrl.hostname==='cvent.com'||beforeUrl.hostname.endsWith('.cvent.com')))throw new Error('AUTH_REQUIRED: current page is not authenticated Cvent');
       const currentEvidence=await eventIdentityEvidence();
-      if(currentEvidence.proven){
+      if(currentEvidence.proven&&!params.refreshInventory){
         await rememberAuthorizedPage(currentEvidence);
         result={openedEventKey:expectedKey,activation:'already-inside-exact-event',inventoryUrl:null,navigationTarget:{name:exactName,eventKey:expectedKey,code:params.eventCode||'',status:'',href:before.url},landing:{ready:currentEvidence.visible.ready,title:before.title},identityEvidence:currentEvidence};break;
       }
@@ -320,20 +340,25 @@ try{
       result={actions:completedActions,actionCount:completedActions.length,writesAttempted,saves,readbacks,logs,unresolvedWrites:false};break;
     }
     case 'actions': {
-      const actions=completedActions;
+      const actions=completedActions;let pendingSavedWrite=false;
       for(let index=0;index<params.steps.length;index++){
         actionIndex=index;
-        const step=params.steps[index],started=performance.now();
+        const step=params.steps[index],started=performance.now(),before=writesAttempted;
         const actionResult=await runAdaptive(step);
+        const saveStep=step.intent==='write'&&['click','activate','press','visualClick'].includes(step.operation)&&/save/i.test(String(step.target??step.key??step.label??''));
+        if(saveStep){saves++;pendingSavedWrite=true}
+        if(writesAttempted>before&&params.commitMode==='autosave')pendingSavedWrite=true;
+        if(pendingSavedWrite&&step.intent==='read'&&['readTarget','sectionState','controlInventory','snapshotText','screenshot'].includes(step.operation)){readbacks++;pendingSavedWrite=false}
         actions.push({index,operation:step.operation,intent:step.intent,durationMs:Math.round((performance.now()-started)*10)/10,result:actionResult});
       }
-      result={objective:params.objective,commitMode:params.commitMode,actions,writesAttempted,actionCount:actions.length};break;
+      if(pendingSavedWrite)throw Error('Ego action round ended with saved changes lacking fresh readback');
+      result={objective:params.objective,commitMode:params.commitMode,actions,writesAttempted,saves,readbacks,actionCount:actions.length};break;
     }
     case 'screenshot': result={screenshotPath:await ego.screenshot({path:params.filePath,fullPage:params.fullPage===true})};break;
     case 'visualClick': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.click([params.x,params.y],{label:params.label})};break;
     case 'visualDoubleClick': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.dblclick([params.x,params.y],{label:params.label})};break;
-    case 'click': result={result:await ego.click(params.target)};break;
-    case 'activate': result={result:await ego.evaluateLocator(params.target,(element)=>{if(!(element instanceof HTMLElement))throw new Error('activate target must be an HTML element');element.click();return true})};break;
+    case 'click': {const resolved=await resolveTarget(params);await authorizeInteractive(params,resolved.descriptor);result={result:await dispatch(params,()=>ego.click(resolved.target))};break;}
+    case 'activate': {const resolved=await resolveTarget(params);await authorizeInteractive(params,resolved.descriptor);result={result:await dispatch(params,()=>ego.evaluateLocator(resolved.target,(element)=>{if(!(element instanceof HTMLElement))throw new Error('activate target must be an HTML element');element.click();return true}))};break;}
     case 'fill': result={result:await ego.fill(params.target,params.text??'')};break;
     case 'type': await ego.focus(params.target);result={result:await ego.insertText(params.text??'')};break;
     case 'typeText': if(params.intent==='write'){await assertLease();await assertAuthorizedPage();writesAttempted++}result={result:await ego.insertText(params.text??'')};break;
@@ -371,8 +396,9 @@ try{
     case 'visualDrag': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.drag([[params.x,params.y],[params.toX,params.toY]],{delay:75,label:params.label})};break;
     case 'uploadDiscountImport': await ego.setInputFiles(params.target,params.filePath);result={uploadedArtifact:'discount-import.xlsx'};break;
     case 'navigate': {
-      const navigation=await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??30),180)*1000)});
       const lockPath=path.join(path.dirname(runtimePath),'authorized-target.json');let hasTargetLock=false;try{const lock=JSON.parse(fs.readFileSync(lockPath,'utf8'));hasTargetLock=lock.browser_runtime_id===runtime.browserRuntimeId&&String(lock.event_key||'').toLowerCase()===String(runtime.authorizedEventKey||'').toLowerCase()}catch{}
+      if(runtime.accessMode!=='read_only_inventory'&&hasTargetLock)await stageAuthorizedTransition(params.url);
+      const navigation=await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??30),180)*1000)});
       if(runtime.accessMode!=='read_only_inventory'&&hasTargetLock)await assertAuthorizedPage();
       result={result:navigation};break;
     }

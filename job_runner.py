@@ -21,6 +21,7 @@ from control_store import ControlStore
 from performance_monitor import monitor as monitor_performance
 from mutation_outcome import mutation_outcome
 from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, job_dir, pi_model, pi_provider, slot_by_id
+from telemetry_report import write_telemetry_report
 
 
 def now() -> str:
@@ -333,10 +334,14 @@ class JobRunner:
             self._active[job_id] = active
         directory = job_dir(job["workspace_id"], job_id)
         state = read_json(directory / "state.json", fresh_state(job))
+        try:
+            deployed_sha = (ROOT / ".deployed-git-sha").read_text().strip()
+        except OSError:
+            deployed_sha = "unknown"
         state.update({
             "status": "starting", "current_stage": "starting",
             "current_action": f"Starting isolated worker {lease['slot_id']}",
-            "worker_slot": lease["slot_id"], "updated_at": now(),
+            "worker_slot": lease["slot_id"], "deployed_sha": deployed_sha, "updated_at": now(),
         })
         atomic_json(directory / "state.json", state)
         append_log(directory, f"Immediately reserved worker {lease['slot_id']} and canonical event lease")
@@ -425,6 +430,10 @@ class JobRunner:
             failed_state = persisted["state"] if persisted else "failed"
             state.update({"status": failed_state, "current_action": f"Worker launch failed: {exc}", "pi_pid": None, "updated_at": now()})
             atomic_json(directory / "state.json", state)
+            try:
+                write_telemetry_report(directory, persisted or job, ROOT)
+            except Exception as report_error:
+                append_log(directory, f"Persisted telemetry report generation failed: {type(report_error).__name__}: {report_error}")
             self._remove_active(active)
 
     def _monitor(self, job: dict[str, Any], active: ActiveJob) -> None:
@@ -488,7 +497,8 @@ class JobRunner:
                 pass
         state.update({
             "status": finish_state, "current_action": error or ("Draft build complete" if finish_state == "completed" else "Review required"),
-            "pi_pid": None, "process_started_at": None, "worker_slot": None, "updated_at": now(),
+            "pi_pid": None, "last_process_started_at": state.get("process_started_at"), "process_started_at": None,
+            "worker_slot": None, "updated_at": now(),
         })
         atomic_json(directory / "state.json", state)
         active.stop_heartbeat.set()
@@ -497,6 +507,10 @@ class JobRunner:
                            env=self.prepare_environment(job, active.slot_id), capture_output=True, text=True, timeout=30)
         except Exception:
             pass
+        try:
+            write_telemetry_report(directory, self.store.get_job(job["id"]) or job, ROOT)
+        except Exception as report_error:
+            append_log(directory, f"Persisted telemetry report generation failed: {type(report_error).__name__}: {report_error}")
         append_log(directory, f"Released worker {active.slot_id} and event lease; job state is {finish_state}")
         self._remove_active(active)
 
