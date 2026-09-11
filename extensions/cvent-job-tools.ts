@@ -1845,6 +1845,10 @@ export default function cventJobTools(pi: any) {
       return withQueue("job-files", async () => {
         if (SIMPLE) {
           if (params.realWrites.length && !params.realReads.length) throw new Error("Report the actual persisted verification evidence for your work");
+          const stateBeforeFinish = await readJson(join(jobDir, "state.json"), {});
+          const pendingChecklist = (stateBeforeFinish.pending ?? []).map((item: unknown) => cleanText(item, 200)).filter(Boolean);
+          if (!params.jobWideBlocker && pendingChecklist.length)
+            throw new Error(`Do not finish while your own checklist still has pending safe work: ${pendingChecklist.join(", ")}. Continue with Ego until the checklist is empty.`);
           const validation = await readJson(join(jobDir, "rr-validation.json"), { items: [] });
           const requiredCounts = new Map<string, number>();
           for (const item of validation.items ?? []) {
@@ -1868,6 +1872,9 @@ export default function cventJobTools(pi: any) {
             if (!params.unresolvedItems.length) throw new Error("REVIEW_REQUIRED needs exact unresolved item-level exceptions");
             if (requiredCounts.size && ![...assessments.values()].some(assessment => assessment.outcome === "review_required" || assessment.outcome === "prohibited"))
               throw new Error("REVIEW_REQUIRED needs at least one domain assessment with a review_required or prohibited outcome");
+            const unfinished = [...assessments.values()].filter(assessment => assessment.evidence.some((entry: unknown) => /(?:time constraints?|not (?:fully |all )?verified|was not (?:verified|configured|inspected|attempted)|were not (?:verified|configured|inspected|attempted))/i.test(String(entry))));
+            if (unfinished.length)
+              throw new Error(`REVIEW_REQUIRED cannot substitute for unfinished safe work. Continue dynamically with Ego in: ${unfinished.map(item => item.domain).join(", ")}.`);
           }
           const report = { status: params.status, execution_mode: "simple", reported_by: "pi",
             job_wide_blocker: params.jobWideBlocker ?? null, completion_reason: params.blockerEvidence ?? "Pi final QA; see actual evidence and review items",

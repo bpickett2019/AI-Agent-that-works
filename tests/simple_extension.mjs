@@ -79,8 +79,12 @@ print('BROWSER_ROUTER_RESULT='+json.dumps(out))
   const final={status:'REVIEW_REQUIRED',unresolvedItems:['One RR item ambiguous; independent work completed'],domainAssessments:[
     {domain:'event_settings',outcome:'verified',evidence:['Persisted Event Settings readback']},
   ],realReads:['Persisted verification'],realWrites:['Changed value'],guardrails:{published:0,emailsSent:0,deletes:0,globalMutations:0}};
+  await assert.rejects(tools.get('cvent_finish').execute('pending-checklist',final),/pending safe work/);
+  await tools.get('cvent_job_update').execute('checklist-done',{pending:[],action:'All independent work attempted'});
   await assert.rejects(tools.get('cvent_finish').execute('finish-too-early',final),/site_designer/);
-  final.domainAssessments.push({domain:'site_designer',outcome:'review_required',evidence:['Exact widget exception recorded after attempted configuration']});
+  final.domainAssessments.push({domain:'site_designer',outcome:'review_required',evidence:['Site Designer was not verified due to time constraints']});
+  await assert.rejects(tools.get('cvent_finish').execute('unfinished-is-not-review',final),/unfinished safe work/);
+  final.domainAssessments[1].evidence=['Exact widget identity was attempted three ways; Cvent exposed no event-local editable control'];
   assert.equal((await tools.get('cvent_finish').execute('finish',final)).terminate,true);
   assert.equal(load('final-report.json').status,'REVIEW_REQUIRED');
   assert.equal(load('final-report.json').reported_by,'pi');
