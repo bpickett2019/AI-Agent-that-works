@@ -150,19 +150,11 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
 
-    def test_lifecycle_policy_allows_configurable_statuses_and_blocks_locked_or_unknown(self):
+    def test_lifecycle_labels_never_create_a_blanket_write_block(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
-        for status in ('Draft','Upcoming','Active','Open','Completed'):
+        for status in ('Draft','Upcoming','Active','Open','Completed','Cancelled','Archived','Lifecycle Surprise',''):
             self.write_lock(status)
             browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
-        for status in ('Cancelled','Canceled','Archived','Lifecycle Surprise'):
-            self.write_lock(status)
-            with self.assertRaisesRegex(RuntimeError,'not writable under approved product policy'):
-                browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
-        self.write_lock('Completed')
-        with patch.dict(os.environ,{'CVENT_WRITABLE_EVENT_STATUSES':'draft'}):
-            with self.assertRaisesRegex(RuntimeError,'completed.*not writable'):
-                browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
     def test_uncertain_mutation_blocks_automatic_replay(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
         self.write_lock()
@@ -293,10 +285,9 @@ class BrowserTargetSafetyTests(unittest.TestCase):
                 })
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/subscribers/events2/Details/EventDetails/Index/Edit?evtstub=locked'}
         with patch.object(browser_tool, 'assert_event_lease'):
-            with self.assertRaisesRegex(RuntimeError,'event inventory'):
-                browser_tool.guard(self.runtime,'openAuthorizedEvent',{
-                    'intent':'read','eventName':self.runtime['authorizedEventName'],'eventKey':'locked',
-                })
+            browser_tool.guard(self.runtime,'openAuthorizedEvent',{
+                'intent':'read','eventName':self.runtime['authorizedEventName'],'eventKey':'locked',
+            })
 
     def test_auth_status_verifies_slot_profile_without_exposing_cookie_values(self):
         profile=self.base/'browser-profiles'/'slot-1'/'chromium-profile';profile.mkdir(parents=True)
@@ -323,8 +314,10 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'non-authorized'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/event?evtstub=other','intent':'read'})
         self.write_lock('Completed')
-        with self.assertRaisesRegex(RuntimeError,'outside the exact authorized event context'):
-            browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/home','intent':'read'})
+        # A legitimate keyless Cvent transition may be attempted, but the Ego
+        # executor must prove selected-event identity after it lands.
+        browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/home','intent':'read'})
+        self.assertIn("if(runtime.accessMode!=='read_only_inventory')await assertAuthorizedPage()",EGO_DIRECT)
         browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/details?evtstub=locked','intent':'read'})
         with self.assertRaisesRegex(RuntimeError,'account-global'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/account/settings','intent':'read'})
@@ -412,7 +405,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('fallbackUsed',EGO_DIRECT)
         self.assertNotIn('ego.locator(',EGO_DIRECT)
         self.assertIn("case 'readTarget'",EGO_DIRECT)
-        self.assertIn('navigationTarget:{name:chosen.name,code:chosen.code,status:chosen.status,href:chosen.href',EGO_DIRECT)
+        self.assertIn("activation:'exact-authenticated-inventory'",EGO_DIRECT)
+        self.assertIn('authenticatedInventory:',EGO_DIRECT)
         self.assertIn("ego.setInputFiles(params.target,params.filePath)",EGO_DIRECT)
         self.assertIn('params.artifact = "discount-import.xlsx"',extension)
         self.assertNotIn('name: "cvent_configure"',extension)
@@ -434,7 +428,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('DRAFT_COMPLETE requires every RR item to be MATCH',extension)
         self.assertIn('name: "bash"',extension)
         self.assertIn('name: "read"',extension)
-        self.assertIn('Use only ego-browser nodejs', extension)
+        self.assertIn("Use only ego-browser <<'EOF'", extension)
         self.assertIn('name: "cvent_login_handoff"',extension)
         self.assertIn('modernPageOutsideAuthorizedEvent',extension)
         self.assertIn('https://app.cvent.com/subscribers/default.aspx',extension)
@@ -447,8 +441,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('Use `cvent_login_handoff`',PROMPT)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
-        self.assertIn('`scanEventList`, then `openAuthorizedEvent`, then `authorizeTarget`',PROMPT)
-        self.assertIn('Require the exact name and canonical key',PROMPT)
+        self.assertIn('call `openAuthorizedEvent` with the server-selected exact name and canonical key',PROMPT)
+        self.assertIn('Do not navigate to inventory first',PROMPT)
         self.assertIn('fresh observed refs',PROMPT)
         self.assertIn('Do not return to the model after every click',PROMPT)
 

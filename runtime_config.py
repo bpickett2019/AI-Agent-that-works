@@ -1,9 +1,7 @@
 """Validated runtime configuration for the three-worker single-VM deployment."""
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -11,6 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("CVENT_DATA_ROOT", ROOT / "data")).resolve()
+# Non-production fallback used only by BrowserRuntime unit tests and diagnostics;
+# selectable production events always come from authenticated inventory.
 DEFAULT_EVENT_NAME = "Development Test Event"
 DEFAULT_EVENT_KEY = "00000000-0000-4000-8000-000000000001"
 STEEL_IMAGE = os.environ.get(
@@ -91,50 +91,6 @@ def slot_by_id(slot_id: int) -> WorkerSlot:
         raise ValueError(f"Unknown worker slot {slot_id}") from exc
 
 
-def authorized_events() -> tuple[AuthorizedEvent, ...]:
-    raw = os.environ.get("CVENT_AUTHORIZED_EVENTS_JSON")
-    encoded = os.environ.get("CVENT_AUTHORIZED_EVENTS_B64")
-    if not raw and encoded:
-        raw = base64.b64decode(encoded).decode("utf-8")
-    if not raw and os.environ.get("CVENT_ENV", "development") != "development":
-        raise RuntimeError("Staging and production require an explicit authorized-event allowlist")
-    values = json.loads(raw) if raw else [{
-        "event_id": DEFAULT_EVENT_KEY,
-        "name": DEFAULT_EVENT_NAME,
-        "event_key": DEFAULT_EVENT_KEY,
-        "event_code": "",
-    }]
-    if not isinstance(values, list) or not values:
-        raise RuntimeError("CVENT_AUTHORIZED_EVENTS_JSON must be a non-empty JSON list")
-    events: list[AuthorizedEvent] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, dict):
-            raise RuntimeError("Every authorized event must be an object")
-        event = AuthorizedEvent(
-            event_id=str(value.get("event_id", "")).strip().lower(),
-            name=str(value.get("name", "")).strip(),
-            event_key=str(value.get("event_key", "")).strip().lower(),
-            event_code=str(value.get("event_code", "")).strip(),
-        )
-        if not event.event_id or not event.event_key or not event.name:
-            raise RuntimeError("Authorized events require event_id, event_key, and name")
-        if event.event_id != event.event_key:
-            raise RuntimeError("event_id must be the canonical Cvent event_key")
-        if event.event_id in seen:
-            raise RuntimeError(f"Duplicate authorized event ID: {event.event_id}")
-        seen.add(event.event_id)
-        events.append(event)
-    return tuple(events)
-
-
-def event_by_id(event_id: str) -> AuthorizedEvent:
-    match = next((event for event in authorized_events() if event.event_id == event_id.lower()), None)
-    if not match:
-        raise KeyError("Event is not in the server-side authorization allowlist")
-    return match
-
-
 def pi_provider() -> str:
     provider = os.environ.get("CVENT_PI_PROVIDER", "anthropic")
     if provider != "anthropic":
@@ -160,12 +116,9 @@ def validate_production_environment() -> None:
         "CVENT_SESSION_SECRET",
     )
     missing = [name for name in required if not os.environ.get(name)]
-    if not os.environ.get("CVENT_AUTHORIZED_EVENTS_JSON") and not os.environ.get("CVENT_AUTHORIZED_EVENTS_B64"):
-        missing.append("CVENT_AUTHORIZED_EVENTS_JSON or CVENT_AUTHORIZED_EVENTS_B64")
     if missing:
         raise RuntimeError("Missing production environment variables: " + ", ".join(missing))
     if len(os.environ["CVENT_SESSION_SECRET"]) < 32:
         raise RuntimeError("CVENT_SESSION_SECRET must contain at least 32 characters")
     pi_provider()
     pi_model()
-    authorized_events()

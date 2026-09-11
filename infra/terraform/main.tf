@@ -296,7 +296,6 @@ resource "azurerm_linux_virtual_machine" "app" {
     managed_identity_id   = azurerm_user_assigned_identity.vm.client_id
     tenant_id             = var.tenant_id
     entra_client_id       = azuread_application.cvent.client_id
-    authorized_events_b64 = base64encode(jsonencode(var.authorized_events))
   }))
 
   depends_on = [

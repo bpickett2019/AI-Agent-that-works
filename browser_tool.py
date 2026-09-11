@@ -2,7 +2,7 @@
 """Ego router pinned to the canonical Steel Chromium."""
 from __future__ import annotations
 import argparse,json,os,re,subprocess,sys,time,urllib.error,urllib.parse,urllib.request
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
 from browser_gate import action, child_lock_fds
@@ -11,7 +11,7 @@ from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
 TRUSTED_PROCEDURES={'configureAdmissionItems','configureRegistrationTypes'}
 TRUSTED_INSPECTIONS={'inspectRegistrationTypeCapabilities'}
-EGO={'script','probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','screenshot','readTarget','sectionState','controlInventory','pageInfo','scanEventList','actions','scroll','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
+EGO={'script','probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','screenshot','readTarget','sectionState','controlInventory','pageInfo','scanEventList','eventInventory','actions','scroll','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
 INTENT_REQUIRED={'script','actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
 def event_key(url):
     try:
@@ -28,12 +28,6 @@ def target_lock():
 def selected_event_inventory():
     try:return json.loads((CURRENT/'selected-event-inventory.json').read_text())
     except Exception:return {}
-def canonical_lifecycle_status(value):
-    return re.sub(r'\s+',' ',str(value or '').strip().lower())
-def writable_event_statuses():
-    values={canonical_lifecycle_status(value) for value in os.environ.get('CVENT_WRITABLE_EVENT_STATUSES','draft,upcoming,active,open,completed').split(',') if value.strip()}
-    if not values:raise RuntimeError('Write blocked: product policy defines no writable Cvent event statuses')
-    return values
 def atomic_private_json(path,value):
     temporary=path.with_name(path.name+f'.{os.getpid()}.tmp')
     with temporary.open('x') as output:json.dump(value,output,indent=2)
@@ -63,7 +57,7 @@ def assert_event_lease(runtime):
     if not job_id and os.environ.get('CVENT_ENV','development')!='production':return
     if not job_id or not token or not url or not event_id:raise RuntimeError('Write blocked: job event-lease context is absent')
     if not lease_is_valid(url,job_id,token,event_id):raise RuntimeError('Write blocked: canonical event lease is absent, stale, mismatched, or owned by another job')
-PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?|contact[-_]?types?|account(?:settings)?|organization|admin|global|library|profiles?)(?:/|$)',re.I)
+PROTECTED_PAGE=re.compile(r'/(?:attendees?|invitees?|contacts?|contact[-_]?types?|communications?|emails?|messages?|account(?:settings)?|organization|admin|global|library|profiles?)(?:/|$)',re.I)
 PROTECTED_CONTROL=re.compile(r'^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|create\s+contact\s+type(?:\s|$)|attendees?$|invitees?$|contacts?$)',re.I)
 MUTATING_CONTROL=re.compile(r'^(?:save(?:\s|$)|save\s*(?:&|and)\s*close(?:\s|$)|create(?:\s|$)|add(?:\s|$)|update(?:\s|$)|apply(?:\s|$)|confirm(?:\s|$)|submit(?:\s|$))',re.I)
 PROTECTED_IDENTITY=re.compile(r'(?:event[-_ ]?(?:name|title|code)|evtstub|eventid|contact[-_ ]?type[-_ ]?(?:name|code))',re.I)
@@ -81,9 +75,16 @@ def assert_safe_write_target(operation,params,descriptor):
     if href and PROTECTED_PAGE.search(urlparse(href).path):
         raise RuntimeError('Write blocked: attendee/contact and communications areas are protected')
 
+def valid_event_context(runtime,current):
+    try:context=json.loads((CURRENT/'authorized-event-context.json').read_text())
+    except Exception:return False
+    try:proven=datetime.fromisoformat(str(context.get('provenAt','')).replace('Z','+00:00'))
+    except ValueError:return False
+    return context.get('schemaVersion')==1 and context.get('browserRuntimeId')==runtime.get('browserRuntimeId') and str(context.get('eventKey','')).lower()==str(runtime.get('authorizedEventKey','')).lower() and context.get('url')==current.get('url') and datetime.now(timezone.utc)-proven<=timedelta(minutes=30)
+
 def guard(runtime,operation,params):
     if runtime.get('accessMode')=='read_only_reconciliation':
-        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','screenshot','controlInventory','readTarget','recover','wait','scroll','actions',*TRUSTED_INSPECTIONS}
+        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','eventInventory','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','screenshot','controlInventory','readTarget','recover','wait','scroll','actions',*TRUSTED_INSPECTIONS}
         if params.get('intent')=='write' or operation not in readonly:
             raise RuntimeError('Read-only reconciliation cannot dispatch configuration writes')
     current=local_probe(runtime);lock=target_lock()
@@ -92,10 +93,10 @@ def guard(runtime,operation,params):
     intent=params.get('intent')
     if operation=='openAuthorizedEvent':
         assert_event_lease(runtime)
-        current_host=(urlparse(current.get('url','')).hostname or '').lower()
-        if not current_host.endswith('cvent.com') or '/events2/eventselection' not in urlparse(current.get('url','')).path.lower():
-            raise RuntimeError('Authorized event opening requires the authenticated Cvent event inventory')
-        if params.get('eventName')!=runtime.get('authorizedEventName') or params.get('eventKey')!=runtime.get('authorizedEventKey'):
+        current_url=urlparse(current.get('url',''));current_host=(current_url.hostname or '').lower()
+        if current_url.scheme!='https' or not (current_host=='cvent.com' or current_host.endswith('.cvent.com')):
+            raise RuntimeError('AUTH_REQUIRED: authenticated Cvent context is unavailable')
+        if params.get('eventName')!=runtime.get('authorizedEventName') or str(params.get('eventKey','')).lower()!=str(runtime.get('authorizedEventKey','')).lower():
             raise RuntimeError('Authorized event opening identity does not match BrowserRuntime')
     if operation in INTENT_REQUIRED and intent not in ('read','write'):
         raise RuntimeError(f'{operation} requires explicit read or write intent')
@@ -108,13 +109,10 @@ def guard(runtime,operation,params):
             raise RuntimeError('Write blocked: current page is not a trusted Cvent HTTPS origin')
         if (CURRENT/'browser-mutation-uncertain.json').exists():
             raise RuntimeError('Write blocked: this job has an unresolved mutation hold; fresh readback/human review is required, not renderer recovery')
-        if not valid_lock or current_key!=locked:
-            raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
-        if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
-            raise RuntimeError('Write blocked: visible event key does not match the server-authorized event')
-        status=canonical_lifecycle_status(lock.get('event_status'))
-        if status not in writable_event_statuses():
-            raise RuntimeError(f'Write blocked: selected event lifecycle status {status or "UNPROVEN"} is not writable under approved product policy')
+        if not valid_lock or not (current_key==locked or valid_event_context(runtime,current)):
+            raise RuntimeError('Write blocked: exact selected event is not proven on the current route')
+        if runtime.get('authorizedEventKey') and locked!=str(runtime['authorizedEventKey']).lower():
+            raise RuntimeError('Write blocked: selected event key does not match the server-bound event')
         assert_event_lease(runtime)
         if PROTECTED_PAGE.search(urlparse(current.get('url','')).path):
             raise RuntimeError('Write blocked: attendee/contact and communications areas are protected')
@@ -124,14 +122,12 @@ def guard(runtime,operation,params):
         if re.search(r'/(account|organization|admin|global)(/|$)',parsed.path,re.I):raise RuntimeError('Navigation to account-global Cvent settings is blocked')
         if PROTECTED_PAGE.search(parsed.path):raise RuntimeError('Navigation to attendee/contact and communications areas is blocked')
         if key and (not valid_lock or key!=locked):raise RuntimeError('Navigation to a non-authorized Cvent event blocked')
-        if valid_lock and not key and '/events2/eventselection' not in parsed.path.lower():
-            raise RuntimeError('Navigation outside the exact authorized event context is blocked')
     return current
 def supported_authenticated_origin(runtime,url):
     parsed=urlparse(url);host=(parsed.hostname or '').lower()
     if parsed.scheme!='https' or parsed.username or parsed.password or parsed.port not in (None,443):return False
     if host=='app.cvent.com':return True
-    return host=='events.app.cvent.com' and bool(runtime.get('authorizedEventKey')) and event_key(url)==str(runtime['authorizedEventKey']).lower()
+    return host=='events.app.cvent.com' and bool(runtime.get('authorizedEventKey'))
 def visible_authenticated_context(runtime,url,ui):
     return (urlparse(url).hostname or '').lower()!='events.app.cvent.com' or ui.get('hasAuthorizedEvent') is True
 
@@ -276,6 +272,22 @@ def validate_action_round(runtime,params):
     if not writes and params.get('intent')!='read':raise RuntimeError('A read-only Ego action round requires read intent')
     return safe,writes
 
+def establish_target_lock(runtime_path,runtime):
+    info=local_probe(runtime);inventory=selected_event_inventory();expected=str(runtime.get('authorizedEventKey','')).lower()
+    current_key=event_key(info.get('url',''))
+    host=(urlparse(info.get('url','')).hostname or '').lower()
+    if not expected or not host.endswith('cvent.com') or not (current_key==expected or valid_event_context(runtime,info)):
+        raise RuntimeError('Exact selected event identity was not proven on the current Cvent page')
+    if inventory.get('name')!=runtime.get('authorizedEventName') or str(inventory.get('event_key','')).lower()!=expected or inventory.get('browser_runtime_id')!=runtime.get('browserRuntimeId'):
+        raise RuntimeError('Selected event evidence is not bound to this BrowserRuntime')
+    lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':expected,
+          'event_status':inventory.get('status',''),'browser_runtime_id':runtime['browserRuntimeId'],
+          'locked_at':datetime.now(timezone.utc).isoformat(),'mode':'live','source':'authenticated-ego-inventory'}
+    atomic_private_json(CURRENT/'authorized-target.json',lock)
+    runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
+    return lock
+
+
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
     if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
@@ -284,15 +296,9 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         if operation=='authStatus':
             return {'tool':'ego','router':'ego',**authenticated_profile_status(runtime)}
         if operation=='authorizeTarget':
-            probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','snapshotText','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=90,pass_fds=child_lock_fds());observed=child_result(probe)
-            info=local_probe(runtime);key=event_key(info.get('url',''));inventory=selected_event_inventory()
-            host=(urlparse(info.get('url','')).hostname or '').lower()
-            if params.get('eventName')!=runtime['authorizedEventName'] or runtime['authorizedEventName'].lower() not in json.dumps(observed).lower() or not key or not host.endswith('cvent.com'):raise RuntimeError('Exact visible authorized event identity was not proven')
-            if runtime.get('authorizedEventKey') and key!=runtime['authorizedEventKey']:raise RuntimeError('Visible event key is not the server-authorized event')
-            if inventory.get('name')!=runtime['authorizedEventName'] or inventory.get('event_key')!=key or inventory.get('browser_runtime_id')!=runtime['browserRuntimeId'] or not str(inventory.get('status') or '').strip():raise RuntimeError('Exact selected-event lifecycle status was not proven from inventory')
-            lock={'name':runtime['authorizedEventName'],'event_id':runtime.get('authorizedEventId'),'url':info['url'],'event_key':key,'event_status':inventory['status'],'browser_runtime_id':runtime['browserRuntimeId'],'locked_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),'mode':'mock','source':'ego-direct'}
-            target=CURRENT/'authorized-target.json';atomic_private_json(target,lock)
-            runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
+            if params.get('eventName')!=runtime['authorizedEventName']:
+                raise RuntimeError('Selected event name does not match BrowserRuntime')
+            lock=establish_target_lock(runtime_path,runtime)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
         action_writes=0
@@ -323,12 +329,20 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             raise RuntimeError('Browser read helper timed out; no mutation was dispatched') from error
     result=child_result(proc);result['router']=tool
     if operation=='openAuthorizedEvent' and not proc.returncode and result.get('ok'):
-        selected=result.get('navigationTarget') or {};selected_key=event_key(str(selected.get('href') or ''))
-        if selected.get('name')!=runtime.get('authorizedEventName') or selected_key!=runtime.get('authorizedEventKey') or not str(selected.get('status') or '').strip():
-            raise RuntimeError('Opened event inventory evidence omitted exact identity or lifecycle status')
+        selected=result.get('navigationTarget') or {};selected_key=str(selected.get('eventKey') or event_key(str(selected.get('href') or '')) or '').lower()
+        if selected.get('name')!=runtime.get('authorizedEventName') or selected_key!=str(runtime.get('authorizedEventKey','')).lower():
+            raise RuntimeError('Opened event evidence omitted the exact server-selected canonical identity')
+        observed_at=datetime.now(timezone.utc).isoformat()
         atomic_private_json(CURRENT/'selected-event-inventory.json',{'name':selected['name'],'event_key':selected_key,
-            'event_id':runtime.get('authorizedEventId'),'code':selected.get('code'),'status':selected['status'],
-            'href':selected.get('href'),'browser_runtime_id':runtime['browserRuntimeId'],'observed_at':datetime.now(timezone.utc).isoformat()})
+            'event_id':runtime.get('authorizedEventId'),'code':selected.get('code'),'status':selected.get('status',''),
+            'href':selected.get('href'),'browser_runtime_id':runtime['browserRuntimeId'],'observed_at':observed_at})
+        authenticated=result.get('authenticatedInventory')
+        if isinstance(authenticated,list):
+            payload={'schemaVersion':1,'workspaceId':os.environ.get('CVENT_WORKSPACE_ID',''),'source':'authenticated-cvent-inventory','capturedAt':observed_at,'events':authenticated}
+            atomic_private_json(CURRENT/'authenticated-event-inventory.json',payload)
+            workspace=Path(os.environ.get('CVENT_DATA_ROOT',ROOT/'data'))/'workspaces'/os.environ.get('CVENT_WORKSPACE_ID','')
+            workspace.mkdir(parents=True,exist_ok=True);atomic_private_json(workspace/'event-inventory.json',payload)
+        result['authorizedTarget']=establish_target_lock(runtime_path,runtime)
     if params.get('intent')=='write':
         if proc.returncode or not result.get('ok'):
             # Only a structured coherent-round zero-dispatch result proves a

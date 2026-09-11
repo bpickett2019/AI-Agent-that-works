@@ -20,7 +20,7 @@ from browser_runtime import initialize as initialize_browser_runtime
 from control_store import ControlStore
 from performance_monitor import monitor as monitor_performance
 from mutation_outcome import mutation_outcome
-from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, event_by_id, job_dir, pi_model, pi_provider, slot_by_id
+from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, job_dir, pi_model, pi_provider, slot_by_id
 
 
 def now() -> str:
@@ -197,7 +197,7 @@ class JobRunner:
             "CVENT_LEASE_VALIDATE_URL": os.environ.get("CVENT_LEASE_VALIDATE_URL", "http://127.0.0.1:8877/internal/leases/validate"),
             "CVENT_LEASE_TOKEN": token, "CVENT_AUTHORIZED_EVENT_ID": job["event_id"],
             "CVENT_AUTHORIZED_EVENT_NAME": job["event_name"], "CVENT_AUTHORIZED_EVENT_KEY": job["event_key"],
-            "CVENT_AUTHORIZED_EVENT_CODE": event_by_id(job["event_id"]).event_code,
+            "CVENT_AUTHORIZED_EVENT_CODE": str(job.get("event_code") or ""),
             "CVENT_PI_PROVIDER": pi_provider(), "CVENT_PI_MODEL": pi_model(),
             "CVENT_PYTHON": sys.executable,
             "PI_CODING_AGENT_DIR": str(directory / "pi-config"), "PI_CODING_AGENT_SESSION_DIR": str(directory / "pi-sessions"),
@@ -229,7 +229,7 @@ class JobRunner:
             "CVENT_AUTHORIZED_EVENT_ID": job["event_id"],
             "CVENT_AUTHORIZED_EVENT_NAME": job["event_name"],
             "CVENT_AUTHORIZED_EVENT_KEY": job["event_key"],
-            "CVENT_AUTHORIZED_EVENT_CODE": event_by_id(job["event_id"]).event_code,
+            "CVENT_AUTHORIZED_EVENT_CODE": str(job.get("event_code") or ""),
         })
         return environment
 

@@ -34,10 +34,10 @@ python3 -m uvicorn app:app --host 127.0.0.1 --port 8877
 Open <http://127.0.0.1:8877>. Docker must be running. Local development auth is
 explicit and cannot activate when `CVENT_ENV=production`.
 
-Development uses a non-Cvent placeholder allowlist entry. Staging and production
-must receive explicitly authorized existing events through the deployment's
-server-side allowlist; RR uploads never choose or authorize arbitrary Cvent
-targets.
+Selectable events are refreshed from each workspace's authenticated Cvent event
+inventory and cached only in that workspace. Selection binds the exact canonical
+event key/name/code into the job; `openAuthorizedEvent` re-resolves that identity
+in live Cvent before writes. RR content never selects or changes event identity.
 
 ## Safety model
 
@@ -47,8 +47,8 @@ scope IDs. Immediately before every write, `browser_tool.py` verifies:
 
 1. the per-job BrowserActionGate is agent-owned;
 2. the canonical event lease exists, is unexpired, and belongs to this job/token;
-3. runtime, authorized-target, live-page event identity, and observed lifecycle match;
-4. the lifecycle label is explicitly allowed and the requested event-local controls are visibly editable;
+3. runtime, authorized-target, and live-page canonical event identity match;
+4. the requested event-local controls are visibly editable (lifecycle labels do not impose a blanket block);
 5. the target is not a protected publish, communication-send, attendee/contact,
    delete/archive, event-identity, or account-global action.
 
@@ -60,10 +60,13 @@ attendees/contacts, mutate another event, or mutate reusable/global definitions.
 
 Pi runs with `--no-builtin-tools` and explicitly registered job-bound `read`,
 `bash`, and `cvent_*` tools. `read` loads the Ego skill and verified RR artifacts;
-`bash` accepts `ego-browser nodejs` heredocs, not general shell commands. The
-existing Ego executor runs coherent helper scripts with per-action event/lease,
-RR-source, protected-control and Save/readback checks. No section adapter is
-required. The explicit `extensions/cvent-job-tools.ts` extension It invokes approved RR helpers and `browser_tool.py`
+`bash` accepts upstream `ego-browser nodejs` heredocs, not general shell commands.
+The upstream skill is vendored at the commit recorded in
+`skills/ego-browser/UPSTREAM_COMMIT`; its TaskSpace/Page behavior is securely
+bound to the existing Steel tab. The executor runs coherent scripts with
+per-action event/lease, RR-source, protected-control and Save/readback checks. No
+section adapter is required. The explicit `extensions/cvent-job-tools.ts` extension
+invokes approved RR helpers and `browser_tool.py`
 without a shell, passes helper subprocesses an allowlisted environment, and
 never forwards Anthropic, Entra, or session secrets. General host JavaScript, raw CDP, and browser cookie/storage/network APIs are
 not exposed; browser scripts receive only the documented Ego helper surface. When Cvent requires

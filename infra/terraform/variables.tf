@@ -66,22 +66,6 @@ variable "repository_ref" {
   }
 }
 
-variable "authorized_events" {
-  description = "Server-side Cvent event allowlist; never populate from an uploaded RR."
-  type = list(object({
-    event_id   = string
-    name       = string
-    event_key  = string
-    event_code = optional(string, "")
-  }))
-  default = [{
-    event_id   = "e712e34c-6117-4d13-bf4c-8ed54cf2b495"
-    name       = "(C+D) Medtrade Testing Clone 2"
-    event_key  = "e712e34c-6117-4d13-bf4c-8ed54cf2b495"
-    event_code = ""
-  }]
-}
-
 variable "entra_user_principal_object_ids" {
   description = "User or group object IDs assigned Cvent.Agent.User."
   type        = set(string)

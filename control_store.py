@@ -70,6 +70,7 @@ class ControlStore:
                     event_id TEXT NOT NULL,
                     event_name TEXT NOT NULL,
                     event_key TEXT NOT NULL,
+                    event_code TEXT NOT NULL DEFAULT '',
                     original_filename TEXT NOT NULL,
                     state TEXT NOT NULL,
                     preferred_slot INTEGER,
@@ -115,6 +116,8 @@ class ControlStore:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
                 if "preferred_slot" not in columns:
                     conn.execute("ALTER TABLE jobs ADD COLUMN preferred_slot INTEGER")
+                if "event_code" not in columns:
+                    conn.execute("ALTER TABLE jobs ADD COLUMN event_code TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def immediate(self) -> Iterator[sqlite3.Connection]:
@@ -160,10 +163,10 @@ class ControlStore:
         job_id = "job_" + uuid.uuid4().hex
         with self.immediate() as conn:
             conn.execute(
-                """INSERT INTO jobs(id,workspace_id,owner_subject,event_id,event_name,event_key,
-                original_filename,state,preferred_slot,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO jobs(id,workspace_id,owner_subject,event_id,event_name,event_key,event_code,
+                original_filename,state,preferred_slot,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, owner["workspace_id"], owner["subject"], event.event_id, event.name,
-                 event.event_key, filename, "draft", preferred_slot, now, now),
+                 event.event_key, getattr(event, "event_code", ""), filename, "draft", preferred_slot, now, now),
             )
             self._audit(conn, owner["subject"], "job.created", job_id, {"event_id": event.event_id})
             return dict(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())

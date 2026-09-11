@@ -84,7 +84,7 @@ for(const key of ['profileMatch','accountContextMatch','persistedProfile']){
         for extra in ('&event=other', '&evtstub=other', '&evtstub='):
             self.assertIsNone(browser_tool.event_key(base+extra))
 
-    def test_modern_event_origin_auth_requires_the_exact_authorized_key(self):
+    def test_modern_event_origin_auth_accepts_keyless_routes_but_requires_visible_event_context(self):
         runtime = {'authorizedEventKey':'selected'}
         self.assertTrue(browser_tool.supported_authenticated_origin(runtime, 'https://app.cvent.com/Subscribers/Events2/EventSelection'))
         modern='https://events.app.cvent.com/events/home?evtstub=selected'
@@ -93,8 +93,10 @@ for(const key of ['profileMatch','accountContextMatch','persistedProfile']){
         self.assertFalse(browser_tool.visible_authenticated_context(runtime,modern,{'hasAuthorizedEvent':False}))
         self.assertTrue(browser_tool.visible_authenticated_context(runtime,'https://app.cvent.com/Subscribers/Events2/EventSelection',{}))
         for url in ('https://events.app.cvent.com/events/home?evtstub=other',
-                    'https://events.app.cvent.com/events/home',
-                    'http://events.app.cvent.com/events/home?evtstub=selected',
+                    'https://events.app.cvent.com/events/home'):
+            self.assertTrue(browser_tool.supported_authenticated_origin(runtime, url), url)
+            self.assertFalse(browser_tool.visible_authenticated_context(runtime,url,{'hasAuthorizedEvent':False}))
+        for url in ('http://events.app.cvent.com/events/home?evtstub=selected',
                     'https://evilcvent.com/events/home?evtstub=selected'):
             self.assertFalse(browser_tool.supported_authenticated_origin(runtime, url), url)
 

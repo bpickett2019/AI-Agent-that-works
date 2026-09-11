@@ -23,7 +23,8 @@ from browser_gate import BrowserGate
 from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page
 from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
-from runtime_config import DATA_ROOT, ROOT, authorized_events, browser_auth_metadata_path, browser_profile_dir, job_dir, validate_production_environment
+from event_inventory import events_for_workspace, read_events, resolve_event
+from runtime_config import DATA_ROOT, ROOT, browser_auth_metadata_path, browser_profile_dir, job_dir, validate_production_environment
 from workbook_ops import info as workbook_info_data, sheet as workbook_sheet_data, update as update_workbook_data
 
 def session_secret() -> str:
@@ -261,9 +262,13 @@ def me(request: Request):
 
 @app.get("/api/events")
 def events(request: Request):
-    current_user(request)
+    identity = current_user(request)
+    try:
+        inventory = events_for_workspace(identity["workspace_id"])
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     return [{"event_id": event.event_id, "name": event.name, "event_code": event.event_code}
-            for event in authorized_events()]
+            for event in inventory]
 
 
 @app.get("/api/jobs")
@@ -307,7 +312,7 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
             "browser": {"running": False, "worker_slot": worker_slot},
             "browser_gate": {"ownership": "AGENT", "desiredOwnership": "AGENT"},
             "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME", "automation_scope": scope_summary(),
-            "events": len(authorized_events()), "selected_worker": worker_slot or 1,
+            "events": _cached_event_count(identity["workspace_id"]), "selected_worker": worker_slot or 1,
         }, headers={"Cache-Control": "no-store"})
     directory = directory_for(job)
     state = read_json(directory / "state.json", {})
@@ -362,6 +367,13 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     return JSONResponse(product_facing(state), headers={"Cache-Control": "no-store"})
 
 
+def _cached_event_count(workspace_id: str) -> int:
+    try:
+        return len(read_events(workspace_id))
+    except RuntimeError:
+        return 0
+
+
 def scope_summary():
     return {
         "valid": True, "authority": "Uploaded RR", "mode": "writable_event_configuration",
@@ -383,9 +395,12 @@ def upload(request: Request, rr: UploadFile = File(...), event_id: str = Form(..
     name = rr.filename or ""
     if not name.lower().endswith(".xlsx"):
         raise HTTPException(400, "Upload an .xlsx file")
-    event = next((item for item in authorized_events() if item.event_id == event_id.lower()), None)
-    if not event:
-        raise HTTPException(403, "Event is not in the server-side authorization allowlist")
+    try:
+        event = resolve_event(identity["workspace_id"], event_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc).strip("'")) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     job = store.create_job(identity, event, Path(name).name, preferred_slot=worker_slot)
     directory = job_dir(job["workspace_id"], job["id"])
     try:
