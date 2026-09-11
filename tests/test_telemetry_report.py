@@ -51,6 +51,33 @@ class PersistedTelemetryReportTests(unittest.TestCase):
             written = write_telemetry_report(directory, job, root)
             self.assertEqual(json.loads((directory / "final-report.json").read_text())["writes"], written["writes"])
 
+    def test_simple_reporting_preserves_pi_qa_and_counts_audit_without_domain_ledgers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            for name, value in {
+                "browser-runtime.json": {"executionMode": "simple"},
+                "state.json": {"completed": ["Location", "Admission text"], "pending": []},
+                "final-report.json": {"execution_mode": "simple", "status": "DRAFT_COMPLETE", "real_reads": ["Reopened both sections"], "real_writes": ["Saved location and admission text"]},
+                "domain-results.json": {"domains": {"irrelevant_legacy_domain": {"status": "INCOMPLETE"}}},
+            }.items():
+                (directory / name).write_text(json.dumps(value))
+            audit = [
+                {"result": "ui_action_completed", "dataChange": True, "isSave": False},
+                {"result": "ui_action_completed", "isSave": True},
+                {"result": "succeeded", "resolvedBy": "pi", "isSave": True},
+                {"result": "ui_action_error", "isSave": True},
+            ]
+            (directory / "scope-write-audit.jsonl").write_text("".join(json.dumps(row) + "\n" for row in audit))
+            (directory / "performance-events.jsonl").write_text(json.dumps({"kind": "browser_operation", "readbacks": 10}) + "\n")
+            report = build_telemetry_report(directory, {"id": "simple"}, directory)
+            self.assertEqual((report["writes"], report["saves"], report["readbacks"]), (1, 1, 1))
+            self.assertEqual(report["real_reads"], ["Reopened both sections"])
+            self.assertEqual(report["real_writes"], ["Saved location and admission text"])
+            self.assertEqual(report["checklist"]["completed"], ["Location", "Admission text"])
+            self.assertEqual(report["domains"], {})
+            self.assertEqual(report["status"], "DRAFT_COMPLETE")
+            self.assertIsNone(report["maximum_consecutive_zero_progress_rounds"])
+
     def test_legacy_activity_counts_are_used_when_old_events_lack_fields(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

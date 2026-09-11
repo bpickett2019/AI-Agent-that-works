@@ -1052,8 +1052,9 @@ export default function cventJobTools(pi: any) {
       const allowed = ["configuration-plan.json", "rr-validation.json", "expected-domains.json", "input.inspection.json", "input.inspection-summary.json", "job-prompt.md", "state.json", "activity.log", "scope-write-audit.jsonl", "last-browser-failure-result.json", "browser-last-script-result.json", "final-report.json"];
       const skillReference = SIMPLE && target.startsWith(join(repoRoot, "skills/ego-browser/references") + "/") && target.endsWith(".md");
       const visual = SIMPLE && /^browser-visual-[\w-]+\.png$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
+      const egoOutput = SIMPLE && /^ego-output-[0-9a-f-]{36}\.txt$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
       if (visual) return { content: [{ type: "image", mimeType: "image/png", data: (await readJobFile(target)).toString("base64") }] };
-      if (target !== skill && !skillReference && !allowed.some(name => target === join(jobDir, name))) throw new Error("Read is limited to the Ego skill and this job's evidence");
+      if (target !== skill && !skillReference && !egoOutput && !allowed.some(name => target === join(jobDir, name))) throw new Error("Read is limited to the Ego skill and this job's evidence");
       const text = target === skill || skillReference ? await readFile(target, "utf8") : (await readJobFile(target, 25 * 1024 * 1024)).toString("utf8");
       const lines = text.split("\n"), start = (params.offset ?? 1) - 1;
       const result = toolText(lines.slice(start, start + (params.limit ?? 500)).join("\n"));
@@ -1076,7 +1077,14 @@ export default function cventJobTools(pi: any) {
         const { logs, ...rest } = value;
         const result = { logs, ...rest };
         await atomicJson(join(jobDir, "browser-last-script-result.json"), result);
-        return toolBrowserResult(result);
+        const text = (logs ?? []).map((v: any) => typeof v === "string" ? v : JSON.stringify(v)).join("\n");
+        const outputPath = join(jobDir, `ego-output-${randomUUID()}.txt`);
+        const file = await open(outputPath, "wx", 0o600);
+        try { await file.writeFile(text, "utf8"); } finally { await file.close(); }
+        const response = await toolBrowserResult(result);
+        response.content[0].text = utf8Chunks(text || "(no printed output)", MAX_TEXT_BYTES)[0] +
+          `\n[Ego: ${value.actionCount ?? 0} actions, ${value.writesAttempted ?? 0} UI writes, ${value.saves ?? 0} Saves. Full output: ${outputPath}; use read offset/limit.]`;
+        return response;
       });
       const header = match[2].match(/^\s*\/\/ cvent: (\{[^\n]+\})/);
       // Unmodified upstream Ego examples are read-only by default. A concise
@@ -1469,11 +1477,19 @@ export default function cventJobTools(pi: any) {
           pageTitle = String(pageResult?.page?.title ?? "");
           try { host = new URL(pageUrl).hostname.toLowerCase(); } catch { host = ""; }
         }
-        const auth = await settleAuthenticatedProfile(
+        let auth = await settleAuthenticatedProfile(
           await invokeBrowser("authStatus", { intent: "read" }, signal, 45),
           () => invokeBrowser("authStatus", { intent: "read" }, signal, 45),
           () => new Promise<void>(resolvePromise => setTimeout(resolvePromise, 500)),
         );
+        if (SIMPLE && !auth.authenticated && auth.profileMatch === true && auth.accountContextMatch === true) {
+          // A bad Cvent URL is not necessarily an expired login. Normalize the
+          // login entry point once before asking the human to authenticate again.
+          await invokeBrowser("navigate", { intent: "read", url: "https://app.cvent.com/subscribers/default.aspx" }, signal, 60);
+          auth = await settleAuthenticatedProfile(await invokeBrowser("authStatus", { intent: "read" }, signal, 45),
+            () => invokeBrowser("authStatus", { intent: "read" }, signal, 45),
+            () => new Promise<void>(resolvePromise => setTimeout(resolvePromise, 500)));
+        }
         if (auth.authenticated === true && auth.workerSlot === Number(requiredEnvironment("CVENT_WORKER_SLOT"))) {
           await appendActivity("Cvent login already active; verified this worker's isolated persisted profile");
           const authorization = await browserAuthorizationState();

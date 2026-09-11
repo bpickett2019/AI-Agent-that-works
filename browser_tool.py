@@ -393,7 +393,8 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         atomic_private_json(CURRENT/'last-browser-failure-result.json',result)
         detail=result.get('error','browser tool failed')
         if operation in ('actions','script'):
-            detail+=f"; dispatched writes={result.get('writesAttempted','UNKNOWN')}, completed actions={len(result.get('completedActions',[]))}. Partial evidence is available as cvent_job_read artifact browser_failure; do not replay an unresolved write."
+            artifact="read last-browser-failure-result.json" if runtime.get('executionMode')=='simple' else "cvent_job_read artifact browser_failure"
+            detail+=f"; dispatched writes={result.get('writesAttempted','UNKNOWN')}, completed actions={len(result.get('completedActions',[]))}. Partial evidence: {artifact}; inspect and recover before replaying a possibly persisted action."
         raise RuntimeError(detail)
     return result
 def main():

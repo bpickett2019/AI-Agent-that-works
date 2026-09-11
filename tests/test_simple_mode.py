@@ -24,7 +24,7 @@ class SimpleModeTests(unittest.TestCase):
 import fs from 'node:fs';
 let state=JSON.parse(fs.readFileSync('fake-page.json','utf8'));
 const store=()=>fs.writeFileSync('fake-page.json',JSON.stringify(state));
-const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@code':'Event Code','@field':'Venue','@check':'Enabled','@select':'Choice','@file':'Upload'};
+const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@bare-title':'* Title:','@code':'Event Code','@field':'Venue','@check':'Enabled','@select':'Choice','@file':'Upload'};
 function descriptor(target){if(!labels[target])throw Error('Stale ref / control not found');return {tag:['@field','@identity','@code','@file','@check'].includes(target)?'INPUT':target==='@select'?'SELECT':'BUTTON',label:labels[target],role:target==='@check'?'checkbox':null,connected:true,disabled:false,value:state.value,documentUrl:process.env.FRAME_URL||state.url,options:[{label:'Choice',value:'choice',disabled:false}]}}
 export async function listTabs(){return [{id:'target'}]}
 export async function switchTab(){}
@@ -33,7 +33,8 @@ export async function evaluate(expression){
  if(expression.includes('__CVENT_BROWSER_RUNTIME_ID'))return 'cvent-runtime-test';
  if(expression.includes('document.activeElement'))return descriptor(state.focused||'@field');
  if(expression.includes('controls=[],seen'))return {controls:state.editor?[{label:'Save'}]:[]};
- if(expression.includes('hasSelectedName'))return {ready:'complete',hasSelectedName:true,hasSelectedHeading:true,hasLogin:false,keys:['test-event'],hasExpectedKey:true};
+ if(expression.includes('hasSelectedName'))return {ready:'complete',hasSelectedName:true,hasSelectedHeading:true,hasLogin:state.url.includes('/login'),keys:['test-event'],hasExpectedKey:true};
+ if(expression.includes('sign in|log in'))return !!process.env.READ_AUTH_TEXT;
  if(expression.includes('const wanted='))return true;
  return false;
 }
@@ -110,6 +111,22 @@ export async function setInputFiles(target,files){state.files=files;store()}
         _, r=self.run_simple("await page.fill('@field','no');")
         self.assertFalse(r['ok'])
         self.assertEqual(r['writesAttempted'],0)
+
+    def test_owned_reads_can_inspect_login_or_error_pages_and_recover_navigation(self):
+        s=json.loads(self.state.read_text());s['url']='https://app.cvent.com/login?evtstub=test-event';self.state.write_text(json.dumps(s))
+        _, r=self.run_simple("console.log(await page.url()); console.log(await page.snapshot());", READ_AUTH_TEXT='1')
+        self.assertTrue(r['ok'],r)
+        _, r=self.run_simple("await page.fill('@field','no');", READ_AUTH_TEXT='1')
+        self.assertFalse(r['ok'],r);self.assertEqual(r['writesAttempted'],0)
+        _, r=self.run_simple("await page.goto('https://app.cvent.com/view?evtstub=test-event'); console.log(await page.snapshot());", READ_AUTH_TEXT='1')
+        self.assertTrue(r['ok'],r)
+
+    def test_actual_cvent_title_label_is_immutable_but_tab_is_allowed(self):
+        s=json.loads(self.state.read_text());s['url']='https://app.cvent.com/Details/EventDetails/Index/Edit?evtstub=test-event';self.state.write_text(json.dumps(s))
+        _, r=self.run_simple("await page.fill('@bare-title','wrong');")
+        self.assertFalse(r['ok'],r);self.assertEqual(r['writesAttempted'],0)
+        _, r=self.run_simple("await page.focus('@bare-title'); await page.keyboard.press('Tab');")
+        self.assertTrue(r['ok'],r)
 
     def test_same_event_route_and_origin_changes_work(self):
         _, r=self.run_simple("await page.goto('https://events.app.cvent.com/details?evtstub=test-event'); await page.fill('@field','same event');")

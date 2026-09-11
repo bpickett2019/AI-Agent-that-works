@@ -59,6 +59,38 @@ def build_telemetry_report(directory: Path, job: dict[str, Any], root: Path) -> 
     validation = _json(directory / "rr-validation.json", {"items": []})
     events = _jsonl(directory / "performance-events.jsonl")
     operations = [event for event in events if event.get("kind") == "browser_operation"]
+    runtime = _json(directory / "browser-runtime.json", {})
+    if runtime.get("executionMode") == "simple" or existing.get("execution_mode") == "simple":
+        # Reporting must not reimpose the legacy domain ledger or erase Pi's QA.
+        # Count dispatched/completed UI work separately from verified commits;
+        # a snapshot alone is not a persisted readback.
+        audit = _jsonl(directory / "scope-write-audit.jsonl")
+        completed = [row for row in audit if row.get("result") == "ui_action_completed"]
+        verified = [row for row in audit if row.get("result") == "succeeded" and row.get("resolvedBy") == "pi"]
+        return {
+            **existing,
+            "telemetry_source": "pi_verdict_and_native_ego_audit",
+            "execution_mode": "simple",
+            "status": existing.get("status") or ("DRAFT_COMPLETE" if state.get("status") == "completed" else "REVIEW_REQUIRED" if state.get("status") == "review_required" else "INCOMPLETE"),
+            "job_id": job.get("id"),
+            "deployed_sha": _deployment_sha(root, directory, state),
+            "event": {"name": job.get("event_name"), "id": job.get("event_id"), "key": job.get("event_key"), "code": job.get("event_code")},
+            "timestamps": {
+                "job_created_at": job.get("created_at"), "job_started_at": job.get("started_at") or state.get("started_at"),
+                "process_started_at": state.get("process_started_at") or state.get("last_process_started_at"),
+                "job_finished_at": job.get("finished_at"), "report_generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "browser_operations": len(operations),
+            "writes": sum(bool(row.get("dataChange")) and not row.get("isSave") for row in completed),
+            "saves": sum(bool(row.get("isSave")) for row in completed),
+            "readbacks": len(verified),
+            "count_semantics": "writes=completed UI data edits; saves=completed Save clicks; readbacks=Pi-acknowledged persisted commit observations",
+            "maximum_consecutive_zero_progress_rounds": None,
+            "domains": {},
+            "checklist": {key: state.get(key, []) for key in ("completed", "pending", "review_required")},
+            "real_reads": existing.get("real_reads", []),
+            "real_writes": existing.get("real_writes", []),
+        }
     requested: dict[str, int] = defaultdict(int)
     for item in validation.get("items", []):
         if item.get("domain"):

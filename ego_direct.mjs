@@ -22,7 +22,7 @@ function simpleScriptContext(run,logs,rr,desired,runtime,targetId){
     const run=async(op,args={})=>{const r=JSON.parse(await bridge(JSON.stringify({op,args})));if(!r.ok)throw new Error(r.error);return r.value};
     const sel=v=>typeof v==='string'?v.replace(/^loc=role:/,'role:').replace(/^loc=css:/,''):v;
     const point=v=>Array.isArray(v)?{x:v[0],y:v[1]}:{x:v.x,y:v.y};
-    const blocked=()=>{throw new Error('Outside the owned browser capability: raw evaluate/CDP/network/process and other pages are unavailable')};
+    const blocked=()=>{throw new Error('Raw evaluate/CDP/network/process and other pages are unavailable. Use readTarget(\"@ref\") for field values, page.snapshot() for DOM state, and page.screenshot() for visual state')};
     const page={label:'p1',spaceId:seed.spaceId,targetId:seed.targetId,openedBy:'agent',
       info:async()=>(await run('pageInfo')).page,url:async()=>(await run('pageInfo')).page.url,title:async()=>(await run('pageInfo')).page.title,
       snapshot:async(options={})=>(await run('snapshotText',{options})).snapshot,
@@ -183,7 +183,7 @@ try{
     const protectedControl=/^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|create\s+contact\s+type(?:\s|$)|attendees?$|invitees?$|contacts?$)/i;
     const mutating=/^(?:save(?:\s|$)|save\s*(?:&|and)\s*close(?:\s|$)|create(?:\s|$)|add(?:\s|$)|update(?:\s|$)|apply(?:\s|$)|confirm(?:\s|$)|submit(?:\s|$))/i;
     if((!simple||step.dataChange||step.persistencePossible)&&(identity.test(target)||labels.some(label=>identity.test(label))))throw new Error('Write blocked: selected event identity is immutable');
-    if(simple&&(step.dataChange||step.persistencePossible)&&labels.some(label=>/^(?:name|title|code)$/i.test(label))&&/\/(?:EventDetails|EventInformation)(?:\/|$)/i.test(new URL((await ego.pageInfo()).url).pathname))throw Error('Write blocked: selected event identity is immutable');
+    if(simple&&(step.dataChange||step.persistencePossible)&&labels.some(label=>/^(?:name|title|code)$/i.test(label.replace(/[*:]/g,'').trim()))&&/\/(?:EventDetails|EventInformation)(?:\/|$)/i.test(new URL((await ego.pageInfo()).url).pathname))throw Error('Write blocked: selected event identity is immutable');
     if(labels.some(label=>protectedControl.test(label)&&!(simple&&/^(?:attendees?|invitees?|contacts?)$/i.test(label)))||descriptor.href&&protectedPath.test(new URL(descriptor.href).pathname))throw new Error('Action blocked: protected Cvent control');
     if(simple&&descriptor.href&&unsafeActionURL(descriptor.href))throw Error('Permanent action URL blocked');
     if(simple&&descriptor.documentUrl){const d=new URL(descriptor.documentUrl),key=eventKey(d.href);if(!(d.hostname==='cvent.com'||d.hostname.endsWith('.cvent.com'))||key&&key!==String(runtime.authorizedEventKey).toLowerCase())throw Error('Write blocked: target frame belongs to another event/context');}
@@ -193,7 +193,7 @@ try{
   }
   async function runAdaptive(step){
     const op=step.operation;let resolved;
-    if(step.intent!=='write')await assertAuthenticatedReadContext();
+    if(!simple&&step.intent!=='write')await assertAuthenticatedReadContext();
     if(step.target&&['readTarget','click','dblclick','activate','fill','type','focus','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'].includes(op)){resolved=await resolveTarget(step);step={...step,target:resolved.target};if(!['readTarget','focus'].includes(op))await authorizeInteractive(step,resolved.descriptor)}
     if(['visualClick','visualDoubleClick','visualDrag'].includes(op))await authorizeInteractive(step,await pointDescriptor(step.x,step.y));
     if(['typeText','press'].includes(op)&&!step.target&&step.intent==='write'){
@@ -366,7 +366,9 @@ try{
       const readOps=new Set(['pageInfo','snapshotText','screenshot','readTarget','scroll','wait','navigate','hover','visualHover','focus']);
       async function runSimple(op,args){
         actionIndex=completedActions.length;
-        await assertAuthenticatedReadContext();
+        // The router already owns this authenticated profile/target. Reads must
+        // remain available on login/error pages so Pi can diagnose and recover.
+        // Only mutations below need current-page event/authentication proof.
         if((await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || window.name"))!==runtime.browserRuntimeId)throw Error('Runtime identity lost');
         const step={operation:op,...args,intent:'read'};
         if(op==='screenshot')step.filePath=path.join(jobPath,`browser-visual-${Date.now()}-${actionIndex}.png`);
@@ -576,6 +578,7 @@ try{
     case 'visualDrag': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.drag([[params.x,params.y],[params.toX,params.toY]],{delay:75,label:params.label})};break;
     case 'uploadDiscountImport': await ego.setInputFiles(params.target,params.filePath);result={uploadedArtifact:'discount-import.xlsx'};break;
     case 'navigate': {
+      if(simple){result=await runAdaptive({operation:'navigate',...params});break;}
       const lockPath=path.join(path.dirname(runtimePath),'authorized-target.json');let hasTargetLock=false;try{const lock=JSON.parse(fs.readFileSync(lockPath,'utf8'));hasTargetLock=lock.browser_runtime_id===runtime.browserRuntimeId&&String(lock.event_key||'').toLowerCase()===String(runtime.authorizedEventKey||'').toLowerCase()}catch{}
       if(runtime.accessMode!=='read_only_inventory'&&hasTargetLock)await stageAuthorizedTransition(params.url);
       const navigation=await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??30),180)*1000)});

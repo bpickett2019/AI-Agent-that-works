@@ -17,6 +17,8 @@ Read the vendored upstream `skills/ego-browser/SKILL.md`. Use normal Ego scripts
 2. Call `cvent_open_event` to open/bind the exact human-selected event. Do this once, not before every read. On a genuine runtime loss it can reconnect the same assignment.
 3. Operate normally: observe → navigate → edit → fill/select → Save → fresh persisted readback → continue. You choose the size of scripts and when to inspect. Locators, variables, loops and recoverable exceptions are supported. There is no requirement to put a complete edit/Save/readback in one script.
 
+Navigate using links/refs observed on the site, not guessed Cvent URLs. A route error is not automatically an expired login: inspect the current URL/page and recover. `readTarget("@ref")` returns an observed field's value/text/checked state without raw evaluate. Ego stdout is returned as normal text; full output files are readable with `read` offset/limit.
+
 `bash` is browser-only, not a general operating-system shell. Do not import Playwright/CDP, use arbitrary evaluate/fetch, or access another browser. `read` supports job evidence, upstream skill/reference files and browser screenshots. Ego script globals `rr` (original sheet/cell inspection) and `desired` (optional compiled expectations) let you inspect/extract RR data using ordinary JavaScript and console.log without extra file tools. `page.setInputFiles` accepts only existing files under this job's `uploads/` directory.
 
 ## Permanent boundaries

@@ -30,7 +30,12 @@ try {
   assert.deepEqual(active,['read','bash','cvent_open_event','cvent_login_handoff','cvent_job_update','cvent_finish']);
   assert.equal(await hooks.get('context')({messages:[]}),undefined);
   const native={command:"ego-browser nodejs <<'JS'\nconst x='RR intent'; await page.fill('@1',x);\nJS"};
-  await tools.get('bash').execute('normal-no-compiler-no-metadata',native);
+  const printed=await tools.get('bash').execute('normal-no-compiler-no-metadata',native);
+  assert(printed.content[0].text.startsWith('native result\n[Ego:'));
+  const output=fs.readdirSync(directory).find(n=>/^ego-output-.*\.txt$/.test(n));
+  assert.equal(fs.readFileSync(path.join(directory,output),'utf8'),'native result');
+  const reread=await tools.get('read').execute('read-normal-output',{path:path.join(directory,output),offset:1,limit:20});
+  assert(reread.content[0].text.includes('native result'));
   assert.equal(load('browser-last-script-result.json').actionCount,10);
   assert.equal(await hooks.get('tool_call')({toolName:'bash',input:native}),undefined);
   await tools.get('cvent_job_update').execute('own-checklist',{stage:'A Pi chosen custom section',completed:['second'],pending:['third'],action:'Continuing'});
@@ -52,6 +57,21 @@ try {
     assert.equal(await hooks.get('tool_call')({toolName:'bash',input:native}),undefined);
   }
   assert(!fs.readdirSync(directory).some(n=>n.startsWith('controller-failure')));
+  // A Cvent route error with a still-bound authenticated profile should recover
+  // through the login entry point, not hand the browser to the human again.
+  fs.writeFileSync(helper,`import sys,json,pathlib
+op=sys.argv[sys.argv.index('--operation')+1]
+flag=pathlib.Path(${JSON.stringify(path.join(directory,'normalized'))})
+out={'ok':True}
+if op=='pageInfo': out['page']={'url':'https://app.cvent.com/error'}
+if op=='navigate': flag.write_text('1')
+if op=='authStatus': out.update(authenticated=flag.exists(),workerSlot=1,profileMatch=True,accountContextMatch=True,persistedProfile=True)
+print('BROWSER_ROUTER_RESULT='+json.dumps(out))
+`);
+  const login=await tools.get('cvent_login_handoff').execute('recover-bad-route',{reason:'Inspecting a Cvent route error'});
+  assert(login.content[0].text.includes('persistedProfileReused'));
+  assert(!fs.existsSync(path.join(directory,'browser-gate.json')));
+  assert.deepEqual(load('state.json').completed,['first','second']);
   const final={status:'REVIEW_REQUIRED',unresolvedItems:['One RR item ambiguous; independent work completed'],realReads:['Persisted verification'],realWrites:['Changed value'],guardrails:{published:0,emailsSent:0,deletes:0,globalMutations:0}};
   assert.equal((await tools.get('cvent_finish').execute('finish',final)).terminate,true);
   assert.equal(load('final-report.json').status,'REVIEW_REQUIRED');

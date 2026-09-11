@@ -19,7 +19,7 @@ variables, or process command line.
 
 ## Emergency Simple Mode
 
-Set `CVENT_EXECUTION_MODE=simple` in the server environment and restart with no active leases. The unchanged UI launches one Pi mission with the original RR evidence and selected event. Pi owns its checklist, Ego actions, Save/readback and recovery; the legacy domain/adaptor/provenance/atomic-round controller is bypassed. Browser ownership, canonical-event leases, target checks, permanent action blocks and audits remain. Use assisted rollout until live full-RR completion is established; unit tests alone are not acceptance.
+Set `CVENT_EXECUTION_MODE=simple` in the server environment and restart with no active leases. The unchanged UI launches one Pi mission with the original RR evidence and selected event. Pi owns its checklist, Ego actions, Save/readback and recovery; the legacy domain/adaptor/provenance/atomic-round controller is bypassed. Browser ownership, canonical-event leases, target checks, permanent action blocks and audits remain. Owned reads remain available on error/login pages so Pi can recover; mutations still require live target/authentication proof. Ego stdout is saved as readable text. Final reporting preserves Pi's QA and counts native UI edits, Save clicks and acknowledged commit observations separately. Use assisted rollout until live full-RR completion is established; unit tests alone are not acceptance.
 
 ## Local development
 
