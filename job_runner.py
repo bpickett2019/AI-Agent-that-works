@@ -343,7 +343,7 @@ class JobRunner:
         try:
             deployed_sha = (ROOT / ".deployed-git-sha").read_text().strip()
         except OSError:
-            deployed_sha = "unknown"
+            deployed_sha = ROOT.name if re.fullmatch(r"[0-9a-f]{40}", ROOT.name) else "unknown"
         state.update({
             "status": "starting", "current_stage": "starting",
             "current_action": f"Starting isolated worker {lease['slot_id']}",
@@ -639,9 +639,18 @@ class JobRunner:
             for hold in holds
         ]
         replay_holds = "\n".join(hold_lines) if hold_lines else "- None."
+        coverage_counts: dict[str, int] = {}
+        for item in read_json(directory / "rr-validation.json", {}).get("items", []):
+            domain = str(item.get("domain", "")).strip() if isinstance(item, dict) else ""
+            if domain:
+                coverage_counts[domain] = coverage_counts.get(domain, 0) + 1
+        coverage_domains = "\n".join(f"- `{domain}`: {count} RR evidence items" for domain, count in coverage_counts.items())
+        if not coverage_domains:
+            coverage_domains = "- Optional compiler unavailable; derive the complete checklist directly from the original RR."
         values = {
             "RR_PATH": str((directory / "input.xlsx").resolve()),
             "REPLAY_HOLDS": replay_holds,
+            "COVERAGE_DOMAINS": coverage_domains,
             "TARGET_URL": f"DISCOVER EXACTLY {job['event_name']} — THE RR MUST NOT SELECT THE TARGET",
             "STATE_PATH": str((directory / "state.json").resolve()), "LOG_PATH": str((directory / "activity.log").resolve()),
             "REPORT_PATH": str((directory / "final-report.json").resolve()),

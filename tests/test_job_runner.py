@@ -231,8 +231,14 @@ class JobRunnerConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mutation evidence"):
                 self.runner.retry_prewrite(job["id"], "operator")
 
-    def test_prompt_has_job_paths_and_no_unresolved_placeholders(self):
-        prompt = self.runner.render_prompt(self.job, self.directory, {})
+    def test_prompt_has_job_paths_coverage_floor_and_no_unresolved_placeholders(self):
+        (self.directory / "rr-validation.json").write_text(json.dumps({"items": [
+            {"domain": "event_settings"}, {"domain": "event_settings"}, {"domain": "site_designer"},
+        ]}))
+        with patch.dict(os.environ, {"CVENT_EXECUTION_MODE": "simple"}):
+            prompt = self.runner.render_prompt(self.job, self.directory, {})
+        self.assertIn("`event_settings`: 2 RR evidence items", prompt)
+        self.assertIn("`site_designer`: 1 RR evidence items", prompt)
         self.assertIn(str(self.directory.resolve()), prompt)
         self.assertIn(DEFAULT_EVENT_NAME, prompt)
         self.assertIn(DEFAULT_EVENT_KEY, prompt)

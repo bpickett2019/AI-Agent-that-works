@@ -32,8 +32,9 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _deployment_sha(root: Path, directory: Path, state: dict[str, Any]) -> str:
-    if state.get("deployed_sha"):
-        return str(state["deployed_sha"])
+    state_sha = str(state.get("deployed_sha", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", state_sha):
+        return state_sha
     try:
         match = re.search(r"/releases/([0-9a-f]{40})/", (directory / "activity.log").read_text(errors="replace"))
         if match:
@@ -47,6 +48,8 @@ def _deployment_sha(root: Path, directory: Path, state: dict[str, Any]) -> str:
                 return value
         except OSError:
             pass
+    if re.fullmatch(r"[0-9a-f]{40}", root.name):
+        return root.name
     return "unknown"
 
 

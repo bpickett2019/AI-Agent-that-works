@@ -1805,6 +1805,12 @@ export default function cventJobTools(pi: any) {
     },
   });
 
+  const simpleDomainAssessments = Type.Array(Type.Object({
+    domain: Type.String({ minLength: 1, maxLength: 80 }),
+    outcome: literalUnion(["verified", "review_required", "prohibited"]),
+    evidence: Type.Array(Type.String({ minLength: 1, maxLength: 3000 }), { minItems: 1, maxItems: 100 }),
+  }), { maxItems: 50, description: "Simple Mode: one assessment for every populated RR domain. Order is yours; coverage is mandatory before final QA." });
+
   pi.registerTool({
     name: "cvent_finish",
     label: "Finish Cvent job",
@@ -1816,6 +1822,7 @@ export default function cventJobTools(pi: any) {
       jobWideBlocker: Type.Optional(literalUnion(["authentication_unavailable", "wrong_event", "lease_lost", "provider_unavailable", "uncertain_mutation", "browser_runtime_failure", "capability_unavailable"])),
       blockerEvidence: Type.Optional(Type.String({ minLength: 10, maxLength: 3000 })),
       unresolvedItems: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 200 }),
+      domainAssessments: SIMPLE ? simpleDomainAssessments : Type.Optional(simpleDomainAssessments),
       realReads: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 500 }),
       realWrites: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 500 }),
       guardrails: Type.Object({
@@ -1838,9 +1845,33 @@ export default function cventJobTools(pi: any) {
       return withQueue("job-files", async () => {
         if (SIMPLE) {
           if (params.realWrites.length && !params.realReads.length) throw new Error("Report the actual persisted verification evidence for your work");
+          const validation = await readJson(join(jobDir, "rr-validation.json"), { items: [] });
+          const requiredCounts = new Map<string, number>();
+          for (const item of validation.items ?? []) {
+            const domain = String(item?.domain ?? "").trim();
+            if (domain) requiredCounts.set(domain, (requiredCounts.get(domain) ?? 0) + 1);
+          }
+          const assessments = new Map<string, any>();
+          for (const assessment of params.domainAssessments ?? []) {
+            const domain = String(assessment?.domain ?? "").trim();
+            if (!domain || assessments.has(domain)) throw new Error("Each Simple Mode domain assessment must have a unique non-empty domain");
+            if (requiredCounts.size && !requiredCounts.has(domain)) throw new Error(`Unknown or unpopulated RR domain assessment: ${domain}`);
+            assessments.set(domain, { domain, outcome: assessment.outcome, evidence: assessment.evidence, rr_item_count: requiredCounts.get(domain) ?? null });
+          }
+          if (!params.jobWideBlocker && requiredCounts.size) {
+            const outstanding = [...requiredCounts.keys()].filter(domain => !assessments.has(domain));
+            if (outstanding.length) throw new Error(`Do not finish early. Inspect and attempt independent safe work in: ${outstanding.join(", ")}. Hold only item-level exceptions, not untouched domains.`);
+          }
+          if (params.status === "DRAFT_COMPLETE" && [...assessments.values()].some(assessment => assessment.outcome !== "verified"))
+            throw new Error("DRAFT_COMPLETE requires every populated RR domain assessment to be verified");
+          if (params.status === "REVIEW_REQUIRED") {
+            if (!params.unresolvedItems.length) throw new Error("REVIEW_REQUIRED needs exact unresolved item-level exceptions");
+            if (requiredCounts.size && ![...assessments.values()].some(assessment => assessment.outcome === "review_required" || assessment.outcome === "prohibited"))
+              throw new Error("REVIEW_REQUIRED needs at least one domain assessment with a review_required or prohibited outcome");
+          }
           const report = { status: params.status, execution_mode: "simple", reported_by: "pi",
             job_wide_blocker: params.jobWideBlocker ?? null, completion_reason: params.blockerEvidence ?? "Pi final QA; see actual evidence and review items",
-            unresolved_items: params.unresolvedItems, real_reads: params.realReads, real_writes: params.realWrites,
+            unresolved_items: params.unresolvedItems, domain_assessments: [...assessments.values()], real_reads: params.realReads, real_writes: params.realWrites,
             guardrails: { published: 0, emails_sent: 0, deletes: 0, global_mutations: 0 }, updated_at: new Date().toISOString() };
           await atomicJson(join(jobDir, "final-report.json"), report);
           const state = await readJson(join(jobDir, "state.json"), {});

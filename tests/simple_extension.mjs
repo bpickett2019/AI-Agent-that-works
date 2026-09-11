@@ -14,6 +14,10 @@ try {
   const load=name=>JSON.parse(fs.readFileSync(path.join(directory,name),'utf8'));
   save('browser-runtime.json',{browserRuntimeId:'runtime',executionMode:'simple'});
   save('state.json',{completed:['first'],pending:['second'],current_stage:'second'});
+  save('rr-validation.json',{items:[
+    {domain:'event_settings',itemId:'one',status:'VERIFIED'},
+    {domain:'site_designer',itemId:'two',status:'VERIFIED'},
+  ]});
   save('browser-snapshot-pending.json',{complete:false,nextChunk:99}); // legacy gates must be irrelevant
   save('domain-results.json',{domains:{event_settings:{checkpoint:'COMPLETE'}}});
   const helper=path.join(helperRoot,'browser_tool.py');
@@ -72,10 +76,15 @@ print('BROWSER_ROUTER_RESULT='+json.dumps(out))
   assert(login.content[0].text.includes('persistedProfileReused'));
   assert(!fs.existsSync(path.join(directory,'browser-gate.json')));
   assert.deepEqual(load('state.json').completed,['first','second']);
-  const final={status:'REVIEW_REQUIRED',unresolvedItems:['One RR item ambiguous; independent work completed'],realReads:['Persisted verification'],realWrites:['Changed value'],guardrails:{published:0,emailsSent:0,deletes:0,globalMutations:0}};
+  const final={status:'REVIEW_REQUIRED',unresolvedItems:['One RR item ambiguous; independent work completed'],domainAssessments:[
+    {domain:'event_settings',outcome:'verified',evidence:['Persisted Event Settings readback']},
+  ],realReads:['Persisted verification'],realWrites:['Changed value'],guardrails:{published:0,emailsSent:0,deletes:0,globalMutations:0}};
+  await assert.rejects(tools.get('cvent_finish').execute('finish-too-early',final),/site_designer/);
+  final.domainAssessments.push({domain:'site_designer',outcome:'review_required',evidence:['Exact widget exception recorded after attempted configuration']});
   assert.equal((await tools.get('cvent_finish').execute('finish',final)).terminate,true);
   assert.equal(load('final-report.json').status,'REVIEW_REQUIRED');
   assert.equal(load('final-report.json').reported_by,'pi');
+  assert.deepEqual(load('final-report.json').domain_assessments.map(item=>item.rr_item_count),[1,1]);
   assert.deepEqual(load('state.json').completed,['first','second']);
   console.log('Simple extension: native script, normal errors, own checklist, Pi verification, review completion PASS');
 } finally {fs.rmSync(directory,{recursive:true,force:true})}

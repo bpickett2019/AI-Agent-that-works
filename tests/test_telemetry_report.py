@@ -78,6 +78,19 @@ class PersistedTelemetryReportTests(unittest.TestCase):
             self.assertEqual(report["status"], "DRAFT_COMPLETE")
             self.assertIsNone(report["maximum_consecutive_zero_progress_rounds"])
 
+    def test_release_directory_sha_replaces_unknown_state_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            release_sha = "c" * 40
+            root = base / "releases" / release_sha
+            root.mkdir(parents=True)
+            directory = base / "job"
+            directory.mkdir()
+            (directory / "state.json").write_text(json.dumps({"deployed_sha": "unknown"}))
+            (directory / "final-report.json").write_text(json.dumps({"execution_mode": "simple", "status": "REVIEW_REQUIRED"}))
+            report = build_telemetry_report(directory, {"id": "simple"}, root)
+            self.assertEqual(report["deployed_sha"], release_sha)
+
     def test_legacy_activity_counts_are_used_when_old_events_lack_fields(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
