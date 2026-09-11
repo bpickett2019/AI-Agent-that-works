@@ -2,6 +2,7 @@
 /** Ego direct-tool adapter pinned to the canonical Steel Chromium target. */
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { inspectRegistrationTypeCapabilities, runTrustedCventProcedure } from './trusted_cvent_procedures.mjs';
 const argv=process.argv.slice(2);const arg=n=>argv[argv.indexOf(n)+1];
 const runtimePath=arg('--runtime');const operation=arg('--operation');const params=JSON.parse(arg('--params')||'{}');
@@ -17,14 +18,14 @@ function readSnapshotCache(){
 function writeSnapshotCache(value){
   const temporary=`${snapshotCachePath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,snapshotCachePath);fs.chmodSync(snapshotCachePath,0o600);
 }
-if(snapshotCachePath&&['actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','selectOption','setChecked','press','drag','visualDrag','uploadDiscountImport','recover','openAuthorizedEvent','inspectRegistrationTypeCapabilities','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
+if(snapshotCachePath&&['script','actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','selectOption','setChecked','press','drag','visualDrag','uploadDiscountImport','recover','openAuthorizedEvent','inspectRegistrationTypeCapabilities','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
 if(!runtimePath||!operation){await output('Explicit --runtime and --operation are required',false);process.exit(2)}
 const runtime=JSON.parse(fs.readFileSync(runtimePath,'utf8'));
 const cdpOrigin=new URL(runtime.cdpHttpOrigin);process.env.EGO_BROWSER_CDP_HOST=cdpOrigin.hostname;process.env.EGO_BROWSER_CDP_PORT=cdpOrigin.port;
 // Failure reporting lives outside try: startup, action, and postflight errors
 // must retain their original cause and every successfully completed action.
 const completedActions=[];
-let writesAttempted=0,actionIndex=-1;
+let writesAttempted=0,actionIndex=-1,dirty=false,saved=false,saves=0,readbacks=0;
 try{
   const ego=await import('./vendor/ego-browser-linux/dist/src/helpers.js');
   const tabs=await ego.listTabs();
@@ -75,13 +76,18 @@ try{
     const mutating=/^(?:save(?:\s|$)|save\s*(?:&|and)\s*close(?:\s|$)|create(?:\s|$)|add(?:\s|$)|update(?:\s|$)|apply(?:\s|$)|confirm(?:\s|$)|submit(?:\s|$))/i;
     if(identity.test(target)||labels.some(label=>identity.test(label)))throw new Error('Write blocked: selected event identity is immutable');
     if(labels.some(label=>protectedControl.test(label))||descriptor.href&&/\/(?:attendees?|invitees?|contacts?|contact[-_]?types?|account|organization|admin|global|library|profiles?)(?:\/|$)/i.test(new URL(descriptor.href).pathname))throw new Error('Action blocked: protected Cvent control');
-    if(step.intent!=='write'&&labels.some(label=>mutating.test(label)))throw new Error('Mutating control requires write intent and RR evidence');
+    if(descriptor.href){const url=new URL(descriptor.href),key=eventKey(url.href);if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==String(runtime.authorizedEventKey).toLowerCase())throw Error('Navigation outside exact authorized event blocked');}
+    if(step.intent!=='write'&&(labels.some(label=>mutating.test(label))||['checkbox','radio','switch'].includes(String(descriptor.role).toLowerCase())||descriptor.tag==='INPUT'&&['click','activate'].includes(step.operation)))throw new Error('Mutating control requires write intent and RR evidence');
     if(step.intent==='write'){await assertLease();await assertAuthorizedPage();}
   }
   async function runAdaptive(step){
     const op=step.operation;let resolved;
     if(step.target&&['readTarget','click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'].includes(op)){resolved=await resolveTarget(step);step={...step,target:resolved.target};if(op!=='readTarget')await authorizeInteractive(step,resolved.descriptor)}
     if(['visualClick','visualDoubleClick','visualDrag'].includes(op))await authorizeInteractive(step,await pointDescriptor(step.x,step.y));
+    if(['typeText','press'].includes(op)&&!step.target&&step.intent==='write'){
+      const focused=await ego.evaluate(`(() => {const e=document.activeElement;if(!e)return null;const label=e.id?document.querySelector('label[for="'+CSS.escape(e.id)+'"]'):e.closest('label');return {tag:e.tagName,role:e.getAttribute('role'),name:e.getAttribute('name'),aria:e.getAttribute('aria-label'),label:label?.innerText||'',title:e.getAttribute('title'),connected:e.isConnected,disabled:Boolean(e.disabled)}})()`);
+      await authorizeInteractive(step,focused);
+    }
     if(step.intent==='write'&&!['click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport','visualClick','visualDoubleClick','visualDrag'].includes(op)){await assertLease();await assertAuthorizedPage();}
     switch(op){
       case 'pageInfo':return {page:await ego.pageInfo()};
@@ -107,7 +113,7 @@ try{
       case 'drag':await dispatch(step,()=>ego.drag([step.target,step.destination],{delay:75}));return {dragged:true};
       case 'visualDrag':await dispatch(step,()=>ego.drag([[step.x,step.y],[step.toX,step.toY]],{delay:75,label:step.label}));return {dragged:[[step.x,step.y],[step.toX,step.toY]]};
       case 'uploadDiscountImport':await dispatch(step,()=>ego.setInputFiles(step.target,step.filePath));return {uploadedArtifact:'discount-import.xlsx'};
-      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase();if(!url.hostname.toLowerCase().endsWith('cvent.com')||key!==expected)throw new Error('Navigation outside exact authorized event blocked');await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});await assertAuthorizedPage();return {navigated:url.href}}
+      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase();if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key!==expected||/\/(?:attendees?|invitees?|contacts?|account|organization|admin|global|library|profiles?)(?:\/|$)/i.test(url.pathname))throw new Error('Navigation outside exact authorized event blocked');await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});await assertAuthorizedPage();return {navigated:url.href}}
       case 'wait':if(step.target)await ego.waitForSelector(step.target,{timeout:step.ms??30000});else if(step.loadState)await ego.waitForLoadState(step.loadState,{timeout:step.ms??30000});else await ego.waitForTimeout(step.ms??1000);return {waitedMs:step.ms??1000};
       default:throw new Error(`Unsupported coherent Ego action: ${op}`);
     }
@@ -198,6 +204,69 @@ try{
       const landing=await ego.evaluate(`(() => ({ready:document.readyState,title:document.title,headings:[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(element=>String(element.innerText||element.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).slice(0,20)}))()`);
       result={openedEventKey:expectedKey,activation:'exact-visible-inventory-href',inventoryUrl:before.url,navigationTarget:{name:chosen.name,code:chosen.code,status:chosen.status,href:chosen.href,diagnostics:chosen,passes},landing};break;
     }
+    case 'script': {
+      // The same Ego executor and target/lease checks, now with coherent native
+      // helper scripts. No shell, network, process, filesystem or raw CDP API is exposed.
+      const logs=[];
+      const validation=JSON.parse(fs.readFileSync(path.join(path.dirname(runtimePath),'rr-validation.json'),'utf8'));
+      const verified=new Set(validation.items.filter(item=>item.domain===params.domain&&item.status==='VERIFIED').map(item=>`${item.sourceEvidence.sheet}!${item.sourceEvidence.range}`));
+      const target=value=>typeof value==='string'?value.replace(/^loc=role:/,'role:').replace(/^loc=css:/,''):value;
+      const readOps=new Set(['pageInfo','snapshotText','screenshot','readTarget','scroll','wait','navigate','hover']);
+      const run=async(op,args={},options={})=>{
+        if(completedActions.length>=200)throw Error('Ego round exceeded 200 actions; continue in another coherent round');
+        actionIndex=completedActions.length;
+        let intent=readOps.has(op)?'read':params.intent;
+        if(options.intent==='read')intent='read';
+        const source=options.rrSource??(params.rrSources.length===1?params.rrSources[0]:undefined);
+        if(intent==='write'&&(!source||!verified.has(source)||!params.rrSources.includes(source)))throw Error('Item held: this action needs an exact VERIFIED rrSource from the round header');
+        if(intent==='read'&&(['fill','typeText','selectOption','setChecked','visualDrag','drag'].includes(op)||op==='press'&&!['Escape','Tab','PageUp','PageDown'].includes(args.key)))throw Error('Read-only Ego action cannot edit/commit controls');
+        if(op==='navigate'&&dirty)throw Error('Save and verify current changes before navigation');
+        await assertLease();await assertAuthorizedPage();
+        if((await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || window.name"))!==runtime.browserRuntimeId)throw Error('Runtime identity lost during Ego round');
+        let isSave=false;
+        if(['click','visualClick'].includes(op)){
+          const d=op==='click'?(await resolveTarget({target:args.target})).descriptor:await pointDescriptor(args.x,args.y);
+          isSave=['text','label','aria','title'].some(key=>/^save(?:\s|$)/i.test(normalize(d?.[key])));
+        }
+        if(op==='screenshot')args.filePath=path.join(path.dirname(runtimePath),`browser-visual-${Date.now()}-${actionIndex}.png`);
+        const step={operation:op,...args,intent,rrSource:source};
+        const started=performance.now(),before=writesAttempted;
+        if(intent==='write')dirty=true; // contain a dispatched failure, too
+        const value=await runAdaptive(step);
+        if(writesAttempted>before){dirty=true;saved=isSave||params.commitMode==='autosave';}
+        if(isSave){saves++;saved=true;}
+        if(dirty&&saved&&['snapshotText','readTarget','screenshot'].includes(op)){readbacks++;dirty=false;saved=false;}
+        completedActions.push({index:actionIndex,operation:op,intent,rrSource:source,durationMs:Math.round(performance.now()-started),result:value});
+        return value;
+      };
+      const point=(value)=>Array.isArray(value)?{x:value[0],y:value[1]}:{x:value.x,y:value.y};
+      const context=vm.createContext({
+        cliLog:value=>logs.push(value),
+        useOrCreateTaskSpace:async()=>({id:runtime.browserRuntimeId}),
+        pageInfo:async()=> (await run('pageInfo')).page,
+        snapshotText:async()=> (await run('snapshotText')).snapshot,
+        captureScreenshot:async()=> (await run('screenshot')).screenshotPath,
+        readTarget:async value=>run('readTarget',{target:target(value)}),
+        gotoAndWait:async url=>run('navigate',{url}),
+        openOrReuseTab:async url=>run('navigate',{url}),
+        click:async(value,options={})=>typeof value==='string'?run('click',{target:target(value)},options):run('visualClick',point(value),options),
+        doubleClick:async(value,options={})=>run('visualDoubleClick',point(value),options),
+        fillInput:async(value,text,options={})=>run('fill',{target:target(value),text},options),
+        typeText:async(text,options={})=>run('typeText',{text},options),
+        pressKey:async(key,options={})=>run('press',{key,target:options.target?target(options.target):undefined},options),
+        selectOption:async(value,option,options={})=>run('selectOption',{target:target(value),option,optionBy:options.optionBy},options),
+        setChecked:async(value,checked,options={})=>run('setChecked',{target:target(value),checked},options),
+        hover:async value=>run('hover',{target:target(value)}),
+        scrollBy:async dy=>run('scroll',{deltaY:dy}),
+        scroll:async({dy})=>run('scroll',{deltaY:dy}),
+        wait:async seconds=>run('wait',{ms:Math.max(50,Math.min(seconds*1000,30000))}),
+        waitForElement:async value=>run('wait',{target:target(value),ms:30000}),
+        dragMouse:async(points,options={})=>run('visualDrag',{...point(points[0]),toX:point(points[1]).x,toY:point(points[1]).y},options),
+      },{codeGeneration:{strings:false,wasm:false}});
+      await new vm.Script(`(async()=>{${params.script}\n})()`).runInContext(context,{timeout:10000});
+      if(dirty)throw Error('Ego round ended with changes lacking Save and fresh readback');
+      result={actions:completedActions,actionCount:completedActions.length,writesAttempted,saves,readbacks,logs,unresolvedWrites:false};break;
+    }
     case 'actions': {
       const actions=completedActions;
       for(let index=0;index<params.steps.length;index++){
@@ -263,4 +332,4 @@ try{
   if(after!==runtime.browserRuntimeId)throw new Error('Runtime marker changed after Ego action');
   const page=await ego.pageInfo();
   await output({marker:after,targetId:wanted,observedAt:new Date().toISOString(),page,...result});process.exit(0);
-}catch(e){await output({error:e?.stack||e?.message||String(e),actionIndex,writesAttempted,completedActions},false);process.exit(1)}
+}catch(e){await output({error:e?.stack||e?.message||String(e),actionIndex,writesAttempted,completedActions,...(operation==='script'?{saves,readbacks,unresolvedWrites:dirty||writesAttempted>0}: {})},false);process.exit(1)}

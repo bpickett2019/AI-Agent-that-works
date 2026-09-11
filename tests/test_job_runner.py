@@ -36,14 +36,16 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         extension = command[command.index("--extension") + 1]
         self.assertTrue(extension.endswith("extensions/cvent-job-tools.ts"))
         tools = set(command[command.index("--tools") + 1].split(","))
-        self.assertNotIn("read", tools)
-        self.assertNotIn("bash", tools)
+        self.assertIn("read", tools)
+        self.assertIn("bash", tools)
         self.assertEqual(tools, {
+            "read", "bash",
             "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
             "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section", "cvent_login_handoff",
             "cvent_snapshot_chunk", "cvent_finish",
         })
-        self.assertNotIn("--skill", command)
+        self.assertTrue(command[command.index("--skill") + 1].endswith("skills/ego-browser/SKILL.md"))
+        self.assertEqual(command[command.index("--mode") + 1], "json")
         self.assertEqual(command[-1], "job prompt")
 
     def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
@@ -143,11 +145,15 @@ class JobRunnerConfigurationTests(unittest.TestCase):
             "Anthropic API credit balance is too low",
         )
 
-    def test_controlled_incomplete_report_requires_review_instead_of_failed_prewrite(self):
+    def test_incomplete_runtime_failure_is_not_item_review(self):
         self.assertEqual(
-            classify_process_outcome(0, "INCOMPLETE", "running", False, False, None),
-            ("review_required", False, None),
+            classify_process_outcome(0, "INCOMPLETE", "running", False, False, "tools missing")[0],
+            "failed_prewrite",
         )
+        self.assertEqual(classify_process_outcome(0, "REVIEW_REQUIRED", "running", True, False, None),
+                         ("review_required", False, None))
+        self.assertEqual(classify_process_outcome(0, "DRAFT_COMPLETE", "running", True, True, None)[0],
+                         "failed_uncertain")
         self.assertEqual(
             classify_process_outcome(1, "INCOMPLETE", "running", False, False, None)[0],
             "failed_prewrite",

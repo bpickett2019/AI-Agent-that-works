@@ -47,6 +47,7 @@ const ARTIFACTS: Record<string, string> = {
   performance: "performance-summary.json",
 };
 const ALLOWED_TOOLS = new Set([
+  "read", "bash",
   "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
   "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
@@ -328,7 +329,7 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
   }
   await readJobFile(runtimePath, 1024 * 1024);
   const trusted = Object.values(TRUSTED_SECTION_PROCEDURES).includes(operation);
-  const coherent = operation === "actions";
+  const coherent = operation === "actions" || operation === "script";
   const timeout = Math.max(1, Math.min(timeoutSeconds, operation === "recover" ? 30 : trusted || coherent ? 900 : 180));
   const boundedParams = { ...params, timeoutSeconds: timeout };
   const output = await runFixed(python, [
@@ -337,7 +338,7 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
   ], "browser", signal, (timeout + (operation === "recover" ? 45 : trusted || coherent ? 30 : 10)) * 1000);
   const result = parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
   if (operation === "recover") recoveryBudget.recovered();
-  const actionCount = coherent ? (params.steps as any[])?.length ?? 0 : 1;
+  const actionCount = operation === "script" ? Number(result.actionCount ?? 0) : coherent ? (params.steps as any[])?.length ?? 0 : 1;
   if (activeTurnProgress) {
     activeTurnProgress.browserOperations += 1;
     activeTurnProgress.browserActions += actionCount;
@@ -450,6 +451,14 @@ function verificationItemResults(domainItems: any[], matches: any[], exceptions:
       status: exception?.status ?? (match ? "MATCH" : item.status === "VERIFIED" ? "NOT_CONFIGURED" : "AMBIGUOUS"),
       ...(match ? { cventEvidence: match.cventEvidence } : { reason: exception?.reason ?? "No explicit item-level Cvent readback was supplied" }) };
   });
+}
+
+async function assertSourcesVerified(domain: string, sources: string[]): Promise<void> {
+  const validation = await readJson(join(jobDir, "rr-validation.json"), null);
+  const verified = new Set((validation?.items ?? []).filter((item: any) => item.domain === domain && item.status === "VERIFIED")
+    .map((item: any) => `${item.sourceEvidence.sheet}!${item.sourceEvidence.range}`));
+  if (!sources.length || sources.some(source => !verified.has(source)))
+    throw new Error("Item held: each write source must exactly match VERIFIED evidence in this domain; continue independent verified items");
 }
 
 async function assertDomainEvidenceVerified(domain: string): Promise<void> {
@@ -818,7 +827,15 @@ export default function cventJobTools(pi: any) {
       await safeMetric("MODEL_CALL_BUDGET_EXCEEDED", performance.now(), { section: progress.section, sectionTurn, targetMaximum: 3 });
     activeTurnProgress = null;
   });
-  pi.on("before_agent_start", () => pi.setActiveTools([...ALLOWED_TOOLS]));
+  pi.on("before_agent_start", async (event: any) => {
+    pi.setActiveTools([...ALLOWED_TOOLS]);
+    const active = pi.getActiveTools();
+    const required = ["read", "bash", "cvent_prepare_rr", "cvent_plan", "cvent_browser", "cvent_finish"];
+    const missing = required.filter(name => !active.includes(name));
+    await atomicJson(join(jobDir, "pi-capabilities.json"), { activeTools: active, missing, pid: process.pid });
+    await atomicJson(join(jobDir, "pi-system-prompt.json"), { systemPrompt: event.systemPrompt });
+    if (missing.length) throw new Error(`PI_CAPABILITY_MISMATCH: ${missing.join(", ")}`);
+  });
   pi.on("tool_call", async (event: any) => {
     if (!ALLOWED_TOOLS.has(event.toolName)) {
       return { block: true, reason: "Capability denied: this production agent has no shell or general filesystem tools" };
@@ -832,6 +849,56 @@ export default function cventJobTools(pi: any) {
     }
     if (decision.recovery || (event.toolName === "cvent_browser" && event.input?.operation === "recover")) event.input.timeoutSeconds = 30;
     return undefined;
+  });
+
+  pi.registerTool({
+    name: "read", label: "Read verified job input or Ego skill",
+    description: "Read the Ego skill or this job's verified RR plan/evidence. Supports offset/limit, not secrets or other jobs.",
+    promptSnippet: "Read Ego skill and verified job files",
+    parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })) }),
+    async execute(_id: string, params: any) {
+      const target = resolve(jobDir, params.path);
+      const skill = join(repoRoot, "skills/ego-browser/SKILL.md");
+      const allowed = ["configuration-plan.json", "rr-validation.json", "expected-domains.json", "input.inspection.json", "job-prompt.md"];
+      if (target !== skill && !allowed.some(name => target === join(jobDir, name))) throw new Error("Read is limited to the Ego skill and verified job input");
+      const text = target === skill ? await readFile(skill, "utf8") : (await readJobFile(target, 25 * 1024 * 1024)).toString("utf8");
+      const lines = text.split("\n"), start = (params.offset ?? 1) - 1;
+      const result = toolText(lines.slice(start, start + (params.limit ?? 500)).join("\n"));
+      result.details = { totalLines: lines.length, offset: start + 1 };
+      return result;
+    },
+  });
+
+  pi.registerTool({
+    name: "bash", label: "Ego native browser round",
+    description: "Run ego-browser nodejs heredocs using the loaded Ego skill. Browser-only; no general shell. One script can observe, navigate, edit multiple controls, Save and verify. Header: // cvent: {\"domain\":\"event_settings\",\"commitMode\":\"read_only\"}. Use save/autosave and exact rrSources from the verified plan for configuration.",
+    promptSnippet: "Execute coherent Ego browser heredocs",
+    parameters: Type.Object({ command: Type.String({ maxLength: 50000 }), timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 780 })) }),
+    async execute(_id: string, params: any, signal: AbortSignal) {
+      const match = params.command.trim().match(/^ego-browser nodejs <<'([A-Za-z][A-Za-z0-9_]*)'\r?\n([\s\S]*)\r?\n\1$/);
+      if (!match) throw new Error("Use only ego-browser nodejs <<'EOF' ... EOF as documented by the Ego skill");
+      const header = match[2].match(/^\s*\/\/ cvent: (\{[^\n]+\})/);
+      if (!header) throw new Error("Ego round needs // cvent: {domain, commitMode, rrSources} header");
+      const meta = JSON.parse(header[1]);
+      if (activeTurnProgress && DOMAINS.has(meta.domain)) { activeTurnProgress.section = meta.domain; currentSection = meta.domain; }
+      if (!DOMAINS.has(meta.domain) || !["save", "autosave", "read_only"].includes(meta.commitMode)) throw new Error("Invalid Ego round domain/commitMode");
+      return withQueue("browser", async () => {
+        await assertSnapshotConsumed();
+        const write = meta.commitMode !== "read_only";
+        await assertCompiledExpectations();
+        if (write) {
+          await assertSourcesVerified(meta.domain, meta.rrSources ?? []);
+          await assertNoHeldReplay(meta.domain, { sources: meta.rrSources, script: match[2] });
+        }
+        await appendActivity(`${write ? "Configuring" : "Inspecting"} ${meta.domain} with native Ego`);
+        const result = await invokeBrowser("script", { intent: write ? "write" : "read", domain: meta.domain,
+          commitMode: meta.commitMode, rrSources: meta.rrSources ?? [], script: match[2] }, signal, params.timeout ?? 180);
+        await appendPerformance("ego_execution_round", performance.now(), { domain: meta.domain,
+          actionCount: result.actionCount, writeCount: result.writesAttempted, saves: result.saves, readbacks: result.readbacks });
+        await appendActivity(`Ego ${meta.domain}: ${result.actionCount} actions, ${result.writesAttempted} writes, ${result.saves} saves, ${result.readbacks} readbacks`);
+        return toolBrowserResult(result);
+      });
+    },
   });
 
   pi.registerTool({
@@ -1261,7 +1328,7 @@ export default function cventJobTools(pi: any) {
           await assertSnapshotConsumed();
           if (writeIndexes.length) {
             await assertCompiledExpectations();
-            await assertDomainEvidenceVerified(domain);
+            await assertSourcesVerified(domain, writeIndexes.map(index => steps[index].rrSource));
             await assertNoHeldReplay(domain, params);
             const pending = await pendingWriteReadback() ?? {};
             await atomicJson(WRITE_READBACK_PENDING, {
@@ -1293,7 +1360,7 @@ export default function cventJobTools(pi: any) {
           if (write) {
             await assertCompiledExpectations();
             if (!params.domain) throw new Error("Every adaptive Cvent write requires its validated RR domain");
-            await assertDomainEvidenceVerified(String(params.domain));
+            await assertSourcesVerified(String(params.domain), [params.rrSource]);
             await assertNoHeldReplay(String(params.domain), params);
           }
           const input = browserParams(operation, params);
@@ -1373,7 +1440,9 @@ export default function cventJobTools(pi: any) {
     parameters: Type.Object({
       status: Type.Union([
         Type.Literal("DRAFT_COMPLETE"), Type.Literal("REVIEW_REQUIRED"), Type.Literal("INCOMPLETE"),
-      ], { description: "Final controlled outcome" }),
+      ], { description: "Final controlled outcome, not an item-level exception" }),
+      jobWideBlocker: Type.Optional(literalUnion(["authentication_unavailable", "wrong_event", "lease_lost", "provider_unavailable", "uncertain_mutation", "browser_runtime_failure", "capability_unavailable"])),
+      blockerEvidence: Type.Optional(Type.String({ minLength: 10, maxLength: 3000 })),
       unresolvedItems: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 200 }),
       realReads: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 500 }),
       realWrites: Type.Array(Type.String({ maxLength: 3000 }), { maxItems: 500 }),
@@ -1386,7 +1455,8 @@ export default function cventJobTools(pi: any) {
     }),
     async execute(_id: string, params: any) {
       if (!["DRAFT_COMPLETE", "REVIEW_REQUIRED", "INCOMPLETE"].includes(params.status)) throw new Error("Capability denied: invalid final status");
-      if (await pendingWriteReadback()) throw new Error("Final report blocked until the required Cvent write readback is complete");
+      if (await pendingWriteReadback() && params.jobWideBlocker !== "uncertain_mutation") throw new Error("Final report blocked until the required Cvent write readback is complete");
+      if (params.jobWideBlocker && (params.status !== "INCOMPLETE" || !params.blockerEvidence)) throw new Error("A genuine job-wide blocker requires INCOMPLETE and exact blocker evidence");
       if ([params.guardrails.published, params.guardrails.emailsSent, params.guardrails.deletes, params.guardrails.globalMutations].some((value) => value !== 0)) {
         throw new Error("Final report blocked: protected actions must remain zero");
       }
@@ -1394,6 +1464,12 @@ export default function cventJobTools(pi: any) {
       return withQueue("job-files", async () => {
         const validation = await readJson(join(jobDir, "rr-validation.json"), { items: [] });
         const verification = await readJson(join(jobDir, "final-verification.json"), { schemaVersion: 1, domains: {} });
+        if (!params.jobWideBlocker) {
+          if (!validation.items?.length) throw new Error("Cannot finish: verified RR plan is absent/empty; prepare the actual RR first");
+          const outstanding = [...new Set(validation.items.map((item: any) => item.domain))].filter((domain: any) => !verification.domains?.[domain]?.cventEvidence?.length);
+          if (outstanding.length) throw new Error(`Do not finish early. Inspect and attempt independent safe work in: ${outstanding.join(", ")}. Hold only uncertain items, not the job.`);
+          if (params.status === "INCOMPLETE") throw new Error("INCOMPLETE requires a genuine job-wide blocker; use REVIEW_REQUIRED only after all independent work and final verification");
+        }
         const recorded = new Map<string, any>();
         for (const domain of Object.values(verification.domains ?? {}) as any[]) for (const item of domain.items ?? []) recorded.set(item.itemId, item);
         for (const rrItem of validation.items ?? []) if (!recorded.has(rrItem.itemId)) recorded.set(rrItem.itemId, {
@@ -1409,6 +1485,8 @@ export default function cventJobTools(pi: any) {
         }
         const report = {
           status: params.status,
+          job_wide_blocker: params.jobWideBlocker ?? null,
+          completion_reason: params.blockerEvidence ?? "All populated RR domains assessed and verified",
           unresolved_items: params.unresolvedItems,
           real_reads: params.realReads,
           real_writes: params.realWrites,
@@ -1423,7 +1501,8 @@ export default function cventJobTools(pi: any) {
         };
         await atomicJson(join(jobDir, "final-report.json"), report);
         const state = await readJson(join(jobDir, "state.json"), {});
-        if (["REVIEW_REQUIRED", "INCOMPLETE"].includes(params.status)) state.status = "review_required";
+        if (params.status === "REVIEW_REQUIRED") state.status = "review_required";
+        if (params.status === "INCOMPLETE") state.status = "incomplete";
         state.current_stage = "final_qa";
         state.current_action = params.status === "DRAFT_COMPLETE" ? "Draft build complete" : params.status.replaceAll("_", " ").toLowerCase();
         state.updated_at = new Date().toISOString();

@@ -58,13 +58,15 @@ but each saved configuration group must receive fresh readback before navigation
 or completion. Never publish/Go Live, send communications, delete/archive, access
 attendees/contacts, mutate another event, or mutate reusable/global definitions.
 
-Pi runs with `--no-builtin-tools`: it has no shell, generic read/write, process,
-environment, or arbitrary-path access. The explicit
-`extensions/cvent-job-tools.ts` extension exposes only fixed job-scoped
-`cvent_*` capabilities. It invokes approved RR helpers and `browser_tool.py`
+Pi runs with `--no-builtin-tools` and explicitly registered job-bound `read`,
+`bash`, and `cvent_*` tools. `read` loads the Ego skill and verified RR artifacts;
+`bash` accepts `ego-browser nodejs` heredocs, not general shell commands. The
+existing Ego executor runs coherent helper scripts with per-action event/lease,
+RR-source, protected-control and Save/readback checks. No section adapter is
+required. The explicit `extensions/cvent-job-tools.ts` extension It invokes approved RR helpers and `browser_tool.py`
 without a shell, passes helper subprocesses an allowlisted environment, and
-never forwards Anthropic, Entra, or session secrets. Arbitrary JavaScript, raw
-CDP, and browser cookie/storage/network access are not exposed to the model. When Cvent requires
+never forwards Anthropic, Entra, or session secrets. General host JavaScript, raw CDP, and browser cookie/storage/network APIs are
+not exposed; browser scripts receive only the documented Ego helper surface. When Cvent requires
 SSO/MFA, the login-handoff capability keeps the same worker and browser alive,
 gives the viewer to the user, and blocks further automation until control is
 returned. The same persistent per-slot Chromium profile is reused across handoffs;
@@ -82,8 +84,9 @@ Turn telemetry flags `MODEL_RESPONSE_WITH_ZERO_PROGRESS`, excess section calls,
 and low-action coherent rounds; the final performance summary reports model
 turns, turns with action, zero-progress turns, Ego rounds, action density, and
 model/browser/total time per section. Existing section procedures remain optional high-volume
-optimizations rather than write prerequisites. JavaScript and raw CDP remain
-unavailable to the model. Discount creation may use the fixed RR-derived
+optimizations rather than write prerequisites. Pi may also execute coherent
+Node.js helper heredocs using the loaded `skills/ego-browser/SKILL.md`; raw CDP
+and general host APIs remain unavailable. Discount creation may use the fixed RR-derived
 bulk-import workbook. Provider failure after zero writes is
 `failed_prewrite`; after conclusively read-back writes it is
 `failed_recoverable` and resumes with fresh state/delta computation; only an

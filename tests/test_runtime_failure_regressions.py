@@ -37,7 +37,8 @@ export async function pageInfo(){return {url:'https://app.cvent.com/view?evtstub
 export async function waitForTimeout(){}
 export async function screenshot(){return '/offline/screenshot.png'}
 export async function snapshot(){if(process.env.CASE==='middle')throw Error('real snapshot failure');if(process.env.CASE==='string')throw 'real non-Error failure';return 'semantic snapshot'}
-export async function evaluateLocator(){if(process.env.CASE==='writes')return {tag:'INPUT',connected:true,disabled:false,label:'Description'};throw Error('real target missing before dispatch')}
+export async function evaluateLocator(target){if(process.env.CASE==='writes')return {tag:target==='@save'?'BUTTON':'INPUT',connected:true,disabled:false,label:target==='@save'?'Save':target==='@delete'?'Delete':'Description'};throw Error('real target missing before dispatch')}
+export async function click(){return true}
 export async function fill(target,text){if(process.env.CASE==='writes'){if(text==='fail')throw Error('real dispatched mutation failure');return true}throw Error('MUTATION SHOULD NOT HAVE BEEN DISPATCHED')}
 ''')
         self.runtime = {'browserRuntimeId': 'cvent-runtime-test', 'cdpHttpOrigin': 'http://127.0.0.1:1',
@@ -56,6 +57,47 @@ export async function fill(target,text){if(process.env.CASE==='writes'){if(text=
                                    'CVENT_ENV': 'development'}, capture_output=True, text=True, timeout=10)
         self.assertNotIn('ReferenceError', proc.stdout + proc.stderr)
         return proc, browser_tool.child_result(proc)
+
+    def run_native(self, script, mode='save', case='writes'):
+        (self.folder / 'rr-validation.json').write_text(json.dumps({'items': [
+            {'domain': 'event_settings', 'status': 'VERIFIED', 'sourceEvidence': {'sheet': 'RR', 'range': 'B1'}},
+            {'domain': 'event_settings', 'status': 'AMBIGUOUS', 'sourceEvidence': {'sheet': 'RR', 'range': 'B2'}},
+        ]}))
+        params = {'intent': 'read' if mode == 'read_only' else 'write', 'commitMode': mode,
+                  'domain': 'event_settings', 'rrSources': ['RR!B1'], 'script': script}
+        proc = subprocess.run(['node', 'ego_direct.mjs', '--runtime', str(self.folder / 'browser-runtime.json'),
+                               '--operation', 'script', '--params', json.dumps(params)], cwd=self.folder,
+                              env={**{k: v for k, v in os.environ.items() if not k.startswith('CVENT_')},
+                                   'CASE': case, 'CVENT_ENV': 'development'}, capture_output=True, text=True, timeout=10)
+        return proc, browser_tool.child_result(proc)
+
+    def test_native_multi_action_save_readback_with_ambiguous_independent_item(self):
+        proc, result = self.run_native("""
+cliLog(await snapshotText());
+for (const text of ['one','two']) await fillInput('@input', text);
+await click('@save'); await wait(0.1); cliLog(await snapshotText());
+""")
+        self.assertEqual(proc.returncode, 0, result)
+        self.assertEqual(result['writesAttempted'], 3)
+        self.assertEqual(result['saves'], 1)
+        self.assertEqual(result['readbacks'], 1)
+        self.assertEqual(result['actionCount'], 6)
+
+    def test_native_holds_only_nonverified_source_and_blocks_protected_actions(self):
+        for script, error in [("await fillInput('@input','x',{rrSource:'RR!B2'})", 'VERIFIED'),
+                              ("await click('@delete')", 'protected Cvent control'),
+                              ("await gotoAndWait('https://app.cvent.com/view?evtstub=another')", 'outside exact'),
+                              ("await fillInput('@input','x')", 'lacking Save')]:
+            with self.subTest(script=script):
+                proc, result = self.run_native(script)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn(error, result['error'])
+
+    def test_native_readonly_and_script_errors_are_not_configuration(self):
+        for script in ["await fillInput('@input','x')", "process.exit(0)", "await nonExistentHelper()"]:
+            proc, result = self.run_native(script, 'read_only')
+            self.assertEqual(proc.returncode, 1)
+            self.assertEqual(result['writesAttempted'], 0)
 
     def test_successful_multi_action_mission_reports_every_index(self):
         proc, result = self.run_adapter('success')

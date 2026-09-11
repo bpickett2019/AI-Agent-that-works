@@ -50,9 +50,11 @@ def append_log(directory: Path, message: str) -> None:
 def classify_process_outcome(code: int, report_status: str, reported_state: str,
                              writes_exist: bool, writes_unresolved: bool, provider_failure: str | None) -> tuple[str, bool, str | None]:
     """Map a completed agent process to a durable fail-closed job outcome."""
+    if writes_unresolved:
+        return "failed_uncertain", True, (provider_failure + "; " if provider_failure else "") + "Job has an unresolved Cvent mutation; global replay is blocked pending readback/review"
     if code == 0 and report_status == "DRAFT_COMPLETE":
         return "completed", False, None
-    if code == 0 and (report_status in {"REVIEW_REQUIRED", "INCOMPLETE"} or reported_state == "review_required"):
+    if code == 0 and report_status == "REVIEW_REQUIRED":
         return "review_required", False, None
     if reported_state == "login_required" and not writes_unresolved:
         return "login_required", False, None
@@ -446,6 +448,9 @@ class JobRunner:
         first_browser_failure = read_json(directory / f"first-browser-failure-{process.pid}.json", {})
         stop_request = read_json(directory / f"stop-request-{process.pid}.json", {})
         reasons = [provider_failure] if provider_failure else []
+        if report_status == "INCOMPLETE":
+            final_report = read_json(directory / "final-report.json", {})
+            reasons.append(final_report.get("completion_reason") or "; ".join(final_report.get("unresolved_items", [])) or "Agent exited without completing the RR")
         if stop_request:
             reasons.append(f"Stop requested by {stop_request['actor']} at {stop_request['at']} (PID {process.pid})")
         if controller_failure or (code != 0 and first_browser_failure):
@@ -561,15 +566,16 @@ class JobRunner:
     def pi_command(self, job: dict[str, Any], directory: Path, state: dict[str, Any], prompt: str) -> list[str]:
         sessions = directory / "pi-sessions"
         capability_tools = (
-            "cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
+            "read,bash,cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
             "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_section_state,cvent_execute_section,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
         )
         command_line = [
-            "pi", "-p", "--approve", "--provider", pi_provider(), "--model", pi_model(),
+            "pi", "-p", "--mode", "json", "--approve", "--provider", pi_provider(), "--model", pi_model(),
             "--thinking", os.environ.get("CVENT_PI_THINKING", "high"),
             "--no-extensions", "--extension", str(ROOT / "extensions/cvent-job-tools.ts"),
-            "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
+            "--no-skills", "--skill", str(ROOT / "skills/ego-browser/SKILL.md"),
+            "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
             "--tools", capability_tools,
             "--session-dir", str(sessions), "--name", f"cvent-{job['id']}",
         ]

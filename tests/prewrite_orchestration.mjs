@@ -86,6 +86,24 @@ try {
   await assert.rejects(tools.get('cvent_plan').execute('stale', { section: 'summary' }), /stale or belong/);
   fs.writeFileSync(path.join(directory, 'input.xlsx'), input);
   await tools.get('cvent_plan').execute('fresh', { section: 'summary' });
+  assert(tools.has('read') && tools.has('bash'));
+  await assert.rejects(tools.get('bash').execute('shell', { command: 'env' }), /Use only ego-browser/);
+  const finalArgs = { status: 'REVIEW_REQUIRED', unresolvedItems: ['one item ambiguous'], realReads: [], realWrites: [],
+    guardrails: { published: 0, emailsSent: 0, deletes: 0, globalMutations: 0 } };
+  await assert.rejects(tools.get('cvent_finish').execute('early', finalArgs), /Do not finish early/);
+  save('rr-validation.json', { rrSha256: sha256, items: [
+    { domain: 'event_settings', itemId: 'one', status: 'VERIFIED', sourceEvidence: {sheet:'RR',range:'B1'} },
+    { domain: 'event_settings', itemId: 'two', status: 'AMBIGUOUS', sourceEvidence: {sheet:'RR',range:'B2'} },
+  ] });
+  const helper = path.join(helperRoot, 'browser_tool.py');
+  const failedHelper = fs.readFileSync(helper, 'utf8');
+  fs.writeFileSync(helper, 'print(\'BROWSER_ROUTER_RESULT={"ok":true,"actionCount":4,"writesAttempted":2,"saves":1,"readbacks":1}\')');
+  const native = source => ({ command: `ego-browser nodejs <<'EOF'\n// cvent: {"domain":"event_settings","commitMode":"save","rrSources":["${source}"]}\nawait fillInput('@1','value'); await click('@2'); cliLog(await snapshotText());\nEOF` });
+  await tools.get('bash').execute('independent-safe-write', native('RR!B1'));
+  await assert.rejects(tools.get('bash').execute('ambiguous-write', native('RR!B2')), /Item held/);
+  save('final-verification.json', { domains: {event_settings: {cventEvidence:['actual page'],items:[]}} });
+  assert.equal((await tools.get('cvent_finish').execute('review-after-work', finalArgs)).terminate, true);
+  fs.writeFileSync(helper, failedHelper);
   await assert.rejects(tools.get('cvent_browser').execute('auth', { operation: 'authStatus', intent: 'read' }, undefined), /timeout: timed out/);
   const hook = hooks.get('tool_call');
   assert.equal((await hook({ toolName: 'cvent_login_handoff', input: {} })).block, true);

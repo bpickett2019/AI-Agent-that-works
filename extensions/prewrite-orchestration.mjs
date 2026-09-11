@@ -17,6 +17,7 @@ export function retainJobContext(messages, recentCount = 20) {
     const results = block.slice(1).filter(result => !result.isError);
     return (Array.isArray(block[0].content) ? block[0].content : []).some(call => {
       if (call.type !== 'toolCall' || !results.some(result => result.toolCallId === call.id)) return false;
+      if (call.name === 'read' && call.arguments?.path?.endsWith('ego-browser/SKILL.md')) return true;
       if (call.name === 'cvent_prepare_rr' || call.name === 'cvent_login_handoff') return true;
       if (['cvent_plan', 'cvent_expectations'].includes(call.name))
         return ['summary', 'mission', lastDomain].includes(call.arguments?.section);
@@ -48,6 +49,9 @@ export class BrowserRecoveryBudget {
   recoveryAttempted = false;
   deniedCalls = 0;
   failure(operation, message) {
+    // Model-authored script syntax/helper mistakes are item/round errors, not
+    // proof that Chromium or the adapter runtime has failed.
+    if (operation === 'script' && /SyntaxError:|ReferenceError:/.test(message)) return;
     // Locator/schema/evidence errors remain recoverable by normal model work.
     const runtimeError = /ReferenceError:|SyntaxError:|TimeoutError:|timeout:|timed out|Page crashed|Browser action gate is occupied|renderer did not recover|helper returned no structured result|Steel resource admission denied/i.test(message);
     if (!runtimeError && operation !== 'recover') return;

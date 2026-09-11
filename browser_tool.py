@@ -11,8 +11,8 @@ from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
 TRUSTED_PROCEDURES={'configureAdmissionItems','configureRegistrationTypes'}
 TRUSTED_INSPECTIONS={'inspectRegistrationTypeCapabilities'}
-EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','screenshot','readTarget','sectionState','controlInventory','pageInfo','scanEventList','actions','scroll','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
-INTENT_REQUIRED={'actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
+EGO={'script','probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','screenshot','readTarget','sectionState','controlInventory','pageInfo','scanEventList','actions','scroll','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
+INTENT_REQUIRED={'script','actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
 def event_key(url):
     try:
         pairs=parse_qs(urlparse(url).query,keep_blank_values=True)
@@ -298,6 +298,13 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         action_writes=0
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
+        if operation=='script':
+            if set(params)-{'intent','domain','commitMode','rrSources','script','timeoutSeconds'} or not isinstance(params.get('script'),str) or len(params['script'])>50000:
+                raise RuntimeError('Invalid native Ego round')
+            if params.get('commitMode') not in ('save','autosave','read_only') or not isinstance(params.get('rrSources'),list):
+                raise RuntimeError('Native Ego round needs commitMode and RR sources')
+            if (params['commitMode']=='read_only') != (params.get('intent')=='read'):
+                raise RuntimeError('Native Ego intent/commitMode mismatch')
         if operation=='actions':
             params['steps'],action_writes=validate_action_round(runtime,params)
         if params.get('target') and operation in {'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','readTarget'}:
@@ -326,7 +333,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         if proc.returncode or not result.get('ok'):
             # Only a structured coherent-round zero-dispatch result proves a
             # prewrite rejection. A crashed adapter with no result is uncertain.
-            attempted=result.get('writesAttempted',1) if operation=='actions' else 1
+            attempted=result.get('writesAttempted',1) if operation in ('actions','script') else 1
             audit_scope_write(operation,params,current,'uncertain_error' if attempted else 'rejected_prewrite',result.get('error'))
             if attempted:mark_mutation_uncertain(operation,params,current,result.get('error','browser helper failed after write attempt'))
         else:audit_scope_write(operation,params,current,'succeeded')
