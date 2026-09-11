@@ -43,26 +43,28 @@ try{
   }
   const eventKey=url=>{try{const parsed=new URL(url),keys=[...parsed.searchParams].filter(([name])=>['evtstub','eventid','event'].includes(name.toLowerCase())).map(([,value])=>value.trim().toLowerCase());if(keys.length)return keys[0]&&keys.every(key=>key===keys[0])?keys[0]:null;return parsed.pathname.match(/\/events\/([0-9a-f-]{20,})/i)?.[1]?.toLowerCase()??null}catch{return null}};
   const protectedPath=/(?:^|\/)(?:attendees?|invitees?|contacts?|contact[-_]?types?|communications?|emails?|messages?|account(?:settings)?|organization|admin|global|library|profiles?)(?:\/|$)/i;
-  const contextPath=path.join(path.dirname(runtimePath),'authorized-event-context.json'),transitionPath=path.join(path.dirname(runtimePath),'authorized-event-transition.json');
+  const contextPath=path.join(path.dirname(runtimePath),'authorized-event-context.json'),transitionPath=path.join(path.dirname(runtimePath),'authorized-event-transition.json'),targetPath=path.join(path.dirname(runtimePath),'authorized-target.json');
   const privateJson=file=>{try{const stat=fs.lstatSync(file);return stat.isFile()&&!stat.isSymbolicLink()&&stat.size<1024*1024?JSON.parse(fs.readFileSync(file,'utf8')):null}catch{return null}};
+  const writePrivateJson=(file,value)=>{const temporary=`${file}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value,null,2),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,file);fs.chmodSync(file,0o600)};
+  const targetBound=()=>{const lock=privateJson(targetPath),expected=String(runtime.authorizedEventKey||'').toLowerCase();return lock?.browser_runtime_id===runtime.browserRuntimeId&&String(lock.event_key||'').toLowerCase()===expected&&lock.name===runtime.authorizedEventName};
   const sameRoute=(left,right)=>{try{const a=new URL(left),b=new URL(right);return a.origin===b.origin&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search}catch{return false}};
   async function eventIdentityEvidence(){
     const info=await ego.pageInfo(),url=new URL(info.url),expected=String(runtime.authorizedEventKey||'').toLowerCase();
     const visibleResult=await ego.evaluate(`(() => {const expected=${JSON.stringify(String(runtime.authorizedEventName||''))},key=${JSON.stringify(String(runtime.authorizedEventKey||'').toLowerCase())},keys=[],push=value=>{try{const u=new URL(value,location.href);for(const [name,item] of u.searchParams)if(['evtstub','eventid','event'].includes(name.toLowerCase())&&item)keys.push(item.toLowerCase());const match=u.pathname.match(/\\/events\\/([0-9a-f-]{20,})/i);if(match)keys.push(match[1].toLowerCase())}catch{}};for(const element of document.querySelectorAll('a[href],form[action]'))push(element.href||element.action);for(const input of document.querySelectorAll('input[type=hidden]'))if(/^(?:evtstub|eventid|event)$/i.test(input.name||input.id||''))keys.push(String(input.value||'').toLowerCase());const body=(document.body?.innerText||'').slice(0,100000),headings=[document.title,...document.querySelectorAll('h1,h2,[role=heading]')].map(value=>typeof value==='string'?value:value.innerText||value.textContent||'');return {ready:document.readyState,hasSelectedName:Boolean(expected)&&body.includes(expected),hasSelectedHeading:Boolean(expected)&&headings.some(value=>String(value).includes(expected)),hasLogin:/(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(body),keys:[...new Set(keys)].slice(0,200),hasExpectedKey:keys.includes(key)}})()`);
     const visible={keys:[],hasLogin:false,hasExpectedKey:false,...(visibleResult??{})};
-    const direct=eventKey(info.url)===expected,isInventory=/\/events2\/eventselection/i.test(url.pathname),protectedCurrent=protectedPath.test(url.pathname),conflictingKey=visible.keys.some(key=>key!==expected);
+    const currentKey=eventKey(info.url),direct=currentKey===expected,isInventory=/\/events2\/eventselection/i.test(url.pathname),protectedCurrent=protectedPath.test(url.pathname),conflictingKey=Boolean(currentKey&&currentKey!==expected);
     const context=privateJson(contextPath),transition=privateJson(transitionPath),now=Date.now();
     const contextBound=context?.schemaVersion===1&&context.browserRuntimeId===runtime.browserRuntimeId&&String(context.eventKey||'').toLowerCase()===expected&&now-Date.parse(context.provenAt||0)<=30*60*1000;
     const safeTransitionDestination=sameRoute(info.url,transition?.toUrl)||((url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))&&!protectedCurrent);
     const transitionBound=transition?.schemaVersion===1&&transition.browserRuntimeId===runtime.browserRuntimeId&&String(transition.eventKey||'').toLowerCase()===expected&&now-Date.parse(transition.createdAt||0)<=5*60*1000&&contextBound&&context.url===transition.fromUrl&&safeTransitionDestination;
     const persistedCurrent=contextBound&&context.url===info.url;
-    const proven=Boolean(expected)&&!isInventory&&!protectedCurrent&&!visible.hasLogin&&!conflictingKey&&(direct||visible.hasExpectedKey||persistedCurrent||transitionBound);
+    const proven=Boolean(expected)&&!isInventory&&!protectedCurrent&&!visible.hasLogin&&!conflictingKey&&(direct||persistedCurrent||transitionBound);
     return {proven,page:info,direct,isInventory,protectedCurrent,visible,conflictingKey,persistedCurrent,transitionBound};
   }
   async function rememberAuthorizedPage(evidence){
     if(!evidence?.proven)return;
     const temporary=`${contextPath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary,JSON.stringify({schemaVersion:1,browserRuntimeId:runtime.browserRuntimeId,eventKey:String(runtime.authorizedEventKey).toLowerCase(),eventName:runtime.authorizedEventName,url:evidence.page.url,title:evidence.page.title,provenAt:new Date().toISOString(),evidence:{direct:evidence.direct,hasExpectedKey:evidence.visible?.hasExpectedKey,hasSelectedName:evidence.visible?.hasSelectedName,hasSelectedHeading:evidence.visible?.hasSelectedHeading,persistedCurrent:evidence.persistedCurrent,transitionBound:evidence.transitionBound}}),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,contextPath);fs.chmodSync(contextPath,0o600);try{fs.unlinkSync(transitionPath)}catch(error){if(error?.code!=='ENOENT')throw error}
+    fs.writeFileSync(temporary,JSON.stringify({schemaVersion:1,browserRuntimeId:runtime.browserRuntimeId,eventKey:String(runtime.authorizedEventKey).toLowerCase(),eventName:runtime.authorizedEventName,url:evidence.page.url,title:evidence.page.title,provenAt:new Date().toISOString(),evidence:{direct:evidence.direct,hasExpectedKey:evidence.visible?.hasExpectedKey,hasSelectedName:evidence.visible?.hasSelectedName,hasSelectedHeading:evidence.visible?.hasSelectedHeading,persistedCurrent:evidence.persistedCurrent,transitionBound:evidence.transitionBound,bootstrap:evidence.bootstrap??null}}),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,contextPath);fs.chmodSync(contextPath,0o600);try{fs.unlinkSync(transitionPath)}catch(error){if(error?.code!=='ENOENT')throw error}
   }
   async function stageAuthorizedTransition(destination){
     const before=await eventIdentityEvidence();if(!before.proven)throw Error('Navigation blocked: source page does not prove the exact selected event');
@@ -82,6 +84,13 @@ try{
     url.searchParams.set('job_id',jobId);url.searchParams.set('event_id',eventId);
     const response=await fetch(url,{headers:{'X-CVENT-Lease-Token':token},signal:AbortSignal.timeout(5000)});
     if(response.status!==204)throw new Error('Write blocked: canonical event lease is no longer active');
+  }
+  async function assertAuthenticatedReadContext(){
+    const info=await ego.pageInfo(),url=new URL(info.url),host=url.hostname.toLowerCase();
+    if(url.protocol!=='https:'||!(host==='cvent.com'||host.endsWith('.cvent.com'))||url.username||url.password||url.port&&url.port!=='443')throw new Error('Read blocked: authenticated Cvent context is required');
+    const login=await ego.evaluate(`(() => {const text=(document.body?.innerText||'').slice(0,50000);return /(?:sign in|log in|enter your password|verify your identity|authenticator)/i.test(text)||/(?:login|signin|authenticate|sso)/i.test(location.href)})()`);
+    if(login===true)throw new Error('AUTH_REQUIRED: current Cvent authentication is unavailable');
+    return {page:info,state:'AUTHENTICATED_UNBOUND'};
   }
   async function assertAuthorizedPage(){
     const evidence=await eventIdentityEvidence(),url=new URL(evidence.page.url),host=url.hostname.toLowerCase();
@@ -115,6 +124,7 @@ try{
   }
   async function runAdaptive(step){
     const op=step.operation;let resolved;
+    if(step.intent!=='write')await assertAuthenticatedReadContext();
     if(step.target&&['readTarget','click','dblclick','activate','fill','type','focus','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'].includes(op)){resolved=await resolveTarget(step);step={...step,target:resolved.target};if(!['readTarget','focus'].includes(op))await authorizeInteractive(step,resolved.descriptor)}
     if(['visualClick','visualDoubleClick','visualDrag'].includes(op))await authorizeInteractive(step,await pointDescriptor(step.x,step.y));
     if(['typeText','press'].includes(op)&&!step.target&&step.intent==='write'){
@@ -148,7 +158,7 @@ try{
       case 'drag':await dispatch(step,()=>ego.drag([step.target,step.destination],{delay:75}));return {dragged:true};
       case 'visualDrag':await dispatch(step,()=>ego.drag([[step.x,step.y],[step.toX,step.toY]],{delay:75,label:step.label}));return {dragged:[[step.x,step.y],[step.toX,step.toY]]};
       case 'uploadDiscountImport':await dispatch(step,()=>ego.setInputFiles(step.target,step.filePath));return {uploadedArtifact:'discount-import.xlsx'};
-      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase();if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==expected||protectedPath.test(url.pathname))throw new Error('Navigation outside exact selected event blocked');await stageAuthorizedTransition(url.href);await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});await assertAuthorizedPage();return {navigated:url.href}}
+      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase(),bound=targetBound();if(url.protocol!=='https:'||!(url.hostname==='cvent.com'||url.hostname.endsWith('.cvent.com'))||key&&key!==expected||protectedPath.test(url.pathname))throw new Error('Navigation outside exact selected event blocked');if(bound)await stageAuthorizedTransition(url.href);else if(!/\/events2\/eventselection/i.test(url.pathname))throw new Error('Read bootstrap navigation is limited to authenticated Cvent event inventory');await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});if(bound)await assertAuthorizedPage();else await assertAuthenticatedReadContext();return {navigated:url.href}}
       case 'wait':if(step.target)await ego.waitForSelector(step.target,{timeout:step.ms??30000});else if(step.loadState)await ego.waitForLoadState(step.loadState,{timeout:step.ms??30000});else await ego.waitForTimeout(step.ms??1000);return {waitedMs:step.ms??1000};
       default:throw new Error(`Unsupported coherent Ego action: ${op}`);
     }
@@ -167,6 +177,7 @@ try{
     }
     return {rows:[...seen.values()],passes,pages:pageNumber,finalY:await ego.evaluate('scrollY'),scrollHeight:await ego.evaluate('document.documentElement.scrollHeight')};
   }
+  if(params.intent==='read'&&!['script','actions','openAuthorizedEvent','pageInfo','navigate','wait'].includes(operation))await assertAuthenticatedReadContext();
   let result;
   switch(operation){
     case '__preflightTarget': {const resolved=await resolveTarget({target:params.target,targetContext:params.context,targetIndex:params.index});result={resolved:resolved.descriptor,resolvedTarget:resolved.target,fallbackUsed:resolved.fallbackUsed};break;}
@@ -222,29 +233,32 @@ try{
       result={exactName,exactMatches,observedRows:inventory.rows,...inventory};break;
     }
     case 'openAuthorizedEvent': {
-      const exactName=String(params.eventName||'').trim(),expectedKey=String(params.eventKey||'').trim().toLowerCase();
+      const exactName=String(params.eventName||'').trim(),expectedKey=String(params.eventKey||'').trim().toLowerCase(),expectedCode=String(params.eventCode||'').trim().toLowerCase();
       if(!exactName||!expectedKey||expectedKey!==String(runtime.authorizedEventKey||'').toLowerCase()||exactName!==runtime.authorizedEventName)throw new Error('Server-selected exact event identity is required');
-      const before=await ego.pageInfo(),beforeUrl=new URL(before.url);
-      if(beforeUrl.protocol!=='https:'||!(beforeUrl.hostname==='cvent.com'||beforeUrl.hostname.endsWith('.cvent.com')))throw new Error('AUTH_REQUIRED: current page is not authenticated Cvent');
+      const authenticated=await assertAuthenticatedReadContext(),before=authenticated.page,beforeUrl=new URL(before.url);
       const currentEvidence=await eventIdentityEvidence();
       if(currentEvidence.proven&&!params.refreshInventory){
         await rememberAuthorizedPage(currentEvidence);
-        result={openedEventKey:expectedKey,activation:'already-inside-exact-event',inventoryUrl:null,navigationTarget:{name:exactName,eventKey:expectedKey,code:params.eventCode||'',status:'',href:before.url},landing:{ready:currentEvidence.visible.ready,title:before.title},identityEvidence:currentEvidence};break;
+        result={openedEventKey:expectedKey,activation:'already-inside-exact-event',inventoryUrl:null,navigationTarget:{name:exactName,eventKey:expectedKey,code:params.eventCode||'',status:'',href:before.url},landing:{ready:currentEvidence.visible.ready,title:before.title},identityEvidence:currentEvidence,targetState:'AUTHORIZED_EVENT_BOUND'};break;
       }
-      if(currentEvidence.visible.hasLogin)throw new Error('AUTH_REQUIRED: current Cvent authentication is unavailable');
       const inventoryUrl='https://app.cvent.com/Subscribers/Events2/EventSelection';
       if(!/\/events2\/eventselection/i.test(beforeUrl.pathname))await ego.goto(inventoryUrl,{waitUntil:'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??60),180)*1000)});
+      await assertAuthenticatedReadContext();
       const inventoryPage=await ego.pageInfo(),inventoryParsed=new URL(inventoryPage.url);
       if(inventoryParsed.protocol!=='https:'||!inventoryParsed.hostname.endsWith('cvent.com')||!/\/events2\/eventselection/i.test(inventoryParsed.pathname))throw new Error('AUTH_REQUIRED: authenticated Cvent event inventory is unavailable');
       const inventory=await collectEventRows(params.maxScrolls??60);
-      const authorized=inventory.rows.filter(item=>item.name===exactName&&item.eventKey===expectedKey&&item.inventoryColumnsTrusted&&item.connected&&item.visible);
-      if(authorized.length===0)throw new Error('EVENT_NOT_FOUND: exact selected event is absent from authenticated Cvent inventory');
+      const authorized=inventory.rows.filter(item=>item.name===exactName&&item.eventKey===expectedKey&&item.inventoryColumnsTrusted&&(!expectedCode||String(item.code||'').trim().toLowerCase()===expectedCode)&&item.connected&&item.visible);
+      if(authorized.length===0)throw new Error('EVENT_NOT_FOUND: exact selected event key/code/name is absent from authenticated Cvent inventory');
       if(authorized.length>1)throw new Error('EVENT_AMBIGUOUS: multiple authenticated inventory rows match the selected event');
-      const chosen=authorized[0],timeout=Math.max(1000,Math.min(Number(params.timeoutSeconds??60),180)*1000);
+      const chosen=authorized[0],observedAt=new Date().toISOString(),timeout=Math.max(1000,Math.min(Number(params.timeoutSeconds??60),180)*1000);
+      writePrivateJson(path.join(path.dirname(runtimePath),'selected-event-inventory.json'),{name:chosen.name,event_key:chosen.eventKey,event_id:runtime.authorizedEventId,code:chosen.code,status:chosen.status,href:chosen.href,browser_runtime_id:runtime.browserRuntimeId,observed_at:observedAt,proof:'exact-authenticated-inventory-row'});
       await ego.goto(chosen.href,{waitUntil:'domcontentloaded',timeout});await ego.waitForTimeout(1000);
-      const identityEvidence=await assertAuthorizedPage();
+      const opened=await eventIdentityEvidence(),openedUrl=new URL(opened.page.url),safeLanding=openedUrl.protocol==='https:'&&(openedUrl.hostname==='cvent.com'||openedUrl.hostname.endsWith('.cvent.com'))&&!opened.isInventory&&!opened.protectedCurrent&&!opened.visible.hasLogin&&!opened.conflictingKey;
+      if(!safeLanding)throw new Error('EVENT_IDENTITY_UNVERIFIED: exact inventory candidate did not open a safe Cvent event page');
+      const identityEvidence={...opened,proven:true,bootstrap:{source:'exact-authenticated-inventory-row',name:chosen.name,eventKey:chosen.eventKey,code:chosen.code,href:chosen.href,finalUrl:opened.page.url,browserRuntimeId:runtime.browserRuntimeId}};
+      await rememberAuthorizedPage(identityEvidence);
       const landing=await ego.evaluate(`(() => ({ready:document.readyState,title:document.title,headings:[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(element=>String(element.innerText||element.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).slice(0,20)}))()`);
-      result={openedEventKey:expectedKey,activation:'exact-authenticated-inventory',inventoryUrl:inventoryPage.url,navigationTarget:chosen,authenticatedInventory:inventory.rows.map(({name,code,status,href,eventKey})=>({name,code,status,href,eventKey})),inventoryPasses:inventory.passes,landing,identityEvidence};break;
+      result={openedEventKey:expectedKey,activation:'exact-authenticated-inventory',inventoryUrl:inventoryPage.url,navigationTarget:chosen,authenticatedInventory:inventory.rows.map(({name,code,status,href,eventKey})=>({name,code,status,href,eventKey})),inventoryPasses:inventory.passes,inventoryRefreshed:true,inventoryCount:inventory.rows.length,landing,identityEvidence,targetState:'AUTHORIZED_EVENT_BOUND'};break;
     }
     case 'script': {
       // The same Ego executor and target/lease checks, now with coherent native
@@ -263,7 +277,8 @@ try{
         const source=options.rrSource??lastRRSource??(params.rrSources.length===1?params.rrSources[0]:undefined);
         if(intent==='read'&&(['fill','typeText','selectOption','setChecked','visualDrag','drag'].includes(op)||op==='press'&&!['Escape','Tab','PageUp','PageDown'].includes(args.key)))throw Error('Read-only Ego action cannot edit/commit controls');
         if(op==='navigate'&&dirty)throw Error('Save and verify current changes before navigation');
-        await assertLease();await assertAuthorizedPage();
+        if(intent==='write'){await assertLease();await assertAuthorizedPage();}
+        else await assertAuthenticatedReadContext();
         if((await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || window.name"))!==runtime.browserRuntimeId)throw Error('Runtime identity lost during Ego round');
         let isSave=false;
         if(['click','dblclick','visualClick'].includes(op)){

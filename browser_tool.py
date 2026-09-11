@@ -88,8 +88,8 @@ def guard(runtime,operation,params):
         if params.get('intent')=='write' or operation not in readonly:
             raise RuntimeError('Read-only reconciliation cannot dispatch configuration writes')
     current=local_probe(runtime);lock=target_lock()
-    locked=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
-    valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and lock.get('event_key')==locked and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId']) and lock.get('browser_runtime_id')==runtime.get('browserRuntimeId')
+    locked=str(lock.get('event_key') or '').lower();lock_url_key=event_key(lock.get('url',''));current_key=event_key(current.get('url',''))
+    valid_lock=lock.get('name')==runtime['authorizedEventName'] and bool(locked) and locked==str(runtime.get('authorizedEventKey','')).lower() and (not lock_url_key or lock_url_key==locked) and (not runtime.get('authorizedEventId') or lock.get('event_id')==runtime['authorizedEventId']) and lock.get('browser_runtime_id')==runtime.get('browserRuntimeId')
     intent=params.get('intent')
     if operation=='openAuthorizedEvent':
         assert_event_lease(runtime)
@@ -288,6 +288,29 @@ def establish_target_lock(runtime_path,runtime):
     return lock
 
 
+def bind_opened_event(runtime_path,runtime,result):
+    selected=result.get('navigationTarget') or {};selected_key=str(selected.get('eventKey') or event_key(str(selected.get('href') or '')) or '').lower()
+    expected=str(runtime.get('authorizedEventKey','')).lower()
+    expected_code=str(runtime.get('authorizedEventCode') or os.environ.get('CVENT_AUTHORIZED_EVENT_CODE') or '').strip().lower()
+    selected_code=str(selected.get('code') or '').strip().lower()
+    if selected.get('name')!=runtime.get('authorizedEventName') or selected_key!=expected or (expected_code and selected_code!=expected_code):
+        raise RuntimeError('Opened event evidence omitted the exact server-selected canonical key/code/name')
+    observed_at=datetime.now(timezone.utc).isoformat()
+    atomic_private_json(CURRENT/'selected-event-inventory.json',{'name':selected['name'],'event_key':selected_key,
+        'event_id':runtime.get('authorizedEventId'),'code':selected.get('code'),'status':selected.get('status',''),
+        'href':selected.get('href'),'browser_runtime_id':runtime['browserRuntimeId'],'observed_at':observed_at})
+    authenticated=result.get('authenticatedInventory')
+    if isinstance(authenticated,list):
+        payload={'schemaVersion':1,'workspaceId':os.environ.get('CVENT_WORKSPACE_ID',''),'source':'authenticated-cvent-inventory',
+                 'browserRuntimeId':runtime['browserRuntimeId'],'capturedAt':observed_at,'events':authenticated}
+        atomic_private_json(CURRENT/'authenticated-event-inventory.json',payload)
+        workspace=Path(os.environ.get('CVENT_DATA_ROOT',ROOT/'data'))/'workspaces'/os.environ.get('CVENT_WORKSPACE_ID','')
+        workspace.mkdir(parents=True,exist_ok=True);atomic_private_json(workspace/'event-inventory.json',payload)
+    lock=establish_target_lock(runtime_path,runtime)
+    result['authorizedTarget']=lock
+    return lock
+
+
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
     if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
@@ -296,10 +319,28 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         if operation=='authStatus':
             return {'tool':'ego','router':'ego',**authenticated_profile_status(runtime)}
         if operation=='authorizeTarget':
-            if params.get('eventName')!=runtime['authorizedEventName']:
-                raise RuntimeError('Selected event name does not match BrowserRuntime')
-            lock=establish_target_lock(runtime_path,runtime)
-            return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
+            if params.get('eventName')!=runtime['authorizedEventName'] or str(params.get('eventKey','')).lower()!=str(runtime.get('authorizedEventKey','')).lower():
+                raise RuntimeError('Selected event identity does not match BrowserRuntime')
+            try:
+                lock=establish_target_lock(runtime_path,runtime)
+                return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'targetState':'AUTHORIZED_EVENT_BOUND','rebound':False,'router':'ego'}
+            except RuntimeError:
+                # Missing or old-runtime evidence is a bootstrap condition, not
+                # a terminal error. Recollect it through the current runtime.
+                assert_event_lease(runtime)
+                open_params={'eventName':runtime['authorizedEventName'],'eventKey':runtime['authorizedEventKey'],
+                             'eventCode':params.get('eventCode') or os.environ.get('CVENT_AUTHORIZED_EVENT_CODE',''),
+                             'maxScrolls':params.get('maxScrolls',60),'intent':'read','timeoutSeconds':params.get('timeoutSeconds',90),
+                             'refreshInventory':True}
+                proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation','openAuthorizedEvent','--params',json.dumps(open_params)],cwd=ROOT,text=True,capture_output=True,timeout=open_params['timeoutSeconds'],pass_fds=child_lock_fds())
+                result=child_result(proc)
+                if proc.returncode or not result.get('ok'):
+                    raise RuntimeError(result.get('error','current-runtime event bootstrap failed'))
+                lock=bind_opened_event(runtime_path,runtime,result)
+                return {'ok':True,'tool':'ego','operation':'authorizeTarget','authorizedTarget':lock,'targetState':'AUTHORIZED_EVENT_BOUND',
+                        'rebound':True,'inventoryRefreshed':bool(result.get('inventoryRefreshed')),
+                        'inventoryCount':result.get('inventoryCount',len(result.get('authenticatedInventory') or [])),
+                        'navigationTarget':result.get('navigationTarget'),'page':result.get('page'),'router':'ego'}
         is_write=params.get('intent')=='write'
         action_writes=0
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
@@ -329,20 +370,7 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             raise RuntimeError('Browser read helper timed out; no mutation was dispatched') from error
     result=child_result(proc);result['router']=tool
     if operation=='openAuthorizedEvent' and not proc.returncode and result.get('ok'):
-        selected=result.get('navigationTarget') or {};selected_key=str(selected.get('eventKey') or event_key(str(selected.get('href') or '')) or '').lower()
-        if selected.get('name')!=runtime.get('authorizedEventName') or selected_key!=str(runtime.get('authorizedEventKey','')).lower():
-            raise RuntimeError('Opened event evidence omitted the exact server-selected canonical identity')
-        observed_at=datetime.now(timezone.utc).isoformat()
-        atomic_private_json(CURRENT/'selected-event-inventory.json',{'name':selected['name'],'event_key':selected_key,
-            'event_id':runtime.get('authorizedEventId'),'code':selected.get('code'),'status':selected.get('status',''),
-            'href':selected.get('href'),'browser_runtime_id':runtime['browserRuntimeId'],'observed_at':observed_at})
-        authenticated=result.get('authenticatedInventory')
-        if isinstance(authenticated,list):
-            payload={'schemaVersion':1,'workspaceId':os.environ.get('CVENT_WORKSPACE_ID',''),'source':'authenticated-cvent-inventory','capturedAt':observed_at,'events':authenticated}
-            atomic_private_json(CURRENT/'authenticated-event-inventory.json',payload)
-            workspace=Path(os.environ.get('CVENT_DATA_ROOT',ROOT/'data'))/'workspaces'/os.environ.get('CVENT_WORKSPACE_ID','')
-            workspace.mkdir(parents=True,exist_ok=True);atomic_private_json(workspace/'event-inventory.json',payload)
-        result['authorizedTarget']=establish_target_lock(runtime_path,runtime)
+        bind_opened_event(runtime_path,runtime,result)
     if params.get('intent')=='write':
         if proc.returncode or not result.get('ok'):
             # Only a structured coherent-round zero-dispatch result proves a

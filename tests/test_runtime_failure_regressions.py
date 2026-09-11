@@ -32,7 +32,7 @@ class AdapterFailureTests(unittest.TestCase):
 export async function listTabs(){if(process.env.CASE==='startup')throw Error('real startup error');return [{id:'target'}]}
 export async function switchTab(){}
 let markers=0;
-export async function evaluate(expression){if(expression?.includes('document.activeElement'))return {tag:'INPUT',label:'Date',connected:true,disabled:false};if(++markers>1&&process.env.CASE==='postflight')throw Error('real postflight error');return 'cvent-runtime-test'}
+export async function evaluate(expression){if(expression?.includes('document.activeElement'))return {tag:'INPUT',label:'Date',connected:true,disabled:false};if(expression?.includes('sign in|log in'))return false;if(expression?.includes('__CVENT_BROWSER_RUNTIME_ID')){if(++markers>1&&process.env.CASE==='postflight')throw Error('real postflight error');return 'cvent-runtime-test'}return false}
 export async function press(){return true}
 export async function pageInfo(){return {url:'https://app.cvent.com/view?evtstub=test-event',title:'Test'}}
 export async function waitForTimeout(){}
@@ -72,6 +72,46 @@ export async function fill(target,text){if(process.env.CASE==='writes'){if(text=
                               env={**{k: v for k, v in os.environ.items() if not k.startswith('CVENT_')},
                                    'CASE': case, 'CVENT_ENV': 'development'}, capture_output=True, text=True, timeout=10)
         return proc, browser_tool.child_result(proc)
+
+    def test_read_only_native_snapshot_is_allowed_before_target_binding(self):
+        self.assertFalse((self.folder / 'authorized-target.json').exists())
+        proc, result = self.run_native("cliLog(await page.url()); cliLog(await page.snapshot());", mode='read_only', case='success')
+        self.assertEqual(proc.returncode, 0, result)
+        self.assertEqual(result['writesAttempted'], 0)
+        self.assertEqual(result['actionCount'], 2)
+
+    def test_open_authorized_event_bootstraps_from_authenticated_home(self):
+        helper = self.folder / 'vendor/ego-browser-linux/dist/src/helpers.js'
+        helper.write_text(r'''
+let url='https://app.cvent.com/subscribers/default.aspx';
+export async function listTabs(){return [{id:'target'}]}
+export async function switchTab(){}
+export async function pageInfo(){return {url,title:url.includes('EventSelection')?'Events':'Selected event'}}
+export async function waitForTimeout(){}
+export async function goto(next){url=next;return true}
+export async function evaluate(expression){
+  if(expression.includes('__CVENT_BROWSER_RUNTIME_ID'))return 'cvent-runtime-test';
+  if(expression.includes('sign in|log in'))return false;
+  if(expression.includes('hasSelectedName'))return {ready:'complete',hasSelectedName:url.includes('evtstub=test-event'),hasSelectedHeading:false,hasLogin:false,keys:[],hasExpectedKey:url.includes('evtstub=test-event')};
+  if(expression.includes('const clean=v=>')&&expression.includes('rows=[]'))return {y:0,height:100,scrollHeight:100,rows:[{name:'Selected Event',code:'CODE',status:'Upcoming',inventoryColumnsTrusted:true,href:'https://app.cvent.com/event?evtstub=test-event',connected:true,visible:true,pointerEvents:'auto',linkContainsCover:true}]};
+  if(expression.includes('next page'))return false;
+  if(expression.includes('headings:['))return {ready:'complete',title:'Selected event',headings:['Selected Event']};
+  return false;
+}
+''')
+        self.runtime.update({'authorizedEventName':'Selected Event','authorizedEventId':'test-id'})
+        (self.folder / 'browser-runtime.json').write_text(json.dumps(self.runtime))
+        params={'eventName':'Selected Event','eventKey':'test-event','eventCode':'CODE','intent':'read','timeoutSeconds':10}
+        proc=subprocess.run(['node','ego_direct.mjs','--runtime',str(self.folder/'browser-runtime.json'),'--operation','openAuthorizedEvent','--params',json.dumps(params)],
+                            cwd=self.folder,env={**os.environ,'CVENT_ENV':'development'},capture_output=True,text=True,timeout=10)
+        result=browser_tool.child_result(proc)
+        self.assertEqual(proc.returncode,0,result)
+        self.assertTrue(result['inventoryRefreshed'])
+        self.assertEqual(result['navigationTarget']['eventKey'],'test-event')
+        self.assertEqual(json.loads((self.folder/'selected-event-inventory.json').read_text())['browser_runtime_id'],'cvent-runtime-test')
+        context=json.loads((self.folder/'authorized-event-context.json').read_text())
+        self.assertEqual(context['browserRuntimeId'],'cvent-runtime-test')
+        self.assertEqual(context['evidence']['bootstrap']['eventKey'],'test-event')
 
     def test_native_multi_action_save_readback_with_ambiguous_independent_item(self):
         proc, result = self.run_native("""

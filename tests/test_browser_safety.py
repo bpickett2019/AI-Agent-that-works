@@ -136,6 +136,51 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         browser_tool.CURRENT,browser_tool.local_probe=self.old;self.tmp.cleanup()
     def write_lock(self, status='Draft'):
         (self.base/'authorized-target.json').write_text(json.dumps({'name':'(C+D) Medtrade Testing Clone 2','url':'https://app.cvent.com/event?evtstub=locked','event_key':'locked','event_status':status,'browser_runtime_id':'runtime-current'}))
+    def test_authenticated_unbound_reads_allowed_but_writes_blocked(self):
+        browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/Subscribers/Events2/EventSelection','title':'Events'}
+        browser_tool.guard(self.runtime,'snapshotText',{'intent':'read'})
+        browser_tool.guard(self.runtime,'pageInfo',{'intent':'read'})
+        with self.assertRaisesRegex(RuntimeError,'Write blocked'):
+            browser_tool.guard(self.runtime,'click',{'intent':'write'})
+
+    def test_authorize_target_rebinds_missing_or_old_runtime_evidence(self):
+        self.runtime.update({'authorizedEventId':'locked-id'})
+        landing={'url':'https://app.cvent.com/event?evtstub=locked','title':'Selected event'}
+        child={'ok':True,'navigationTarget':{'name':self.runtime['authorizedEventName'],'eventKey':'locked','code':'CODE','status':'Upcoming','href':landing['url']},
+               'authenticatedInventory':[{'name':self.runtime['authorizedEventName'],'eventKey':'locked','code':'CODE','status':'Upcoming','href':landing['url']}],
+               'inventoryRefreshed':True,'inventoryCount':1,'page':landing}
+        proc=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT='+json.dumps(child)+'\n','')
+        for old_runtime in (None,'runtime-old'):
+            with self.subTest(old_runtime=old_runtime):
+                for name in ('authorized-target.json','selected-event-inventory.json','authorized-event-context.json'):
+                    (self.base/name).unlink(missing_ok=True)
+                if old_runtime:
+                    (self.base/'selected-event-inventory.json').write_text(json.dumps({'name':self.runtime['authorizedEventName'],'event_key':'locked','browser_runtime_id':old_runtime}))
+                with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
+                     patch.object(browser_tool,'guard',return_value={'url':'https://app.cvent.com/home'}), \
+                     patch.object(browser_tool,'assert_event_lease'), \
+                     patch.object(browser_tool,'local_probe',return_value=landing), \
+                     patch.object(browser_tool.subprocess,'run',return_value=proc):
+                    result=browser_tool.run_direct(self.base/'browser-runtime.json',self.runtime,'ego','authorizeTarget',
+                        {'eventName':self.runtime['authorizedEventName'],'eventKey':'locked','eventCode':'CODE','intent':'read'})
+                self.assertTrue(result['rebound'])
+                self.assertEqual(result['targetState'],'AUTHORIZED_EVENT_BOUND')
+                self.assertEqual(json.loads((self.base/'authorized-target.json').read_text())['browser_runtime_id'],'runtime-current')
+                self.assertEqual(json.loads((self.base/'selected-event-inventory.json').read_text())['browser_runtime_id'],'runtime-current')
+
+    def test_authorize_target_is_idempotent_when_current_runtime_is_bound(self):
+        self.runtime.update({'authorizedEventId':'locked-id'})
+        landing={'url':'https://app.cvent.com/event?evtstub=locked','title':'Selected event'}
+        (self.base/'selected-event-inventory.json').write_text(json.dumps({'name':self.runtime['authorizedEventName'],'event_key':'locked','event_id':'locked-id','browser_runtime_id':'runtime-current'}))
+        with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
+             patch.object(browser_tool,'guard',return_value=landing), \
+             patch.object(browser_tool,'local_probe',return_value=landing), \
+             patch.object(browser_tool.subprocess,'run') as child:
+            result=browser_tool.run_direct(self.base/'browser-runtime.json',self.runtime,'ego','authorizeTarget',
+                {'eventName':self.runtime['authorizedEventName'],'eventKey':'locked','intent':'read'})
+        self.assertFalse(result['rebound'])
+        child.assert_not_called()
+
     def test_write_requires_lock_matching_live_page(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtStub=locked'}
         self.assertEqual(browser_tool.event_key('https://app.cvent.com/event?evtStub=locked'),'locked')
@@ -149,6 +194,15 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=other'}
         with self.assertRaisesRegex(RuntimeError,'Write blocked'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
+
+    def test_mutation_after_current_runtime_keyless_binding_is_allowed(self):
+        current={'url':'https://planner.app.cvent.com/event/configuration'}
+        browser_tool.local_probe=lambda runtime:current
+        (self.base/'authorized-target.json').write_text(json.dumps({'name':self.runtime['authorizedEventName'],'url':current['url'],
+            'event_key':'locked','event_status':'Upcoming','browser_runtime_id':'runtime-current'}))
+        (self.base/'authorized-event-context.json').write_text(json.dumps({'schemaVersion':1,'browserRuntimeId':'runtime-current',
+            'eventKey':'locked','url':current['url'],'provenAt':'2999-01-01T00:00:00+00:00'}))
+        browser_tool.guard(self.runtime,'click',{'intent':'write'})
 
     def test_lifecycle_labels_never_create_a_blanket_write_block(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
@@ -336,7 +390,13 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('selected_event_inventory',block)
         extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
         self.assertIn('refreshInventory: true',extension)
-        self.assertIn("result['authorizedTarget']=establish_target_lock",ROUTER)
+        self.assertIn('bind_opened_event(runtime_path,runtime,result)',ROUTER)
+
+    def test_authentication_target_bootstrap_telemetry_is_explicit(self):
+        extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
+        for marker in ('AUTH_STATE=authenticated TARGET_STATE=', 'BROWSER_RUNTIME=', 'EVENT_INVENTORY_REFRESHED runtime=',
+                       'TARGET_MATCH key=', 'TARGET_BOUND runtime=', 'AUTHORIZED_EVENT_OPENED'):
+            self.assertIn(marker,extension)
 
     def test_stale_refs_adapter_fallback_and_progress_stall_are_controller_recoverable(self):
         extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()

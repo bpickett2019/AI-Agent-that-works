@@ -315,6 +315,13 @@ async function assessedDomains(): Promise<string[]> {
     firstIncompleteDomain({ mission: [{ domain }] }, results, verification, state) === null);
 }
 
+async function browserAuthorizationState(): Promise<{ runtimeId: string; targetState: "bound" | "unbound" }> {
+  const runtime = await readJson(runtimePath, {}), lock = await readJson(join(jobDir, "authorized-target.json"), {});
+  const bound = Boolean(runtime.browserRuntimeId && lock.browser_runtime_id === runtime.browserRuntimeId &&
+    String(lock.event_key ?? "").toLowerCase() === String(runtime.authorizedEventKey ?? "").toLowerCase());
+  return { runtimeId: String(runtime.browserRuntimeId ?? "unknown"), targetState: bound ? "bound" : "unbound" };
+}
+
 async function domainTelemetry(domain: string): Promise<{ browserOperations: number; writes: number; saves: number; readbacks: number }> {
   const events = await readJsonLines(PERFORMANCE_EVENTS);
   const operations = events.filter(event => event.kind === "browser_operation" && event.section === domain);
@@ -453,6 +460,13 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
     egoExecutionRound: coherent, actionCount, writes: Number(result.writesAttempted ?? result.mutationCount ?? 0), saves: Number(result.saves ?? 0),
     readbacks: Number(result.readbacks ?? 0), status: result.status ?? null, pageUrl: result.page?.url ?? null,
     responseBytes: Buffer.byteLength(JSON.stringify(result)) });
+  if (["openAuthorizedEvent", "authorizeTarget"].includes(operation) && result.authorizedTarget) {
+    const runtimeId = cleanText(result.browserRuntimeId ?? result.authorizedTarget.browser_runtime_id, 200);
+    if (result.inventoryRefreshed || result.rebound) await appendActivity(`EVENT_INVENTORY_REFRESHED runtime=${runtimeId} events=${Number(result.inventoryCount ?? result.authenticatedInventory?.length ?? 0)}`);
+    await appendActivity(`TARGET_MATCH key=${cleanText(result.authorizedTarget.event_key, 200)} code=${cleanText(result.navigationTarget?.code ?? process.env.CVENT_AUTHORIZED_EVENT_CODE, 200)}`);
+    await appendActivity(`TARGET_BOUND runtime=${runtimeId}`);
+    await appendActivity("AUTHORIZED_EVENT_OPENED");
+  }
   return result;
 }
 
@@ -1381,6 +1395,8 @@ export default function cventJobTools(pi: any) {
         );
         if (auth.authenticated === true && auth.workerSlot === Number(requiredEnvironment("CVENT_WORKER_SLOT"))) {
           await appendActivity("Cvent login already active; verified this worker's isolated persisted profile");
+          const authorization = await browserAuthorizationState();
+          await appendActivity(`AUTH_STATE=authenticated TARGET_STATE=${authorization.targetState} BROWSER_RUNTIME=${authorization.runtimeId}`);
           return toolText({ ok: true, loginRequired: false, persistedProfileReused: true,
             instruction: "Cvent login already active in this worker's isolated profile; fresh-read a complete snapshot and continue." });
         }
@@ -1423,6 +1439,8 @@ export default function cventJobTools(pi: any) {
             resumed.updated_at = new Date().toISOString();
             await atomicJson(statePath, resumed);
             await appendActivity(`User returned browser control; authenticated slot profile verified; resume domain ${next ?? "unresolved"}`);
+            const authorization = await browserAuthorizationState();
+            await appendActivity(`AUTH_STATE=authenticated TARGET_STATE=${authorization.targetState} BROWSER_RUNTIME=${authorization.runtimeId}`);
             await safeMetric("human_handoff", humanHandoffStarted, { boundary: "cvent_sso_mfa", completed: true });
             return toolText({ ok: true, resumed: true, profilePersisted: true, resumeDomain: next,
               instruction: `Forge verified this slot's Cvent login. Reopen the exact selected event, take a fresh snapshot, and resume ${next ?? "the first incomplete domain"}.` });
