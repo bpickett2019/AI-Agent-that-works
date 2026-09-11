@@ -5,6 +5,8 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget, firstIncompleteDomain, staleRefWithoutWrite, adapterNeedsNativeFallback, DomainProgressGuard } from "./prewrite-orchestration.mjs";
 
+import { isDataAction, validateAtomicSteps, planNativeRound } from "../ego_round_validation.mjs";
+
 const rrCache = new ValidatedRRCache();
 const recoveryBudget = new BrowserRecoveryBudget();
 let preparedRR: any = null;
@@ -334,7 +336,7 @@ async function domainTelemetry(domain: string): Promise<{ browserOperations: num
 
 function strategyOperation(operation: string, objective = ""): boolean {
   return ["snapshotText", "screenshot", "sectionState", "navigate", "openAuthorizedEvent", "recover"].includes(operation) ||
-    /fresh snapshot|new locator|direct navigation|visual|hold|independent item|strategy/i.test(objective);
+    /fresh snapshot|\.snapshot\(|\.screenshot\(|snapshotText\(|new locator|direct navigation|\.goto\(|visual|hold|independent item|strategy/i.test(objective);
 }
 
 async function assertDomainStrategy(domain: string, operation: string, objective = ""): Promise<void> {
@@ -342,9 +344,12 @@ async function assertDomainStrategy(domain: string, operation: string, objective
   const required = domainProgress.requireStrategy(domain) || persisted.domains?.[domain]?.strategyRequired === true;
   if (!required) return;
   if (!strategyOperation(operation, objective)) throw new Error(`DOMAIN_PROGRESS_STALLED: ${domain} has 3 consecutive zero-progress rounds. Change strategy with a fresh semantic snapshot, new locator/direct route, visual Ego, an item hold, or another independent item.`);
+  const strategy = cleanText(`${operation}: ${objective}`, 500);
+  if (persisted.domains?.[domain]?.strategy === strategy)
+    throw new Error(`DOMAIN_PROGRESS_STALLED: ${domain} already tried this strategy without progress. Choose a different locator, legitimate route, visual inspection, or hold one item and continue.`);
   domainProgress.strategyChanged(domain);
   persisted.domains ??= {}; persisted.domains[domain] = { ...(persisted.domains[domain] ?? {}), consecutiveZeroProgressRounds: 0,
-    strategyRequired: false, strategyChangedAt: new Date().toISOString(), strategy: cleanText(`${operation}: ${objective}`, 500) };
+    strategyRequired: false, strategyChangedAt: new Date().toISOString(), strategy };
   persisted.updatedAt = new Date().toISOString(); await atomicJson(DOMAIN_PROGRESS, persisted);
   await appendActivity(`DOMAIN_PROGRESS_STRATEGY_CHANGED ${domain}: ${cleanText(`${operation} ${objective}`, 500)}`);
 }
@@ -357,10 +362,17 @@ async function recordDomainRoundProgress(domain: string, result: any, objective 
   const newRelevantPage = Boolean(pageUrl && !domainSeenPages.has(pageIdentity));
   if (pageUrl) { domainPageUrls.set(domain, pageUrl); domainSeenPages.add(pageIdentity); }
   const writes = Number(result?.writesAttempted ?? result?.mutationCount ?? 0), saves = Number(result?.saves ?? 0), readbacks = Number(result?.readbacks ?? 0);
-  const meaningful = writes > 0 || saves > 0 || readbacks > 0 || newRelevantPage || (pageChanged && newRelevantPage) || ["CONFIGURED", "ALREADY_CORRECT"].includes(String(result?.status));
+  const observations = JSON.stringify(result?.logs ?? result?.snapshot ?? "");
+  const controls = [...observations.matchAll(/(?:textbox|combobox|checkbox|radio|button) \\"([^\\"]+)\\"/g)].map(match => match[1]);
+  let newControl = false;
+  for (const control of controls) {
+    const key = `${domain}\u0000control:${control}`;
+    if (!domainSeenPages.has(key)) { domainSeenPages.add(key); newControl = true; }
+  }
+  const meaningful = writes > 0 || saves > 0 || readbacks > 0 || newControl || newRelevantPage || (pageChanged && newRelevantPage) || ["CONFIGURED", "ALREADY_CORRECT"].includes(String(result?.status));
   const progress = domainProgress.observe(domain, meaningful);
   const persisted = await readJson(DOMAIN_PROGRESS, { schemaVersion: 1, domains: {} }); persisted.domains ??= {};
-  persisted.domains[domain] = { consecutiveZeroProgressRounds: progress.consecutive, maximumConsecutiveZeroProgressRounds: progress.maximum,
+  persisted.domains[domain] = { ...(persisted.domains[domain] ?? {}), consecutiveZeroProgressRounds: progress.consecutive, maximumConsecutiveZeroProgressRounds: progress.maximum,
     strategyRequired: progress.strategyRequired, meaningful: progress.meaningful, lastObjective: cleanText(objective, 500), updatedAt: new Date().toISOString() };
   persisted.updatedAt = new Date().toISOString(); await atomicJson(DOMAIN_PROGRESS, persisted);
   if (progress.stalled) {
@@ -699,7 +711,7 @@ function validateGeneralBrowserAction(operation: string, params: any): void {
       if (!Number.isFinite(coordinate) || coordinate < 0 || coordinate > 10000) throw new Error("Capability denied: visual action coordinates are invalid");
     }
   }
-  if (params.intent === "write" && !cleanText(params.rrSource, 500)) throw new Error("Dynamic Cvent writes require verified RR source evidence");
+  if (params.intent === "write" && isDataAction(operation, params) && !cleanText(params.rrSource, 500)) throw new Error("Dynamic Cvent data writes require verified RR source evidence");
 }
 
 function validateActionRound(commitMode: string, steps: any[]): void {
@@ -725,6 +737,7 @@ function validateActionRound(commitMode: string, steps: any[]): void {
     }
   }
   if (unverifiedWrite) throw new Error("Every saved/autosaved configuration group needs meaningful readback in the same Ego action round");
+  if (steps.some(step => step.intent === "write")) validateAtomicSteps(steps.map(step => ({ ...step, data: isDataAction(step.operation, step) })), commitMode);
 }
 
 
@@ -1051,6 +1064,13 @@ export default function cventJobTools(pi: any) {
         if (write) {
           await assertSourcesVerified(meta.domain, meta.rrSources ?? []);
           await assertNoHeldReplay(meta.domain, { sources: meta.rrSources, script: match[2] });
+          const validation = await readJson(join(jobDir, "rr-validation.json"), { items: [] });
+          try {
+            planNativeRound(match[2], { ...meta, intent: "write" }, validation.items.filter((item: any) => item.domain === meta.domain));
+          } catch (error) {
+            await recordDomainRoundProgress(meta.domain, { writesAttempted: 0 }, "Atomic planning rejected before browser invocation");
+            throw error;
+          }
         }
         await appendActivity(`${write ? "Configuring" : "Inspecting"} ${meta.domain} with native Ego`);
         let result: any;
@@ -1058,7 +1078,10 @@ export default function cventJobTools(pi: any) {
           result = await invokeBrowser("script", { intent: write ? "write" : "read", domain: meta.domain,
             commitMode: meta.commitMode, rrSources: meta.rrSources ?? [], script: match[2] }, signal, params.timeout ?? 180);
         } catch (error: any) {
-          if (!staleRefWithoutWrite(error?.message)) throw error;
+          if (!staleRefWithoutWrite(error?.message)) {
+            await recordDomainRoundProgress(meta.domain, { writesAttempted: 0 }, "Round rejected; repair atomic plan or change inspection strategy");
+            throw error;
+          }
           const fresh = await saveLargeSnapshot(await invokeBrowser("snapshotText", { intent: "read", domain: meta.domain }, signal, 90));
           await appendActivity(`STALE_REF_RECOVERED ${meta.domain}: discarded ephemeral Ego ref after zero dispatched writes and captured a fresh snapshot`);
           result = { ok: true, status: "STALE_REF_RECOVERED", writesAttempted: 0, saves: 0, readbacks: 0, freshSnapshot: fresh,
@@ -1551,6 +1574,7 @@ export default function cventJobTools(pi: any) {
     }),
     async execute(_id: string, params: any, signal: AbortSignal) {
       const operation = String(params.operation);
+      if (operation !== "actions" && params.intent === "write") throw new Error("ROUND_PLANNING_ERROR: individual mutations are not atomic. Use a native Ego script or actions round containing fresh snapshot, verified data, Save, wait and fresh readback; writes=0.");
       if (operation !== "actions") validateGeneralBrowserAction(operation, params);
       return withQueue("browser", async () => {
         if (operation === "actions") {
@@ -1566,14 +1590,10 @@ export default function cventJobTools(pi: any) {
           if ((await assessedDomains()).includes(domain)) throw new Error(`DOMAIN_ALREADY_COMPLETE: ${domain} is checkpointed; resume ${next ?? "final QA"}`);
           if (writeIndexes.length) {
             await assertCompiledExpectations();
-            await assertSourcesVerified(domain, writeIndexes.map(index => steps[index].rrSource));
+            await assertSourcesVerified(domain, writeIndexes.filter(index => isDataAction(steps[index].operation, steps[index])).map(index => steps[index].rrSource));
             await assertNoHeldReplay(domain, params);
-            const pending = await pendingWriteReadback() ?? {};
-            await atomicJson(WRITE_READBACK_PENDING, {
-              operations: [...(pending.operations ?? []), ...writeIndexes.map(index => steps[index].operation)].slice(-100),
-              rrSources: [...(pending.rrSources ?? []), ...writeIndexes.map(index => cleanText(steps[index].rrSource, 500))].slice(-100),
-              requiredAt: pending.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
-            });
+            // The router's durable attempt/outcome audit owns atomic-round containment.
+            // Do not create a pending-write hold before its pre-dispatch validation.
           }
           await updateBrowserProgress(`Ego executing coherent ${domain} work: ${cleanText(params.objective, 500)}`);
           const boundedSteps = steps.map(step => ({ operation: String(step.operation), ...browserParams(String(step.operation), step) }));

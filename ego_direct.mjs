@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { planNativeRound, validateAtomicSteps, sourceForAction, isDataAction, planningError } from './ego_round_validation.mjs';
 import { inspectRegistrationTypeCapabilities, runTrustedCventProcedure } from './trusted_cvent_procedures.mjs';
 const argv=process.argv.slice(2);const arg=n=>argv[argv.indexOf(n)+1];
 const runtimePath=arg('--runtime');const operation=arg('--operation');const params=JSON.parse(arg('--params')||'{}');
@@ -163,6 +164,28 @@ try{
       default:throw new Error(`Unsupported coherent Ego action: ${op}`);
     }
   }
+  async function preflightAtomic(planned){
+    if(!planned?.mutations.length)return undefined;
+    if(!targetBound())throw planningError('Exact selected target is not bound to the current BrowserRuntime');
+    await assertLease();await assertAuthorizedPage();
+    await ego.snapshot();
+    let saveTarget;
+    for(let index=0;index<planned.steps.length;index++){
+      const step=planned.steps[index];
+      if(!step.target&&step.x===undefined)continue;
+      if(step.target)step.target=step.target.replace(/^loc=role:/,'role:').replace(/^loc=css:/,'');
+      const d=step.target?(await resolveTarget(step)).descriptor:await pointDescriptor(step.x,step.y);
+      if(step.destination)await resolveTarget({target:step.destination});
+      const save=['text','label','aria','title'].some(k=>/^save(?:\s|$)/i.test(normalize(d?.[k])));
+      if(save&&planned.commitCandidates.includes(index)){
+        // Cvent can enable Save after an edit, but the commit control must exist now.
+        if(!d.connected)throw planningError('Save control is disconnected');
+        await authorizeInteractive({...step,intent:'write'},{...d,disabled:false});saveTarget=step.target??`${step.x},${step.y}`;
+      }else await authorizeInteractive({...step,intent:step.data?'write':'read'},d);
+    }
+    if(!saveTarget)throw planningError('No exact, current Save control exists for the planned mutations');
+    return saveTarget;
+  }
   async function collectEventRows(maxScrolls=60){
     const seen=new Map(),passes=[],limit=Math.max(1,Math.min(Number(maxScrolls),100));let pageNumber=1;
     await ego.evaluate(`(() => {window.scrollTo(0,0);for(const e of document.querySelectorAll('*'))if(e.scrollHeight>e.clientHeight+10&&[...e.querySelectorAll('table')].length)e.scrollTop=0})()`);await ego.waitForTimeout(350);
@@ -264,37 +287,55 @@ try{
       // The same Ego executor and target/lease checks, now with coherent native
       // helper scripts. No shell, network, process, filesystem or raw CDP API is exposed.
       const logs=[];
-      let lastRRSource;
+      let postSaveSnapshot;
       const validation=JSON.parse(fs.readFileSync(path.join(path.dirname(runtimePath),'rr-validation.json'),'utf8'));
       const verified=new Set(validation.items.filter(item=>item.domain===params.domain&&item.status==='VERIFIED').map(item=>`${item.sourceEvidence.sheet}!${item.sourceEvidence.range}`));
+      const domainItems=validation.items.filter(item=>item.domain===params.domain);
       const target=value=>typeof value==='string'?value.replace(/^loc=role:/,'role:').replace(/^loc=css:/,''):value;
+      const planned=planNativeRound(params.script,params,domainItems);
+      const plannedSave=await preflightAtomic(planned);
       const readOps=new Set(['pageInfo','snapshotText','screenshot','readTarget','scroll','wait','navigate','hover','focus']);
       const run=async(op,args={},options={})=>{
         if(completedActions.length>=200)throw Error('Ego round exceeded 200 actions; continue in another coherent round');
         actionIndex=completedActions.length;
         let intent=readOps.has(op)?'read':params.intent;
         if(options.intent==='read')intent='read';
-        const source=options.rrSource??lastRRSource??(params.rrSources.length===1?params.rrSources[0]:undefined);
-        if(intent==='read'&&(['fill','typeText','selectOption','setChecked','visualDrag','drag'].includes(op)||op==='press'&&!['Escape','Tab','PageUp','PageDown'].includes(args.key)))throw Error('Read-only Ego action cannot edit/commit controls');
+        let source=options.rrSource;
+        const data=isDataAction(op,args)||(['click','visualClick','visualDoubleClick'].includes(op)&&Boolean(source));
+        if(op==='press'&&!data)intent='read';
+        if(data&&params.intent==='write'){
+          source=sourceForAction({operation:op,...args,rrSource:source},params.rrSources,domainItems);
+          const match=planned?.steps.some(s=>s.data&&s.operation===op&&s.target===args.target&&s.text===args.text&&s.option===args.option&&s.checked===args.checked&&s.key===args.key&&s.x===args.x&&s.y===args.y&&s.destination===args.destination&&s.toX===args.toX&&s.toY===args.toY&&s.rrSource===source);
+          if(!match)throw planningError('Action differs from the validated atomic plan');
+        }
+        if(intent==='read'&&isDataAction(op,args))throw Error('Read-only Ego action cannot edit/commit controls');
         if(op==='navigate'&&dirty)throw Error('Save and verify current changes before navigation');
         if(intent==='write'){await assertLease();await assertAuthorizedPage();}
         else await assertAuthenticatedReadContext();
         if((await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || window.name"))!==runtime.browserRuntimeId)throw Error('Runtime identity lost during Ego round');
         let isSave=false;
-        if(['click','dblclick','visualClick'].includes(op)){
+        if(['click','dblclick','visualClick','visualDoubleClick'].includes(op)){
           const d=['click','dblclick'].includes(op)?(await resolveTarget({target:args.target})).descriptor:await pointDescriptor(args.x,args.y);
           isSave=['text','label','aria','title'].some(key=>/^save(?:\s|$)/i.test(normalize(d?.[key])));
-          if(['text','label','aria','title'].some(key=>/^edit$/i.test(normalize(d?.[key]))))intent='read';
+          if(!isSave&&!data)intent='read';
+          if(isSave&&(!plannedSave||(args.target??`${args.x},${args.y}`)!==plannedSave))throw planningError('Save was not validated as part of this atomic mutation set');
         }
-        if(intent==='write'&&(!source||!verified.has(source)||!params.rrSources.includes(source)))throw Error('Item held: this action needs an exact VERIFIED rrSource from the round header');
+        if(data&&intent==='write'&&(!source||!verified.has(source)||!params.rrSources.includes(source)))throw planningError('Data action needs an exact VERIFIED rrSource from the round header');
+        // Save and keyboard navigation carry round context, not invented cell provenance.
+        if(!data)source=undefined;
         if(op==='screenshot')args.filePath=path.join(path.dirname(runtimePath),`browser-visual-${Date.now()}-${actionIndex}.png`);
         const step={operation:op,...args,intent,rrSource:source};
         const started=performance.now(),before=writesAttempted;
-        if(intent==='write')dirty=true; // contain a dispatched failure, too
-        const value=await runAdaptive(step);
-        if(writesAttempted>before){lastRRSource=source;dirty=true;saved=isSave||params.commitMode==='autosave';}
+        let value;
+        try{value=await runAdaptive(step);}catch(error){if(writesAttempted>before)dirty=true;throw error;}
+        if(writesAttempted>before){dirty=true;saved=isSave||params.commitMode==='autosave';}
         if(isSave){saves++;saved=true;}
-        if(dirty&&saved&&['snapshotText','readTarget','screenshot'].includes(op)){readbacks++;dirty=false;saved=false;}
+        if(dirty&&saved&&op==='snapshotText'){
+          if(params.domain==='event_settings'&&/button "Save(?:\s|"|$)/i.test(value.snapshot))throw Error('Save did not leave the Event Information editor; persistence remains unproven. Inspect validation errors without replay.');
+          postSaveSnapshot=value.snapshot;
+          writePrivateJson(path.join(path.dirname(runtimePath),'browser-last-atomic-readback.json'),{observedAt:new Date().toISOString(),browserRuntimeId:runtime.browserRuntimeId,eventKey:runtime.authorizedEventKey,domain:params.domain,snapshot:postSaveSnapshot,verificationPlan:planned.steps.filter(s=>s.data)});
+          readbacks++;dirty=false;saved=false;
+        }
         completedActions.push({index:actionIndex,operation:op,intent,rrSource:source,durationMs:Math.round(performance.now()-started),result:op==='snapshotText'?{snapshotCaptured:true,bytes:Buffer.byteLength(value.snapshot)}:value});
         return value;
       };
@@ -316,7 +357,7 @@ try{
         selectOption:(value,option,options={})=>run('selectOption',{target:selector(value),option:typeof option==='string'?option:option.label??option.value,optionBy:typeof option==='object'&&option.value!==undefined?'value':'label'},options),
         dragAndDrop:(from,to,options={})=>run('drag',{target:selector(from),destination:selector(to)},options),
         setInputFiles:()=>{throw Error('Arbitrary upload is blocked; use the audited event-local RR artifact operation')},
-        waitForTimeout:ms=>run('wait',{ms}),waitForLoadState:()=>run('wait',{ms:500}),
+        waitForTimeout:ms=>run('wait',{ms}),waitForLoadState:(loadState='load',options={})=>run('wait',{loadState,ms:options.timeout??30000}),
         waitForSelector:async value=>{await run('readTarget',{target:selector(value)});return true},
         waitForURL:async value=>{const info=(await run('pageInfo')).page;if(typeof value==='string'&&info.url!==value)throw Error('Current URL does not match');return info.url},
         evaluate:()=>{throw Error('Unrestricted page.evaluate is blocked by event write policy; use snapshot and audited Page actions')},
@@ -324,7 +365,7 @@ try{
         close:()=>{throw Error('The canonical job Page cannot be closed')},
       };
       upstreamPage.mouse={click:(x,y,options={})=>run(options.clickCount===2?'visualDoubleClick':'visualClick',{x,y,label:options.label},options),move:()=>true,down:()=>true,up:()=>true,wheel:(dx,dy)=>run('scroll',{deltaY:dy})};
-      upstreamPage.keyboard={press:key=>run('press',{key}),type:text=>run('typeText',{text}),insertText:text=>run('typeText',{text}),paste:text=>run('typeText',{text}),down:key=>run('press',{key}),up:()=>true};
+      upstreamPage.keyboard={press:(key,options={})=>run('press',{key},options),type:(text,options={})=>run('typeText',{text},options),insertText:(text,options={})=>run('typeText',{text},options),paste:(text,options={})=>run('typeText',{text},options),down:key=>run('press',{key}),up:()=>true};
       const upstreamTask={spaceId:runtime.browserRuntimeId,name:process.env.CVENT_JOB_ID||'cvent-job',ownership:'agent',page:label=>{if(label!=='p1')throw Error('Only canonical Page p1 is available');return upstreamPage},userPage:()=>upstreamPage,pages:async()=>[upstreamPage],tabs:async()=>[{label:'p1',page:upstreamPage,targetId:wanted,title:await upstreamPage.title(),url:await upstreamPage.url(),active:true,openedBy:'agent'}],newPage:()=>{throw Error('The isolated job owns one canonical Page')},adopt:()=>upstreamPage,release:()=>{throw Error('The canonical Page cannot be released')},waitForControl:async()=>true,handOff:()=>{throw Error('Use cvent_login_handoff for authenticated user control')},finish:async()=>({keep:true}),cdp:()=>{throw Error('Raw CDP is blocked')}};
       const upstreamTaskSpace=async()=>upstreamTask;
       const context=vm.createContext({
@@ -352,15 +393,27 @@ try{
       },{codeGeneration:{strings:false,wasm:false}});
       await new vm.Script(`(async()=>{${params.script}\n})()`).runInContext(context,{timeout:10000});
       if(dirty)throw Error('Ego round ended with changes lacking Save and fresh readback');
-      result={actions:completedActions,actionCount:completedActions.length,writesAttempted,saves,readbacks,logs,unresolvedWrites:false};break;
+      result={postSaveSnapshot,verificationPlan:planned?.steps.filter(s=>s.data),actions:completedActions,actionCount:completedActions.length,writesAttempted,saves,readbacks,logs:logs.filter(value=>value!==postSaveSnapshot),unresolvedWrites:false};break;
     }
     case 'actions': {
+      let saveTarget;
+      if(params.steps.some(s=>s.intent==='write')){
+        const items=JSON.parse(fs.readFileSync(path.join(path.dirname(runtimePath),'rr-validation.json'),'utf8')).items.filter(i=>i.domain===params.domain);
+        const sources=[...new Set(params.steps.filter(s=>s.rrSource).map(s=>s.rrSource))];
+        for(const step of params.steps){
+          step.data=isDataAction(step.operation,step)||(step.operation==='click'&&Boolean(step.rrSource)&&!/save/i.test(step.target??''));
+          if(step.data)step.rrSource=sourceForAction(step,sources,items);
+        }
+        const planned=validateAtomicSteps(params.steps,params.commitMode);
+        if(!planned.mutations.length)throw planningError('A write round must contain an RR-backed data mutation and commit/readback path');
+        saveTarget=await preflightAtomic(planned);
+      }
       const actions=completedActions;let pendingSavedWrite=false;
       for(let index=0;index<params.steps.length;index++){
         actionIndex=index;
         const step=params.steps[index],started=performance.now(),before=writesAttempted;
         const actionResult=await runAdaptive(step);
-        const saveStep=step.intent==='write'&&['click','activate','press','visualClick'].includes(step.operation)&&/save/i.test(String(step.target??step.key??step.label??''));
+        const saveStep=step.intent==='write'&&step.operation==='click'&&step.target===saveTarget;
         if(saveStep){saves++;pendingSavedWrite=true}
         if(writesAttempted>before&&params.commitMode==='autosave')pendingSavedWrite=true;
         if(pendingSavedWrite&&step.intent==='read'&&['readTarget','sectionState','controlInventory','snapshotText','screenshot'].includes(step.operation)){readbacks++;pendingSavedWrite=false}

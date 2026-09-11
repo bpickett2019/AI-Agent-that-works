@@ -257,7 +257,8 @@ def validate_action_round(runtime,params):
         if intent not in ('read','write'):raise RuntimeError(f'Ego action {index+1} requires explicit read/write intent')
         if intent=='write':
             writes+=1
-            if not str(step.get('rrSource') or '').strip():raise RuntimeError(f'Ego action {index+1} write lacks verified RR source')
+            if operation in ('fill','type','typeText','selectOption','setChecked','drag','visualDrag','uploadDiscountImport') and not str(step.get('rrSource') or '').strip():
+                raise RuntimeError(f'Ego action {index+1} data write lacks verified RR source')
         if operation in ('fill','type','typeText','selectOption','setChecked','drag','visualDrag','uploadDiscountImport') and intent!='write':
             raise RuntimeError(f'Ego action {index+1} {operation} requires write intent')
         if operation=='navigate':guard(runtime,'navigate',step)
@@ -342,6 +343,8 @@ def run_direct(runtime_path,runtime,tool,operation,params):
                         'inventoryCount':result.get('inventoryCount',len(result.get('authenticatedInventory') or [])),
                         'navigationTarget':result.get('navigationTarget'),'page':result.get('page'),'router':'ego'}
         is_write=params.get('intent')=='write'
+        if is_write and operation not in {'script','actions',*TRUSTED_PROCEDURES}:
+            raise RuntimeError('ROUND_PLANNING_ERROR: individual writes are not atomic; use a change/Save/wait/readback round; dispatched writes=0')
         action_writes=0
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)

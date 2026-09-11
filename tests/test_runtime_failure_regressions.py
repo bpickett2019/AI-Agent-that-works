@@ -23,8 +23,9 @@ class AdapterFailureTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.folder = Path(self.tmp.name)
-        for name in ('ego_direct.mjs', 'trusted_cvent_procedures.mjs'):
+        for name in ('ego_direct.mjs', 'ego_round_validation.mjs', 'trusted_cvent_procedures.mjs'):
             shutil.copy2(ROOT / name, self.folder / name)
+        (self.folder / 'node_modules').symlink_to(ROOT / 'node_modules', target_is_directory=True)
         helper = self.folder / 'vendor/ego-browser-linux/dist/src/helpers.js'
         helper.parent.mkdir(parents=True)
         (self.folder / 'package.json').write_text('{"type":"module"}')
@@ -45,13 +46,22 @@ export async function fill(target,text){if(process.env.CASE==='writes'){if(text=
         self.runtime = {'browserRuntimeId': 'cvent-runtime-test', 'cdpHttpOrigin': 'http://127.0.0.1:1',
                         'targetBrowserIdentity': {'targetId': 'target'}, 'authorizedEventKey': 'test-event'}
         (self.folder / 'browser-runtime.json').write_text(json.dumps(self.runtime))
+        (self.folder / 'authorized-target.json').write_text(json.dumps({'browser_runtime_id':'cvent-runtime-test','event_key':'test-event'}))
         self.steps = [{'operation': op, 'intent': 'read'} for op in ('pageInfo', 'wait', 'snapshotText', 'screenshot')]
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def run_adapter(self, case, steps=None):
-        params = {'intent': 'read', 'objective': 'Offline multi-action regression', 'commitMode': 'read_only', 'steps': steps or self.steps}
+        selected = [dict(step) for step in (steps or self.steps)]
+        write = any(step['intent'] == 'write' for step in selected)
+        if write:
+            (self.folder / 'rr-validation.json').write_text(json.dumps({'items':[{'domain':'event_settings','status':'VERIFIED','sourceEvidence':{'sheet':'RR','range':'B1'}}]}))
+            selected[0] = {'operation':'snapshotText','intent':'read'}
+            for step in selected:
+                if step['intent']=='write': step.setdefault('rrSource','RR!B1')
+            selected += [{'operation':'click','intent':'write','target':'@save'}, {'operation':'wait','intent':'read','ms':10}, {'operation':'snapshotText','intent':'read'}]
+        params = {'intent': 'write' if write else 'read', 'domain':'event_settings', 'objective': 'Offline multi-action regression', 'commitMode': 'save' if write else 'read_only', 'steps': selected}
         proc = subprocess.run(['node', 'ego_direct.mjs', '--runtime', str(self.folder / 'browser-runtime.json'),
                                '--operation', 'actions', '--params', json.dumps(params)], cwd=self.folder,
                               env={**{k: v for k, v in os.environ.items() if not k.startswith('CVENT_')}, 'CASE': case,
@@ -74,6 +84,7 @@ export async function fill(target,text){if(process.env.CASE==='writes'){if(text=
         return proc, browser_tool.child_result(proc)
 
     def test_read_only_native_snapshot_is_allowed_before_target_binding(self):
+        (self.folder / 'authorized-target.json').unlink()
         self.assertFalse((self.folder / 'authorized-target.json').exists())
         proc, result = self.run_native("cliLog(await page.url()); cliLog(await page.snapshot());", mode='read_only', case='success')
         self.assertEqual(proc.returncode, 0, result)
@@ -116,7 +127,8 @@ export async function evaluate(expression){
     def test_native_multi_action_save_readback_with_ambiguous_independent_item(self):
         proc, result = self.run_native("""
 cliLog(await snapshotText());
-for (const text of ['one','two']) await fillInput('@input', text);
+await fillInput('@input', 'one');
+await fillInput('@input', 'two');
 await click('@save'); await wait(0.1); cliLog(await snapshotText());
 """)
         self.assertEqual(proc.returncode, 0, result)
@@ -126,11 +138,11 @@ await click('@save'); await wait(0.1); cliLog(await snapshotText());
         self.assertEqual(result['actionCount'], 6)
 
     def test_keyboard_and_save_inherit_provenance_in_multi_source_round(self):
-        proc, result = self.run_native("await fillInput('@input','one',{rrSource:'RR!B1'}); await pressKey('Tab'); await click('@save'); cliLog(await snapshotText());", sources=['RR!B1','RR!B3'])
+        proc, result = self.run_native("cliLog(await snapshotText()); await fillInput('@input','one',{rrSource:'RR!B1'}); await pressKey('Tab'); await click('@save'); await wait(0.1); cliLog(await snapshotText());", sources=['RR!B1','RR!B3'])
         self.assertEqual(proc.returncode, 0, result)
         self.assertEqual(result['saves'], 1)
         self.assertEqual(result['readbacks'], 1)
-        self.assertEqual(result['actions'][1]['rrSource'], 'RR!B1')
+        self.assertIsNone(result['actions'][2].get('rrSource'))
 
     def test_native_edit_button_is_navigation_not_an_uncertain_write(self):
         proc, result = self.run_native("await click('@edit'); cliLog(await snapshotText());")
@@ -142,7 +154,7 @@ await click('@save'); await wait(0.1); cliLog(await snapshotText());
         for script, error in [("await fillInput('@input','x',{rrSource:'RR!B2'})", 'VERIFIED'),
                               ("await click('@delete')", 'protected Cvent control'),
                               ("await gotoAndWait('https://app.cvent.com/view?evtstub=another')", 'outside exact'),
-                              ("await fillInput('@input','x')", 'lacking Save')]:
+                              ("cliLog(await snapshotText()); await fillInput('@input','x')", 'lacking Save')]:
             with self.subTest(script=script):
                 proc, result = self.run_native(script)
                 self.assertEqual(proc.returncode, 1)
@@ -176,8 +188,8 @@ await click('@save'); await wait(0.1); cliLog(await snapshotText());
                                  for value in ('first value', 'second value')]
         proc, result = self.run_adapter('writes', steps)
         self.assertEqual(proc.returncode, 0)
-        self.assertEqual(result['writesAttempted'], 2)
-        self.assertEqual([a['index'] for a in result['actions']], [0, 1, 2])
+        self.assertEqual(result['writesAttempted'], 3)
+        self.assertEqual([a['index'] for a in result['actions']], [0, 1, 2, 3, 4, 5])
 
     def test_dispatched_failure_counts_failed_attempt_and_retains_prior_success(self):
         steps = self.steps[:1] + [{'operation': 'fill', 'intent': 'write', 'target': '@123', 'text': value}
@@ -203,7 +215,7 @@ await click('@save'); await wait(0.1); cliLog(await snapshotText());
         steps = self.steps[:2] + [{'operation': 'fill', 'intent': 'write', 'target': '@123', 'text': 'offline', 'rrSource': 'RR!B1'}]
         proc, result = self.run_adapter('predispatch', steps)
         self.assertIn('real target missing before dispatch', result['error'])
-        self.assertEqual(result['actionIndex'], 2)
+        self.assertEqual(result['actionIndex'], -1)
         self.assertEqual(result['writesAttempted'], 0)
         params = {'intent': 'write', 'steps': steps, 'domain': 'event_settings'}
         with patch.object(browser_tool, 'CURRENT', self.folder), \

@@ -89,7 +89,8 @@ try {
   const require = createRequire(import.meta.url);
   let source = stripTypeScriptTypes(fs.readFileSync(path.join(root, 'extensions/cvent-job-tools.ts'), 'utf8'));
   source = source.replace('"typebox"', JSON.stringify(pathToFileURL(require.resolve('typebox')).href))
-    .replace('"./prewrite-orchestration.mjs"', JSON.stringify(pathToFileURL(path.join(root, 'extensions/prewrite-orchestration.mjs')).href));
+    .replace('"./prewrite-orchestration.mjs"', JSON.stringify(pathToFileURL(path.join(root, 'extensions/prewrite-orchestration.mjs')).href))
+    .replace('"../ego_round_validation.mjs"', JSON.stringify(pathToFileURL(path.join(root, 'ego_round_validation.mjs')).href));
   const extension = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
   const tools = new Map(), hooks = new Map();
   extension.default({ on: (name, handler) => hooks.set(name, handler), registerTool: tool => tools.set(tool.name, tool), setActiveTools() {} });
@@ -116,7 +117,7 @@ try {
   const helper = path.join(helperRoot, 'browser_tool.py');
   const failedHelper = fs.readFileSync(helper, 'utf8');
   fs.writeFileSync(helper, 'print(\'BROWSER_ROUTER_RESULT={"ok":true,"actionCount":4,"writesAttempted":2,"saves":1,"readbacks":1}\')');
-  const native = source => ({ command: `ego-browser nodejs <<'EOF'\n// cvent: {"domain":"event_settings","commitMode":"save","rrSources":["${source}"]}\nawait fillInput('@1','value'); await click('@2'); cliLog(await snapshotText());\nEOF` });
+  const native = source => ({ command: `ego-browser nodejs <<'EOF'\n// cvent: {"domain":"event_settings","commitMode":"save","rrSources":["${source}"]}\ncliLog(await snapshotText()); await fillInput('@1','value'); await click('@2'); await wait(0.1); cliLog(await snapshotText());\nEOF` });
   await tools.get('bash').execute('independent-safe-write', native('RR!B1'));
   await assert.rejects(tools.get('bash').execute('ambiguous-write', native('RR!B2')), /Item held/);
   await tools.get('cvent_verify_domain').execute('verify-domain', {

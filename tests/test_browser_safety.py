@@ -217,26 +217,24 @@ class BrowserTargetSafetyTests(unittest.TestCase):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
     def test_write_timeout_is_audited_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
-        params={'intent':'write','rrSource':'Event Details!B10','target':'#Save','timeoutSeconds':1}
-        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON","connected":true,"disabled":false}}\n','')
+        params={'intent':'write','domain':'event_settings','commitMode':'save','rrSources':['Event Details!B10'],'script':'await page.snapshot(); await page.fill("#venue","venue"); await page.click("#Save"); await page.waitForTimeout(10); await page.snapshot();','timeoutSeconds':1}
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
-             patch.object(browser_tool.subprocess,'run',side_effect=[resolved,subprocess.TimeoutExpired(['node'],1)]):
+             patch.object(browser_tool.subprocess,'run',side_effect=subprocess.TimeoutExpired(['node'],1)):
             with self.assertRaisesRegex(RuntimeError,'automatic replay is blocked'):
-                browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
+                browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','script',params)
         records=[json.loads(line) for line in (self.base/'scope-write-audit.jsonl').read_text().splitlines()]
         self.assertEqual([record['result'] for record in records],['attempted','uncertain_timeout'])
         self.assertTrue((self.base/'browser-mutation-uncertain.json').exists())
     def test_write_helper_error_is_uncertain_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
-        params={'intent':'write','rrSource':'Event Details!B10','target':'#Save','timeoutSeconds':1}
-        resolved=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"resolved":{"tag":"BUTTON","connected":true,"disabled":false}}\n','')
+        params={'intent':'write','domain':'event_settings','commitMode':'save','rrSources':['Event Details!B10'],'script':'await page.snapshot(); await page.fill("#venue","venue"); await page.click("#Save"); await page.waitForTimeout(10); await page.snapshot();','timeoutSeconds':1}
         failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"post-action marker failed"}\n','')
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
-             patch.object(browser_tool.subprocess,'run',side_effect=[resolved,failed]):
+             patch.object(browser_tool.subprocess,'run',return_value=failed):
             with self.assertRaisesRegex(RuntimeError,'post-action marker failed'):
-                browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
+                browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','script',params)
         records=[json.loads(line) for line in (self.base/'scope-write-audit.jsonl').read_text().splitlines()]
         self.assertEqual([record['result'] for record in records],['attempted','uncertain_error'])
         self.assertTrue((self.base/'browser-mutation-uncertain.json').exists())
@@ -256,7 +254,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
              patch.object(browser_tool,'guard',return_value=current), \
              patch.object(browser_tool.subprocess,'run',return_value=failed):
-            with self.assertRaisesRegex(RuntimeError,'before browser dispatch'):
+            with self.assertRaisesRegex(RuntimeError,'individual writes are not atomic'):
                 browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','click',params)
         self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
         self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
