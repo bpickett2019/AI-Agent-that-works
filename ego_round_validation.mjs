@@ -51,7 +51,24 @@ export function sourceForAction(step,sources,items){
     return s;
   };
   const evidence=verified.filter(i=>exact(i)===source&&i.interpretedCventValue!==undefined);
-  if(value!==undefined&&evidence.length&&!evidence.some(i=>scalars(i.interpretedCventValue).some(v=>canonical(v)===canonical(value))))
+  const projections=item=>{
+    const values=scalars(item.interpretedCventValue),text=String(item.interpretedCventValue??'');
+    // A verified compound RR cell may map to several UI controls. Only exact,
+    // deterministic components of that same desired value are admitted.
+    if(item.path==='event_settings/fields/event_location')values.push(...text.split(',').map(v=>v.trim()).filter(Boolean));
+    if(item.path==='event_settings/fields/event_dates'){
+      const range=text.match(/^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\s*[-–]\s*(\d{1,2}),?\s+(\d{4})$/i);
+      if(range){
+        const month=['january','february','march','april','may','june','july','august','september','october','november','december'].indexOf(range[1].toLowerCase())+1;
+        for(const day of [range[2],range[3]]){
+          const date=new Date(Date.UTC(+range[4],month-1,+day));
+          if(date.getUTCMonth()===month-1&&date.getUTCDate()===+day)values.push(`${range[4]}-${String(month).padStart(2,'0')}-${day.padStart(2,'0')}`);
+        }
+      }
+    }
+    return values;
+  };
+  if(value!==undefined&&evidence.length&&!evidence.some(i=>projections(i).some(v=>canonical(v)===canonical(value))))
     throw planningError(`Desired value is not present in the verified desired-state object for ${source}`);
   return source;
 }

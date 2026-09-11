@@ -85,6 +85,14 @@ assert.equal(sourceForAction({text:'Venue'},sources,items),'Event Details!B10');
 assert.equal(sourceForAction({text:'11/13/2026',rrSource:sources[1]},sources,items),sources[1]);
 assert.throws(()=>sourceForAction({text:'wrong venue',rrSource:sources[0]},sources,items),/Desired value/);
 assert.throws(()=>sourceForAction({text:'Venue',rrSource:'Event Details!B12'},sources,items),/VERIFIED/);
+const compound=[
+ {status:'VERIFIED',path:'event_settings/fields/event_location',sourceEvidence:{sheet:'Event Details',range:'B10'},interpretedCventValue:'The Hangar at Regatta Harbour, Miami, FL'},
+ {status:'VERIFIED',path:'event_settings/fields/event_dates',sourceEvidence:{sheet:'Event Details',range:'B18'},interpretedCventValue:'November 13 - 15, 2026'}
+];
+for(const text of ['The Hangar at Regatta Harbour','Miami','FL'])assert.equal(sourceForAction({text,rrSource:sources[0]},sources,compound),sources[0]);
+for(const text of ['11/13/2026','11/15/2026'])assert.equal(sourceForAction({text,rrSource:sources[1]},sources,compound),sources[1]);
+assert.throws(()=>sourceForAction({text:'11/14/2026',rrSource:sources[1]},sources,compound),/Desired value/);
+assert.throws(()=>sourceForAction({text:'Orlando',rrSource:sources[0]},sources,compound),/Desired value/);
 """
         p=subprocess.run(['node','--input-type=module','-e',source],cwd=root,text=True,capture_output=True)
         self.assertEqual(p.returncode,0,p.stderr)
