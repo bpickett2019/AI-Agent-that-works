@@ -463,6 +463,14 @@ class JobRunner:
         finish_state, uncertain, error = classify_process_outcome(
             code, report_status, reported_state, writes_exist, outcome["unresolved"], "; ".join(reasons) or None,
         )
+        report_path = directory / "final-report.json"
+        final_report = read_json(report_path, {})
+        if finish_state.startswith("failed_") and not final_report.get("completion_reason"):
+            final_report.update({"status": "INCOMPLETE", "completion_reason": error,
+                                 "unresolved_items": [error] if error else ["Agent stopped before final verification"],
+                                 "job_wide_blocker": "uncertain_mutation" if uncertain else ("provider_unavailable" if provider_failure else "browser_runtime_failure" if controller_failure else "process_exit"),
+                                 "reported_by": "controller", "updated_at": now()})
+            atomic_json(report_path, final_report)
         try:
             self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
         finally:

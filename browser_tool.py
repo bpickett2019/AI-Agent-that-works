@@ -40,7 +40,7 @@ def atomic_private_json(path,value):
     temporary.chmod(0o600);temporary.replace(path)
 def emit(data):print('BROWSER_ROUTER_RESULT='+json.dumps(data,ensure_ascii=False))
 def audit_scope_write(operation,params,current,result,error=None):
-    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'rrSource':params.get('rrSource'),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':result}
+    record={'at':datetime.now(timezone.utc).isoformat(),'operation':operation,'rrSource':params.get('rrSource') or '|'.join(params.get('rrSources',[])),'eventKey':event_key(current.get('url','')),'url':current.get('url'),'result':result}
     if error:record['error']=str(error)[-800:]
     with (CURRENT/'scope-write-audit.jsonl').open('a') as output:output.write(json.dumps(record,ensure_ascii=False)+'\n')
 def mark_mutation_uncertain(operation,params,current,error):
@@ -107,7 +107,7 @@ def guard(runtime,operation,params):
         if origin.scheme!='https' or not (host=='cvent.com' or host.endswith('.cvent.com')) or origin.username or origin.password or origin.port not in (None,443):
             raise RuntimeError('Write blocked: current page is not a trusted Cvent HTTPS origin')
         if (CURRENT/'browser-mutation-uncertain.json').exists():
-            raise RuntimeError('Write blocked: a prior browser mutation timed out with uncertain outcome; fresh human review is required')
+            raise RuntimeError('Write blocked: this job has an unresolved mutation hold; fresh readback/human review is required, not renderer recovery')
         if not valid_lock or current_key!=locked:
             raise RuntimeError('Write blocked: exact authorized event lock is absent or not currently open')
         if runtime.get('authorizedEventKey') and locked!=runtime['authorizedEventKey']:
@@ -337,7 +337,12 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             audit_scope_write(operation,params,current,'uncertain_error' if attempted else 'rejected_prewrite',result.get('error'))
             if attempted:mark_mutation_uncertain(operation,params,current,result.get('error','browser helper failed after write attempt'))
         else:audit_scope_write(operation,params,current,'succeeded')
-    if proc.returncode or not result.get('ok'):raise RuntimeError(result.get('error','browser tool failed'))
+    if proc.returncode or not result.get('ok'):
+        atomic_private_json(CURRENT/'last-browser-failure-result.json',result)
+        detail=result.get('error','browser tool failed')
+        if operation in ('actions','script'):
+            detail+=f"; dispatched writes={result.get('writesAttempted','UNKNOWN')}, completed actions={len(result.get('completedActions',[]))}. Partial evidence is available as cvent_job_read artifact browser_failure; do not replay an unresolved write."
+        raise RuntimeError(detail)
     return result
 def main():
     p=argparse.ArgumentParser();p.add_argument('--runtime',required=True);p.add_argument('--tool',choices=['auto','ego'],default='auto');p.add_argument('--operation',required=True);p.add_argument('--params',default='{}');a=p.parse_args()

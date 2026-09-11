@@ -30,8 +30,10 @@ For writes, use `commitMode: "save"` (or `"autosave"` only for a proven autosavi
 editor) and `rrSources: ["Exact Sheet!B7", ...]` copied from VERIFIED plan evidence.
 All non-read actions use write intent in a write round. `click(target,
 {intent:'read'})` is available for Edit, tabs and purely navigational controls.
-When the header has multiple sources, supply `{rrSource:'Exact Sheet!B7'}` as the
-last argument to each mutating helper. With one source it is the default.
+When changing to another requirement in a multi-source round, supply
+`{rrSource:'Exact Sheet!B7'}` on that field's helper. Related keyboard/blur/Save
+actions inherit the last successful field's source; do not restate it on every
+primitive. With one header source it is the default.
 No mutation is permitted in `read_only` rounds. Never invent RR sources.
 
 ## Helpers

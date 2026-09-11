@@ -32,7 +32,8 @@ class AdapterFailureTests(unittest.TestCase):
 export async function listTabs(){if(process.env.CASE==='startup')throw Error('real startup error');return [{id:'target'}]}
 export async function switchTab(){}
 let markers=0;
-export async function evaluate(){if(++markers>1&&process.env.CASE==='postflight')throw Error('real postflight error');return 'cvent-runtime-test'}
+export async function evaluate(expression){if(expression?.includes('document.activeElement'))return {tag:'INPUT',label:'Date',connected:true,disabled:false};if(++markers>1&&process.env.CASE==='postflight')throw Error('real postflight error');return 'cvent-runtime-test'}
+export async function press(){return true}
 export async function pageInfo(){return {url:'https://app.cvent.com/view?evtstub=test-event',title:'Test'}}
 export async function waitForTimeout(){}
 export async function screenshot(){return '/offline/screenshot.png'}
@@ -58,13 +59,14 @@ export async function fill(target,text){if(process.env.CASE==='writes'){if(text=
         self.assertNotIn('ReferenceError', proc.stdout + proc.stderr)
         return proc, browser_tool.child_result(proc)
 
-    def run_native(self, script, mode='save', case='writes'):
+    def run_native(self, script, mode='save', case='writes', sources=None):
         (self.folder / 'rr-validation.json').write_text(json.dumps({'items': [
             {'domain': 'event_settings', 'status': 'VERIFIED', 'sourceEvidence': {'sheet': 'RR', 'range': 'B1'}},
             {'domain': 'event_settings', 'status': 'AMBIGUOUS', 'sourceEvidence': {'sheet': 'RR', 'range': 'B2'}},
+            {'domain': 'event_settings', 'status': 'VERIFIED', 'sourceEvidence': {'sheet': 'RR', 'range': 'B3'}},
         ]}))
         params = {'intent': 'read' if mode == 'read_only' else 'write', 'commitMode': mode,
-                  'domain': 'event_settings', 'rrSources': ['RR!B1'], 'script': script}
+                  'domain': 'event_settings', 'rrSources': sources or ['RR!B1'], 'script': script}
         proc = subprocess.run(['node', 'ego_direct.mjs', '--runtime', str(self.folder / 'browser-runtime.json'),
                                '--operation', 'script', '--params', json.dumps(params)], cwd=self.folder,
                               env={**{k: v for k, v in os.environ.items() if not k.startswith('CVENT_')},
@@ -82,6 +84,13 @@ await click('@save'); await wait(0.1); cliLog(await snapshotText());
         self.assertEqual(result['saves'], 1)
         self.assertEqual(result['readbacks'], 1)
         self.assertEqual(result['actionCount'], 6)
+
+    def test_keyboard_and_save_inherit_provenance_in_multi_source_round(self):
+        proc, result = self.run_native("await fillInput('@input','one',{rrSource:'RR!B1'}); await pressKey('Tab'); await click('@save'); cliLog(await snapshotText());", sources=['RR!B1','RR!B3'])
+        self.assertEqual(proc.returncode, 0, result)
+        self.assertEqual(result['saves'], 1)
+        self.assertEqual(result['readbacks'], 1)
+        self.assertEqual(result['actions'][1]['rrSource'], 'RR!B1')
 
     def test_native_edit_button_is_navigation_not_an_uncertain_write(self):
         proc, result = self.run_native("await click('@edit'); cliLog(await snapshotText());")

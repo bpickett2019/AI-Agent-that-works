@@ -40,6 +40,7 @@ const ARTIFACTS: Record<string, string> = {
   target_lock: "authorized-target.json",
   activity: "activity.log",
   write_audit: "scope-write-audit.jsonl",
+  browser_failure: "last-browser-failure-result.json",
   final_report: "final-report.json",
   domain_results: "domain-results.json",
   inspection_summary: "input.inspection-summary.json",
@@ -840,6 +841,9 @@ export default function cventJobTools(pi: any) {
     if (!ALLOWED_TOOLS.has(event.toolName)) {
       return { block: true, reason: "Capability denied: this production agent has no shell or general filesystem tools" };
     }
+    // Reporting a real job-wide blocker must remain available even when the
+    // browser circuit breaker is open. It cannot perform browser mutations.
+    if (event.toolName === "cvent_finish") return undefined;
     const decision = recoveryBudget.allow(event.toolName, event.input);
     if (!decision.allowed) {
       if (decision.terminal) await atomicJson(join(jobDir, `controller-failure-${process.pid}.json`), recoveryBudget.terminalFailure);
@@ -992,7 +996,7 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_job_read",
     label: "Read job artifact",
-    description: "Read one fixed safe job artifact: state, auth_metadata, target_lock, activity, write_audit, final_report, domain_results, inspection_summary, or browser_runtime. No path input is accepted.",
+    description: "Read one fixed safe job artifact: state, auth_metadata, target_lock, activity, write_audit, browser_failure (partial dispatch evidence), final_report, domain_results, inspection_summary, or browser_runtime. No path input is accepted.",
     parameters: Type.Object({
       artifact: Type.String(),
       tailLines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),

@@ -208,6 +208,7 @@ try{
       // The same Ego executor and target/lease checks, now with coherent native
       // helper scripts. No shell, network, process, filesystem or raw CDP API is exposed.
       const logs=[];
+      let lastRRSource;
       const validation=JSON.parse(fs.readFileSync(path.join(path.dirname(runtimePath),'rr-validation.json'),'utf8'));
       const verified=new Set(validation.items.filter(item=>item.domain===params.domain&&item.status==='VERIFIED').map(item=>`${item.sourceEvidence.sheet}!${item.sourceEvidence.range}`));
       const target=value=>typeof value==='string'?value.replace(/^loc=role:/,'role:').replace(/^loc=css:/,''):value;
@@ -217,7 +218,7 @@ try{
         actionIndex=completedActions.length;
         let intent=readOps.has(op)?'read':params.intent;
         if(options.intent==='read')intent='read';
-        const source=options.rrSource??(params.rrSources.length===1?params.rrSources[0]:undefined);
+        const source=options.rrSource??lastRRSource??(params.rrSources.length===1?params.rrSources[0]:undefined);
         if(intent==='read'&&(['fill','typeText','selectOption','setChecked','visualDrag','drag'].includes(op)||op==='press'&&!['Escape','Tab','PageUp','PageDown'].includes(args.key)))throw Error('Read-only Ego action cannot edit/commit controls');
         if(op==='navigate'&&dirty)throw Error('Save and verify current changes before navigation');
         await assertLease();await assertAuthorizedPage();
@@ -234,7 +235,7 @@ try{
         const started=performance.now(),before=writesAttempted;
         if(intent==='write')dirty=true; // contain a dispatched failure, too
         const value=await runAdaptive(step);
-        if(writesAttempted>before){dirty=true;saved=isSave||params.commitMode==='autosave';}
+        if(writesAttempted>before){lastRRSource=source;dirty=true;saved=isSave||params.commitMode==='autosave';}
         if(isSave){saves++;saved=true;}
         if(dirty&&saved&&['snapshotText','readTarget','screenshot'].includes(op)){readbacks++;dirty=false;saved=false;}
         completedActions.push({index:actionIndex,operation:op,intent,rrSource:source,durationMs:Math.round(performance.now()-started),result:op==='snapshotText'?{snapshotCaptured:true,bytes:Buffer.byteLength(value.snapshot)}:value});

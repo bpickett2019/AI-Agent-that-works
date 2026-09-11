@@ -142,7 +142,7 @@ zero remaining event leases. This was not the fresh patched acceptance job.
 - Persist actual system prompt/tool activation and JSON stdout for later diagnosis.
 - Preserve source checkpoint UI, leases, profiles and Azure topology unchanged.
 
-152 offline tests passed, including real Pi CLI startup/skill activation without
+153 offline tests passed, including real Pi CLI startup/skill activation without
 any model call; actual Ego-executor multi-action fake-browser Save/readback;
 nonverified item and protected-action rejections; final-state/uncertain precedence;
 existing lease/runtime/recovery/compiler regressions. Python compilation, Node
@@ -169,3 +169,45 @@ writes. Follow-up adds Upcoming to the existing defaults, tests it, treats an
 observed Edit button as navigation even when the caller overstates write intent,
 and forbids guessed Cvent navigation URLs in the prompt. Native snapshot results
 are no longer duplicated in both action metadata and cliLog output. No UI change.
+
+## Fresh acceptance — INCOMPLETE, not a successful end-to-end build
+
+`job_fe2a7f0078b24cf09819395d30ec511e`, PID 518510, new session
+`2026-09-11T04-39-33-500Z_01a08ec3-857c-7627-bb23-6cf46de38ff8.jsonl`, ran release
+`a2aa4c41bd11732ef5267188f5cb8813c393f17c`. Started 04:39:32.626, login reused,
+exact Upcoming event authorized, Ego navigated via real Details UI and opened Edit.
+Original uploaded workbook SHA256:
+`6b1fe61fb47c6dc5dfce1aa5b392f5924889f46812b44124c1b7c0403ebb84b4`.
+
+At 04:42:02.588 Pi submitted a coherent date/venue/Save/readback script. The first
+fill changed Start Date to 11/13/2026. At 04:42:03.324 the NEXT command,
+`await pressKey('Tab', {intent:'write'})`, failed because the header contained two
+VERIFIED sources but the keyboard helper did not inherit the preceding field's
+source. Exact error: `Item held: this action needs an exact VERIFIED rrSource from the round header`.
+This redundant annotation requirement was an implementation defect introduced
+by the native helper round, not a missing Cvent capability or missing RR evidence.
+
+Counts: **1 configuration field fill, 0 Save clicks, 1 fresh unsaved-editor
+readback, 0 saved-configuration verifications**. Session line 38 at
+04:43:06.518 shows `textbox M/D/YYYY [ref=12842]` containing `11/13/2026`.
+The save was never reached. Persisted Cvent outcome was not verified.
+
+The router contained the partial round with browser-mutation-uncertain.json;
+subsequent mutation requests were rejected before dispatch. An old generic
+error incorrectly described every hold as a timeout, so the recovery circuit
+breaker then terminated Pi at 04:45:34.980 and released it as failed_uncertain
+at 04:45:45.601. cvent_finish was never called; the initial final-report.json still
+said Build not started, while state/SQLite correctly reflected failed_uncertain.
+
+Follow-up fixes: keyboard/blur/Save inherit the last successful field's VERIFIED
+source; preserve structured partial-dispatch evidence; report holds as holds,
+not imaginary renderer timeouts; keep final-report capability available during
+runtime failure; controller-generated failure reports cannot retain the initial
+Build not started placeholder. Also explicitly preserve unspecified RR fields
+rather than clearing old phone/address/ZIP values. Regression reproduces a
+multi-source fill → Tab → Save → readback sequence.
+
+The uncertainty marker is NOT cleared, no mutation is replayed, and no second
+fresh acceptance job is launched. The follow-up fix has offline tests, not a
+successful live acceptance result. Human review of the partial event edit is
+required before any additional live mutation. End-to-end objective remains unmet.

@@ -24,7 +24,7 @@ Pi owns navigation, UI understanding and decisions. Specialized `cvent_execute_s
 RR-supported + exact selected event + event-local + non-destructive = authorized.
 CREATE missing local configuration, UPDATE exact existing configuration, SAVE and VERIFY without per-field approvals. This includes event settings/dates/venue, registration types, admission/optional items, pricing/fees/discounts/vouchers, questions/choices, paths/associations, Site Designer pages/text/links/buttons/images/widgets/visibility and other applicable event-local configuration.
 
-Exact identity and parent context found → update differences. Proven absent → create. Fuzzy/uncertain identity → do not guess-update. Hold only that object/property and continue everything independent. Missing controls, unsupported properties, non-VERIFIED evidence and removals are item exceptions, never blanket domain/job vetoes. Never require a bespoke creation adapter when Ego can use the event-local UI.
+Exact identity and parent context found → update differences. Proven absent → create. Fuzzy/uncertain identity → do not guess-update. Preserve existing values when the RR does not specify a replacement; never clear old phone/address/ZIP or other content merely because the new RR omits it. Hold only that object/property and continue everything independent. Missing controls, unsupported properties, non-VERIFIED evidence and removals are item exceptions, never blanket domain/job vetoes. Never require a bespoke creation adapter when Ego can use the event-local UI.
 
 ## Continuous browser work
 

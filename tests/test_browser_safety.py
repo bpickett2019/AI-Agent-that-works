@@ -167,7 +167,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
         self.write_lock()
         (self.base/'browser-mutation-uncertain.json').write_text('{}')
-        with self.assertRaisesRegex(RuntimeError,'uncertain outcome'):
+        with self.assertRaisesRegex(RuntimeError,'unresolved mutation hold'):
             browser_tool.guard(self.runtime,'click',{'intent':'write'})
     def test_write_timeout_is_audited_and_cannot_replay(self):
         current={'url':'https://app.cvent.com/event?evtstub=locked'}
