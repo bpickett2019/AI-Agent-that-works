@@ -22,13 +22,24 @@ function simpleScriptContext(run,logs,rr,desired,runtime,targetId){
     const run=async(op,args={})=>{const r=JSON.parse(await bridge(JSON.stringify({op,args})));if(!r.ok)throw new Error(r.error);return r.value};
     const sel=v=>typeof v==='string'?v.replace(/^loc=role:/,'role:').replace(/^loc=css:/,''):v;
     const point=v=>Array.isArray(v)?{x:v[0],y:v[1]}:{x:v.x,y:v.y};
-    const blocked=()=>{throw new Error('Raw evaluate/CDP/network/process and other pages are unavailable. Use readTarget(\"@ref\") for field values, page.snapshot() for DOM state, and page.screenshot() for visual state')};
-    const page={label:'p1',spaceId:seed.spaceId,targetId:seed.targetId,openedBy:'agent',
+    const blocked=()=>{throw new Error('Raw evaluate/CDP/network/process and other pages are unavailable. Use readTarget(\"@ref\") or locator read methods for compact field/link/editor state, page.snapshot() for semantic state, and page.screenshot() for visual state')};
+    const capability=message=>{throw new Error('EGO_CAPABILITY_UNAVAILABLE: '+message)};
+    const read=v=>run('readTarget',{target:sel(v)});
+    let page;
+    const locator=v=>Object.freeze({
+      click:(o={})=>page.click(v,o),dblclick:(o={})=>page.dblclick(v,o),fill:text=>page.fill(v,text),focus:()=>page.focus(v),hover:()=>page.hover(v),press:key=>page.press(v,key),
+      inputValue:async()=>(await read(v)).value,textContent:async()=>(await read(v)).text,innerText:async()=>(await read(v)).text,
+      innerHTML:async()=>{const state=await read(v);if(state.html===null||state.html===undefined)capability('innerHTML is limited to editable rich-text controls');return state.html},
+      getAttribute:async name=>{const state=await read(v);if(!Object.prototype.hasOwnProperty.call(state.attributes||{},String(name)))capability('attribute '+JSON.stringify(name)+' is outside the safe compact-read allowlist');return state.attributes[String(name)]},
+      isChecked:async()=>Boolean((await read(v)).checked),isEnabled:async()=>Boolean((await read(v)).enabled),isVisible:async()=>Boolean((await read(v)).visible),
+    });
+    page={label:'p1',spaceId:seed.spaceId,targetId:seed.targetId,openedBy:'agent',
       info:async()=>(await run('pageInfo')).page,url:async()=>(await run('pageInfo')).page.url,title:async()=>(await run('pageInfo')).page.title,
       snapshot:async(options={})=>(await run('snapshotText',{options})).snapshot,
       screenshot:async(options={})=>(await run('screenshot',{fullPage:options.fullPage===true})).screenshotPath,
       goto:(url,o={})=>run('navigate',{url,waitUntil:o.waitUntil,timeoutSeconds:o.timeout?o.timeout/1000:undefined}),
-      reload:async()=>page.goto(await page.url()),
+      reload:async()=>page.goto(await page.url()),locator,readTarget:read,
+      getByRole:(role,o={})=>locator('role:'+role+'[name='+JSON.stringify(String(o.name??''))+']'),
       click:(v,o={})=>typeof v==='object'?run('visualClick',{...point(v),label:o.label}):run('click',{target:sel(v),label:o.label}),
       dblclick:(v,o={})=>typeof v==='object'?run('visualDoubleClick',{...point(v),label:o.label}):run('dblclick',{target:sel(v),label:o.label}),
       fill:(v,text)=>run('fill',{target:sel(v),text}),focus:v=>run('focus',{target:sel(v)}),hover:v=>run('hover',{target:sel(v)}),
@@ -40,10 +51,12 @@ function simpleScriptContext(run,logs,rr,desired,runtime,targetId){
       waitForTimeout:ms=>run('wait',{ms}),waitForLoadState:(loadState='load',o={})=>run('wait',{loadState,ms:o.timeout??30000}),
       waitForSelector:(v,o={})=>run('wait',{target:sel(v),ms:o.timeout??30000,state:o.state}),
       waitForURL:async(value,o={})=>{const end=Date.now()+(o.timeout??30000);while(Date.now()<end){const url=await page.url();if(typeof value==='string'?url===value:value.test(url))return url;await page.waitForTimeout(200)}throw new Error('Timed out waiting for URL')},
+      waitForEvent:event=>capability(event==='popup'?'popup waits are not provided by the installed Linux helper; the observed Cvent Site Designer opens in assigned Page p1, so click it and inspect task.tabs()':'only the assigned Cvent Page and audited job uploads are available; '+JSON.stringify(event)+' events are not exposed'),
+      acceptDialog:()=>capability('native-dialog acceptance is not exposed because it can commit an unverified action'),dismissDialog:()=>capability('native dialogs require user control through cvent_login_handoff'),
       evaluate:blocked,fetch:blocked,cdp:blocked,close:blocked,
     };
-    page.mouse={click:(x,y,o={})=>run(o.clickCount===2?'visualDoubleClick':'visualClick',{x,y,label:o.label}),wheel:(dx,dy)=>run('scroll',{deltaX:dx,deltaY:dy}),move:(x,y)=>run('visualHover',{x,y}),down:blocked,up:blocked};
-    page.keyboard={press:key=>run('press',{key}),type:text=>run('typeText',{text}),insertText:text=>run('typeText',{text}),paste:text=>run('typeText',{text}),down:blocked,up:blocked};
+    page.mouse={click:(x,y,o={})=>run(o.clickCount===2?'visualDoubleClick':'visualClick',{x,y,label:o.label}),wheel:(dx,dy)=>run('scroll',{deltaX:dx,deltaY:dy}),move:(x,y)=>run('visualHover',{x,y}),down:()=>capability('free-form mouse down/up is unavailable; use dragAndDrop or dragMouse so both endpoints are checked'),up:()=>capability('free-form mouse down/up is unavailable; use dragAndDrop or dragMouse so both endpoints are checked')};
+    page.keyboard={press:key=>run('press',{key}),type:text=>run('typeText',{text}),insertText:text=>run('typeText',{text}),paste:text=>typeof text==='string'?run('typeText',{text}):capability('rich HTML clipboard input is unavailable; use plain text keyboard input'),down:key=>run('keyDown',{key}),up:key=>run('keyUp',{key})};
     const task={spaceId:seed.spaceId,name:'assigned Cvent job',ownership:'agent',page:label=>{if(label!=='p1')throw new Error('Only assigned Page p1 is available');return page},userPage:()=>page,pages:async()=>[page],tabs:async()=>[{label:'p1',page,targetId:seed.targetId,title:await page.title(),url:await page.url(),active:true,openedBy:'agent'}],adopt:()=>page,newPage:blocked,release:blocked,cdp:blocked,waitForControl:async()=>true,handOff:()=>{throw new Error('Use cvent_login_handoff / Take Control')},finish:async()=>({keep:true})};
     const log=(...values)=>{void run('console',{values})};
     Object.assign(globalThis,{page,taskSpace:async()=>task,rr:seed.rr,desired:seed.desired,console:{log,warn:log,error:log},cliLog:log,
@@ -175,6 +188,7 @@ try{
   }
   async function pointDescriptor(x,y){return ego.evaluate(`(() => {let e=document.elementFromPoint(${JSON.stringify(x)},${JSON.stringify(y)});if(!e)return null;e=e.closest('button,a,input,select,textarea,[role],[contenteditable=true]')||e;return {tag:e.tagName,role:e.getAttribute('role'),text:(e.innerText||e.textContent||'').trim().slice(0,500),label:e.getAttribute('aria-label')||e.getAttribute('title')||'',aria:e.getAttribute('aria-label'),title:e.getAttribute('title'),name:e.getAttribute('name'),type:e.getAttribute('type'),editable:e.isContentEditable,controlValue:e.tagName==='INPUT'&&/^(?:submit|button|reset)$/i.test(e.type)?e.value:null,href:e instanceof HTMLAnchorElement?e.href:null,disabled:Boolean(e.disabled),connected:e.isConnected}})()`)}
   async function compactControlInventory(){return ego.evaluate(`(() => {const norm=value=>String(value||'').replace(/\\s+/g,' ').trim(),selectorFor=element=>element.id?'#'+CSS.escape(element.id):(element.getAttribute('name')?'[name="'+CSS.escape(element.getAttribute('name'))+'"]':element.getAttribute('data-cvent-id')?'[data-cvent-id="'+CSS.escape(element.getAttribute('data-cvent-id'))+'"]':element.getAttribute('data-testid')?'[data-testid="'+CSS.escape(element.getAttribute('data-testid'))+'"]':null),controls=[],seen=new Set();for(const element of document.querySelectorAll('input,select,textarea,button,[role=combobox],[contenteditable=true]')){if(seen.has(element))continue;seen.add(element);const type=(element.getAttribute('type')||'').toLowerCase(),style=getComputedStyle(element),box=element.getBoundingClientRect();if(type==='hidden'||!element.isConnected||box.width<=0||box.height<=0||style.display==='none'||style.visibility==='hidden')continue;const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):element.closest('label'),selector=selectorFor(element),name=norm(element.getAttribute('aria-label')||label?.innerText||element.getAttribute('title')||element.getAttribute('name')||element.innerText);if(!selector&&!name)continue;controls.push({tag:element.tagName,role:element.getAttribute('role'),label:name.slice(0,300),selector,type:type||null,value:type==='password'?null:('value' in element?String(element.value).slice(0,500):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null,options:element.tagName==='SELECT'?[...element.options].map(option=>({label:norm(option.textContent).slice(0,200),value:option.value,selected:option.selected,disabled:option.disabled})).slice(0,250):undefined});if(controls.length>=400)break}return {url:location.href,title:document.title,controls}})()`)}
+  async function compactTargetState(target){return ego.evaluateLocator(target,(element)=>{const rect=element.getBoundingClientRect(),style=getComputedStyle(element),type=(element.getAttribute('type')||'').toLowerCase(),editable=element.isContentEditable||element.getAttribute('contenteditable')==='true',attributeNames=['href','target','rel','title','name','placeholder','aria-label','aria-expanded','aria-checked','aria-selected','role','contenteditable','type'],attributes=Object.fromEntries(attributeNames.map(name=>[name,element.getAttribute(name)])),selection=element.ownerDocument.getSelection(),selectedText=selection?.rangeCount&&[...Array(selection.rangeCount)].some((_,index)=>{try{return selection.getRangeAt(index).intersectsNode(element)}catch{return false}})?selection.toString():'';const anchors=(element.matches?.('a[href]')?[element]:[]).concat([...element.querySelectorAll?.('a[href]')||[]]).slice(0,100),sourceHtml=editable?String(element.innerHTML||''):'';return {tag:element.tagName,role:element.getAttribute('role'),text:String(element.innerText||element.textContent||'').trim().slice(0,20000),value:type==='password'?null:('value' in element?String(element.value).slice(0,20000):null),checked:'checked' in element?Boolean(element.checked):null,enabled:!(('disabled' in element&&element.disabled)||element.getAttribute('aria-disabled')==='true'),visible:element.isConnected&&rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden',editable,attributes,href:element instanceof HTMLAnchorElement?element.href:null,selectedText,html:editable?sourceHtml.slice(0,20000):null,htmlTruncated:editable&&sourceHtml.length>20000,links:anchors.map(anchor=>({text:String(anchor.innerText||anchor.textContent||'').replace(/\s+/g,' ').trim().slice(0,1000),href:anchor.href,rawHref:anchor.getAttribute('href'),target:anchor.getAttribute('target'),rel:anchor.getAttribute('rel')}))}})}
   async function authorizeInteractive(step,descriptor){
     if(!descriptor||!descriptor.connected||descriptor.disabled)throw new Error('Action target is missing, disconnected, or disabled');
     if(simple&&step.intent==='read'&&['press','hover','focus','selectText'].includes(step.operation))return;
@@ -205,7 +219,7 @@ try{
       case 'pageInfo':return {page:await ego.pageInfo()};
       case 'snapshotText':return {snapshot:await ego.snapshot(step.options)};
       case 'screenshot':return {screenshotPath:await ego.screenshot({path:step.filePath,fullPage:step.fullPage===true})};
-      case 'readTarget':return {target:step.target,...await ego.evaluateLocator(step.target,(element)=>{const type=(element.getAttribute('type')||'').toLowerCase();return {text:(element.innerText||element.textContent||'').trim(),value:type==='password'?null:('value' in element?String(element.value):null),checked:'checked' in element?Boolean(element.checked):null}})};
+      case 'readTarget':return {target:step.target,...await compactTargetState(step.target)};
       case 'controlInventory':return {snapshotKind:'controlInventory',snapshot:JSON.stringify(await compactControlInventory(),null,2)};
       case 'sectionState':return await ego.evaluate(`(() => {const norm=v=>String(v||'').replace(/\\s+/g,' ').trim();return {url:location.href,title:document.title,rows:[...document.querySelectorAll('table tr,[role=row]')].slice(0,2000).map(r=>({text:norm(r.innerText||r.textContent).slice(0,5000),cells:[...r.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(c=>norm(c.innerText||c.textContent).slice(0,2000)),links:[...r.querySelectorAll('a[href]')].map(a=>({text:norm(a.innerText||a.textContent),href:a.href})).slice(0,20)})).filter(r=>r.text),headings:[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(e=>norm(e.innerText||e.textContent)).filter(Boolean),buttons:[...document.querySelectorAll('button,[role=button],input[type=submit]')].map(e=>norm(e.innerText||e.value||e.getAttribute('aria-label'))).filter(Boolean)}})()`);
       case 'visualHover':await ego.hover([step.x,step.y]);return {hovered:[step.x,step.y]};
@@ -223,6 +237,8 @@ try{
       case 'selectOption':{if(simple){await dispatch(step,()=>ego.selectOption(step.target,step.optionSpec));return {selected:step.optionSpec}}const d=await ego.evaluateLocator(step.target,e=>({tag:e.tagName,options:e.tagName==='SELECT'?[...e.options].map(o=>({label:String(o.textContent||'').replace(/\s+/g,' ').trim(),value:o.value,disabled:o.disabled})):[]}));if(d.tag==='SELECT'){const key=step.optionBy==='value'?'value':'label',matches=d.options.filter(option=>option[key]===String(step.option)&&!option.disabled);if(matches.length!==1)throw new Error(`Native Cvent combobox found ${matches.length} exact ${key} matches`);await dispatch(step,()=>ego.selectOption(step.target,{[key]:step.option}));return {selected:step.option}}if(step.optionBy==='value')throw new Error('Custom combobox requires exact option label');await ego.click(step.target);await ego.waitForTimeout(250);const option=await resolveTarget({target:`role:option[name="${String(step.option).replaceAll('"','\\"')}"]`});await dispatch(step,()=>ego.click(option.target));return {selected:step.option}}
       case 'setChecked':await dispatch(step,()=>ego.setChecked(step.target,Boolean(step.checked)));return {checked:Boolean(step.checked)};
       case 'press':await dispatch(step,async()=>{if(step.target)await ego.focus(step.target);await ego.press(step.key)});return {pressed:step.key};
+      case 'keyDown':if(!/^(?:Shift|Control|Meta)$/i.test(step.key))throw Error('EGO_CAPABILITY_UNAVAILABLE: keyboard.down is limited to selection modifiers Shift, Control, and Meta');await ego.down(step.key);return {keyDown:step.key};
+      case 'keyUp':if(!/^(?:Shift|Control|Meta)$/i.test(step.key))throw Error('EGO_CAPABILITY_UNAVAILABLE: keyboard.up is limited to selection modifiers Shift, Control, and Meta');await ego.up(step.key);return {keyUp:step.key};
       case 'search':await dispatch(step,async()=>{await ego.fill(step.target,step.text??'');if(step.submit!==false)await ego.press('Enter')});return {query:step.text??''};
       case 'selectText':return {selected:await ego.evaluateLocator(step.target,(element)=>{const range=document.createRange(),selection=getSelection();range.selectNodeContents(element);selection.removeAllRanges();selection.addRange(range);element.closest('[contenteditable=true]')?.focus();return selection.toString()})};
       case 'drag':await dispatch(step,()=>ego.drag([step.target,step.destination],{delay:75}));return {dragged:true};
@@ -287,8 +303,7 @@ try{
       break;
     }
     case 'readTarget': {
-      const state=await ego.evaluateLocator(params.target,(element)=>{const rect=element.getBoundingClientRect(),style=getComputedStyle(element),type=(element.getAttribute('type')||'').toLowerCase();return {text:(element.innerText||element.textContent||'').trim(),value:type==='password'?null:('value' in element?String(element.value):null),checked:'checked' in element?Boolean(element.checked):null,enabled:!(('disabled' in element&&element.disabled)||element.getAttribute('aria-disabled')==='true'),visible:element.isConnected&&rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'}});
-      result={target:params.target,...state};
+      result={target:params.target,...await compactTargetState(params.target)};
       break;
     }
     case 'sectionState': {
@@ -363,7 +378,7 @@ try{
       const target=value=>typeof value==='string'?value.replace(/^loc=role:/,'role:').replace(/^loc=css:/,''):value;
       const planned=simple?null:planNativeRound(params.script,params,domainItems);
       const plannedSave=simple?null:await preflightAtomic(planned);
-      const readOps=new Set(['pageInfo','snapshotText','screenshot','readTarget','scroll','wait','navigate','hover','visualHover','focus']);
+      const readOps=new Set(['pageInfo','snapshotText','screenshot','readTarget','scroll','wait','navigate','hover','visualHover','focus','keyDown','keyUp']);
       async function runSimple(op,args){
         actionIndex=completedActions.length;
         // The router already owns this authenticated profile/target. Reads must
@@ -376,7 +391,7 @@ try{
         if(!passive){
           const d=args.target?(await resolveTarget({target:args.target})).descriptor:args.x!==undefined?await pointDescriptor(args.x,args.y):await ego.evaluate(`(() => {const e=document.activeElement;if(!e)return null;const label=e.id?document.querySelector('label[for="'+CSS.escape(e.id)+'"]'):e.closest('label');return {tag:e.tagName,role:e.getAttribute('role'),type:e.getAttribute('type'),editable:e.isContentEditable,name:e.getAttribute('name'),text:(e.innerText||'').slice(0,500),label:label?.innerText||'',aria:e.getAttribute('aria-label'),title:e.getAttribute('title'),connected:e.isConnected,disabled:Boolean(e.disabled)}})()`);
           const labels=['text','label','aria','title','name','controlValue'].map(k=>normalize(d?.[k]));
-          const safeKey=op==='press'&&/^(?:(?:Shift\+)?Tab|Escape|Arrow(?:Up|Down|Left|Right)|Home|End|PageUp|PageDown|(?:ControlOrMeta|Control|Meta)\+[ac])$/i.test(args.key);
+          const safeKey=['keyDown','keyUp'].includes(op)||op==='press'&&/^(?:Escape|(?:(?:Shift|ControlOrMeta|Control|Meta)\+)?(?:Tab|Arrow(?:Up|Down|Left|Right)|Home|End|PageUp|PageDown)|(?:ControlOrMeta|Control|Meta)\+[ac])$/i.test(args.key);
           if(op==='press'&&/^(?:Backspace|Delete)$/i.test(args.key)&&!(['INPUT','TEXTAREA'].includes(d?.tag)||d?.editable))throw Error('Destructive keyboard operation outside an editable control blocked');
           step.dataChange=!safeKey&&(isDataAction(op,args)||['drag','visualDrag'].includes(op)||(['click','visualClick','visualDoubleClick'].includes(op)&&(['checkbox','radio','switch'].includes(String(d?.role).toLowerCase())||['checkbox','radio'].includes(String(d?.type).toLowerCase()))));
           step.isSave=!safeKey&&(labels.some(s=>/^save(?:\s|$)/i.test(s))||op==='press'&&/^(?:ControlOrMeta|Control|Meta)\+s$/i.test(args.key));

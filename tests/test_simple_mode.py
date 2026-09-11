@@ -24,8 +24,8 @@ class SimpleModeTests(unittest.TestCase):
 import fs from 'node:fs';
 let state=JSON.parse(fs.readFileSync('fake-page.json','utf8'));
 const store=()=>fs.writeFileSync('fake-page.json',JSON.stringify(state));
-const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@bare-title':'* Title:','@code':'Event Code','@field':'Venue','@check':'Enabled','@select':'Choice','@file':'Upload'};
-function descriptor(target){if(!labels[target])throw Error('Stale ref / control not found');return {tag:['@field','@identity','@code','@file','@check'].includes(target)?'INPUT':target==='@select'?'SELECT':'BUTTON',label:labels[target],role:target==='@check'?'checkbox':null,connected:true,disabled:false,value:state.value,documentUrl:process.env.FRAME_URL||state.url,options:[{label:'Choice',value:'choice',disabled:false}]}}
+const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@bare-title':'* Title:','@code':'Event Code','@field':'Venue','@check':'Enabled','@select':'Choice','@file':'Upload','@link':'Show Hours','@editor':'Editor'};
+function descriptor(target){if(!labels[target])throw Error('Stale ref / control not found');return {tag:['@field','@identity','@code','@file','@check'].includes(target)?'INPUT':target==='@select'?'SELECT':target==='@link'?'A':target==='@editor'?'DIV':'BUTTON',label:labels[target],role:target==='@check'?'checkbox':target==='@editor'?'textbox':null,connected:true,disabled:false,value:state.value,documentUrl:process.env.FRAME_URL||state.url,options:[{label:'Choice',value:'choice',disabled:false}]}}
 export async function listTabs(){return [{id:'target'}]}
 export async function switchTab(){}
 export async function pageInfo(){return {url:state.url,title:'Selected Event'}}
@@ -38,12 +38,14 @@ export async function evaluate(expression){
  if(expression.includes('const wanted='))return true;
  return false;
 }
-export async function evaluateLocator(target){return descriptor(target)}
+export async function evaluateLocator(target,fn){const d=descriptor(target);if(String(fn).includes('attributeNames=')){const link={text:'Show Hours',href:'https://bdny.com/about-bdny/',rawHref:'https://bdny.com/about-bdny/',target:'_blank',rel:null};return {...d,text:d.label,value:target==='@field'?state.value:null,checked:target==='@check'?Boolean(state.value):null,enabled:true,visible:true,editable:target==='@editor',attributes:{href:target==='@link'?link.href:null,target:target==='@link'?'_blank':null,rel:null,title:null,name:null,placeholder:null,'aria-label':null,'aria-expanded':null,'aria-checked':null,'aria-selected':null,role:d.role,contenteditable:target==='@editor'?'true':null,type:null},href:target==='@link'?link.href:null,selectedText:target==='@editor'?'Show Hours':'',html:target==='@editor'?'<p><a href="https://bdny.com/about-bdny/">Show Hours</a></p>':null,htmlTruncated:false,links:target==='@editor'?[link]:target==='@link'?[link]:[]}}return d}
 export async function fill(target,text){state.value=text;if(!state.editor)state.persisted=text;store();if(text==='hiccup')throw Error('Recoverable field dispatch hiccup')}
 export async function focus(target){state.focused=target;store()}
 export async function insertText(text){return fill(state.focused||'@field',text)}
 export async function click(target){descriptor(target);if(target==='@save'){state.persisted=state.value;state.editor=false;store();if(process.env.SAVE_THROW)throw Error('Save response lost')}if(target==='@edit'){state.editor=true;store()}}
 export async function press(){}
+export async function down(){}
+export async function up(){}
 export async function snapshot(){return JSON.stringify(state)}
 export async function screenshot(){return 'browser-visual-test.png'}
 export async function waitForTimeout(){}
@@ -98,6 +100,28 @@ export async function setInputFiles(target,files){state.files=files;store()}
         self.assertTrue(observed['ok'],observed)
         self.assertEqual(observed['readbacks'],1)
         self.assertEqual(json.loads(self.state.read_text())['persisted'],'new')
+
+    def test_compact_locator_reads_link_editor_and_selection_state(self):
+        _, r=self.run_simple("const link=page.locator('@link'); console.log(await link.getAttribute('href')); const editor=await page.readTarget('@editor'); console.log(JSON.stringify({selectedText:editor.selectedText,html:editor.html,links:editor.links}));")
+        self.assertTrue(r['ok'],r)
+        self.assertEqual(r['logs'][0],'https://bdny.com/about-bdny/')
+        rich=json.loads(r['logs'][1]);self.assertEqual(rich['selectedText'],'Show Hours')
+        self.assertEqual(rich['links'][0]['href'],'https://bdny.com/about-bdny/')
+        self.assertIn('<a href=',rich['html'])
+
+    def test_selection_keyboard_is_native_but_not_a_data_write(self):
+        _, r=self.run_simple("await page.focus('@editor'); await page.keyboard.press('Shift+End'); await page.keyboard.down('Shift'); await page.keyboard.press('ArrowLeft'); await page.keyboard.up('Shift');")
+        self.assertTrue(r['ok'],r)
+        self.assertEqual(r['writesAttempted'],0)
+        self.assertFalse(mutation_outcome(self.folder)['unresolved'])
+
+    def test_missing_popup_wait_is_an_actionable_zero_dispatch_capability_error(self):
+        _, r=self.run_simple("const popup=page.waitForEvent('popup'); await page.click('@edit'); await popup;")
+        self.assertFalse(r['ok'],r)
+        self.assertIn('EGO_CAPABILITY_UNAVAILABLE',r['error'])
+        self.assertIn('opens in assigned Page p1',r['error'])
+        self.assertEqual(r['writesAttempted'],0)
+        self.assertEqual(r['completedActions'],[])
 
     def test_original_rr_available_without_any_compiler_artifact(self):
         _, r=self.run_simple("console.log(rr.sheets[0].populated_rows[0][0]); console.log(desired);")
