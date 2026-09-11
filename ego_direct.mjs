@@ -372,7 +372,8 @@ try{
     case 'uploadDiscountImport': await ego.setInputFiles(params.target,params.filePath);result={uploadedArtifact:'discount-import.xlsx'};break;
     case 'navigate': {
       const navigation=await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??30),180)*1000)});
-      if(runtime.accessMode!=='read_only_inventory')await assertAuthorizedPage();
+      const lockPath=path.join(path.dirname(runtimePath),'authorized-target.json');let hasTargetLock=false;try{const lock=JSON.parse(fs.readFileSync(lockPath,'utf8'));hasTargetLock=lock.browser_runtime_id===runtime.browserRuntimeId&&String(lock.event_key||'').toLowerCase()===String(runtime.authorizedEventKey||'').toLowerCase()}catch{}
+      if(runtime.accessMode!=='read_only_inventory'&&hasTargetLock)await assertAuthorizedPage();
       result={result:navigation};break;
     }
     case 'wait': {

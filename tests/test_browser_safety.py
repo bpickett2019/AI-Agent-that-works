@@ -317,7 +317,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         # A legitimate keyless Cvent transition may be attempted, but the Ego
         # executor must prove selected-event identity after it lands.
         browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/home','intent':'read'})
-        self.assertIn("if(runtime.accessMode!=='read_only_inventory')await assertAuthorizedPage()",EGO_DIRECT)
+        self.assertIn("if(runtime.accessMode!=='read_only_inventory'&&hasTargetLock)await assertAuthorizedPage()",EGO_DIRECT)
         browser_tool.guard(self.runtime,'navigate',{'url':'https://events.app.cvent.com/events/details?evtstub=locked','intent':'read'})
         with self.assertRaisesRegex(RuntimeError,'account-global'):
             browser_tool.guard(self.runtime,'navigate',{'url':'https://app.cvent.com/account/settings','intent':'read'})
