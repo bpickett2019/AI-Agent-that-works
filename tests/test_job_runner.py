@@ -48,6 +48,26 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--mode") + 1], "json")
         self.assertEqual(command[-1], "job prompt")
 
+    def test_simple_launcher_has_only_browser_and_lifecycle_tools(self):
+        with patch.dict(os.environ, {'CVENT_EXECUTION_MODE':'simple'}):
+            command=self.runner.pi_command(self.job,self.directory,{},'mission')
+            prompt=self.runner.render_prompt(self.job,self.directory,{})
+            environment=self.runner.environment(self.job,'lease',1)
+        self.assertEqual(set(command[command.index('--tools')+1].split(',')), {'read','bash','cvent_open_event','cvent_login_handoff','cvent_job_update','cvent_finish'})
+        self.assertIn('You own the whole mission',prompt)
+        self.assertNotIn('ROUND_PLANNING_ERROR',prompt)
+        self.assertEqual(environment['CVENT_EXECUTION_MODE'],'simple')
+
+    def test_simple_optional_compiler_failure_preserves_original_evidence(self):
+        original=self.directory/'input.inspection.json';original.write_text('{"sheets":[{"name":"Unrecognized RR layout"}]}')
+        (self.directory/'expected-domains.json').write_text('{"stale":true}')
+        def run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0 if command[1].endswith('inspect_rr.py') else 1, '', 'Unknown compiler layout')
+        with patch.dict(os.environ, {'CVENT_EXECUTION_MODE':'simple'}), patch('job_runner.job_dir',return_value=self.directory), patch.object(subprocess,'run',side_effect=run):
+            self.assertEqual(self.runner.prepare_rr(self.job,1),{})
+        self.assertTrue(original.exists())
+        self.assertFalse((self.directory/'expected-domains.json').exists())
+
     def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
         first = self.runner.environment(self.job, "lease-token", 1)
         same = self.runner.environment(dict(self.job, id="job_next"), "lease-next", 1)

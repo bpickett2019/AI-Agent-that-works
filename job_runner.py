@@ -200,6 +200,7 @@ class JobRunner:
             "CVENT_AUTHORIZED_EVENT_NAME": job["event_name"], "CVENT_AUTHORIZED_EVENT_KEY": job["event_key"],
             "CVENT_AUTHORIZED_EVENT_CODE": str(job.get("event_code") or ""),
             "CVENT_PI_PROVIDER": pi_provider(), "CVENT_PI_MODEL": pi_model(),
+            "CVENT_EXECUTION_MODE": os.environ.get("CVENT_EXECUTION_MODE", "controlled"),
             "CVENT_PYTHON": sys.executable,
             "PI_CODING_AGENT_DIR": str(directory / "pi-config"), "PI_CODING_AGENT_SESSION_DIR": str(directory / "pi-sessions"),
             "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
@@ -282,6 +283,11 @@ class JobRunner:
             timings.append({"stage": stage, "durationMs": round((time.monotonic() - started) * 1000, 1)})
             if completed.returncode:
                 detail = (completed.stderr or completed.stdout).strip().splitlines()
+                if os.environ.get('CVENT_EXECUTION_MODE') == 'simple' and stage != 'rr_load_inspection':
+                    for name in ('expected-domains.json', 'rr-validation.json', 'configuration-plan.json'):
+                        (directory / name).unlink(missing_ok=True)
+                    append_log(directory, 'Optional RR compiler unavailable; Pi will use original sheet/cell evidence: ' + (detail[-1] if detail else stage))
+                    return {}
                 raise RuntimeError("RR preflight failed: " + (detail[-1] if detail else "approved helper failed"))
         expected = read_json(directory / "expected-domains.json", {})
         validation = read_json(directory / "rr-validation.json", {})
@@ -390,6 +396,8 @@ class JobRunner:
                 f"/api/jobs/{job['id']}/viewer",
                 profile_path=browser_profile_dir(job["workspace_id"], active.slot_id),
             )
+            runtime['executionMode'] = os.environ.get('CVENT_EXECUTION_MODE', 'controlled')
+            atomic_json(directory / 'browser-runtime.json', runtime)
             BrowserGate(directory).initialize()
             prompt = self.render_prompt(job, directory, runtime)
             self._write_pi_settings(directory)
@@ -587,7 +595,7 @@ class JobRunner:
 
     def pi_command(self, job: dict[str, Any], directory: Path, state: dict[str, Any], prompt: str) -> list[str]:
         sessions = directory / "pi-sessions"
-        capability_tools = (
+        capability_tools = "read,bash,cvent_open_event,cvent_login_handoff,cvent_job_update,cvent_finish" if os.environ.get('CVENT_EXECUTION_MODE') == 'simple' else (
             "read,bash,cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
             "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_section_state,cvent_execute_section,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
@@ -645,7 +653,7 @@ class JobRunner:
             "AUTHORIZED_EVENT_NAME": job["event_name"], "AUTHORIZED_EVENT_ID": job["event_id"],
             "AUTHORIZED_EVENT_KEY": job["event_key"],
         }
-        text = (ROOT / "PI_PROMPT.md").read_text()
+        text = (ROOT / ("PI_SIMPLE_PROMPT.md" if os.environ.get("CVENT_EXECUTION_MODE") == "simple" else "PI_PROMPT.md")).read_text()
         for key, value in values.items():
             text = text.replace("{{" + key + "}}", value)
         unresolved = re.findall(r"{{[A-Z0-9_]+}}", text)

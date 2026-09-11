@@ -348,7 +348,12 @@ def run_direct(runtime_path,runtime,tool,operation,params):
         action_writes=0
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
-        if operation=='script':
+        if operation=='script' and runtime.get('executionMode')=='simple':
+            if set(params)-{'intent','script','timeoutSeconds'} or params.get('intent')!='read' or not isinstance(params.get('script'),str) or len(params['script'])>50000:
+                raise RuntimeError('Invalid native Ego script transport')
+            # No mutation is authorized here. Native dispatch checks live target,
+            # lease and permanent controls only when the script takes an action.
+        elif operation=='script':
             if set(params)-{'intent','domain','commitMode','rrSources','script','timeoutSeconds'} or not isinstance(params.get('script'),str) or len(params['script'])>50000:
                 raise RuntimeError('Invalid native Ego round')
             if params.get('commitMode') not in ('save','autosave','read_only') or not isinstance(params.get('rrSources'),list):
@@ -370,6 +375,8 @@ def run_direct(runtime_path,runtime,tool,operation,params):
                 audit_scope_write(operation,params,current,'uncertain_timeout',error)
                 mark_mutation_uncertain(operation,params,current,error)
             if is_write:raise RuntimeError('Browser mutation outcome is uncertain after helper timeout; automatic replay is blocked') from error
+            if runtime.get('executionMode')=='simple' and operation=='script':
+                raise RuntimeError('Ego helper timed out; inspect the same browser/editor and durable action audit before replaying any possibly persisted action') from error
             raise RuntimeError('Browser read helper timed out; no mutation was dispatched') from error
     result=child_result(proc);result['router']=tool
     if operation=='openAuthorizedEvent' and not proc.returncode and result.get('ok'):

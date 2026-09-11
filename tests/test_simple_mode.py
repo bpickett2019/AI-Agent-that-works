@@ -1,0 +1,185 @@
+"""Execute the actual Simple Mode wrapper with fake browser I/O, never Cvent."""
+import json
+import os
+import subprocess
+import unittest
+from unittest.mock import patch
+from contextlib import nullcontext
+
+import browser_tool
+from mutation_outcome import mutation_outcome
+import test_runtime_failure_regressions as regressions
+
+
+class SimpleModeTests(unittest.TestCase):
+    def setUp(self):
+        regressions.AdapterFailureTests.setUp(self)
+        self.runtime.update(executionMode='simple', authorizedEventName='Selected Event', authorizedEventId='test-event')
+        (self.folder/'browser-runtime.json').write_text(json.dumps(self.runtime))
+        (self.folder/'authorized-target.json').write_text(json.dumps({'browser_runtime_id':'cvent-runtime-test','event_key':'test-event','name':'Selected Event'}))
+        (self.folder/'input.inspection.json').write_text(json.dumps({'sheets':[{'name':'Original RR','populated_rows':[[{'cell':'B1','value':'Verified intent'}]]}]}))
+        self.state = self.folder/'fake-page.json'
+        self.state.write_text(json.dumps({'url':'https://app.cvent.com/edit?evtstub=test-event','editor':True,'value':'old','persisted':'old'}))
+        (self.folder/'vendor/ego-browser-linux/dist/src/helpers.js').write_text(r'''
+import fs from 'node:fs';
+let state=JSON.parse(fs.readFileSync('fake-page.json','utf8'));
+const store=()=>fs.writeFileSync('fake-page.json',JSON.stringify(state));
+const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@code':'Event Code','@field':'Venue','@check':'Enabled','@select':'Choice','@file':'Upload'};
+function descriptor(target){if(!labels[target])throw Error('Stale ref / control not found');return {tag:['@field','@identity','@code','@file','@check'].includes(target)?'INPUT':target==='@select'?'SELECT':'BUTTON',label:labels[target],role:target==='@check'?'checkbox':null,connected:true,disabled:false,value:state.value,documentUrl:process.env.FRAME_URL||state.url,options:[{label:'Choice',value:'choice',disabled:false}]}}
+export async function listTabs(){return [{id:'target'}]}
+export async function switchTab(){}
+export async function pageInfo(){return {url:state.url,title:'Selected Event'}}
+export async function evaluate(expression){
+ if(expression.includes('__CVENT_BROWSER_RUNTIME_ID'))return 'cvent-runtime-test';
+ if(expression.includes('document.activeElement'))return descriptor(state.focused||'@field');
+ if(expression.includes('controls=[],seen'))return {controls:state.editor?[{label:'Save'}]:[]};
+ if(expression.includes('hasSelectedName'))return {ready:'complete',hasSelectedName:true,hasSelectedHeading:true,hasLogin:false,keys:['test-event'],hasExpectedKey:true};
+ if(expression.includes('const wanted='))return true;
+ return false;
+}
+export async function evaluateLocator(target){return descriptor(target)}
+export async function fill(target,text){state.value=text;if(!state.editor)state.persisted=text;store();if(text==='hiccup')throw Error('Recoverable field dispatch hiccup')}
+export async function focus(target){state.focused=target;store()}
+export async function insertText(text){return fill(state.focused||'@field',text)}
+export async function click(target){descriptor(target);if(target==='@save'){state.persisted=state.value;state.editor=false;store();if(process.env.SAVE_THROW)throw Error('Save response lost')}if(target==='@edit'){state.editor=true;store()}}
+export async function press(){}
+export async function snapshot(){return JSON.stringify(state)}
+export async function screenshot(){return 'browser-visual-test.png'}
+export async function waitForTimeout(){}
+export async function waitForLoadState(){}
+export async function waitForSelector(target){descriptor(target)}
+export async function goto(url){state.url=url;store()}
+export async function hover(){}
+export async function wheel(){}
+export async function selectOption(target,option){state.value=option;store()}
+export async function setChecked(target,checked){state.value=checked;store()}
+export async function setInputFiles(target,files){state.files=files;store()}
+''')
+
+    tearDown = regressions.AdapterFailureTests.tearDown
+
+    def run_simple(self, script, **extra):
+        env={k:v for k,v in os.environ.items() if not k.startswith('CVENT_')}
+        env.update(CVENT_ENV='development', **extra)
+        p=subprocess.run(['node','ego_direct.mjs','--runtime',str(self.folder/'browser-runtime.json'),'--operation','script','--params',json.dumps({'intent':'read','script':script})],cwd=self.folder,env=env,capture_output=True,text=True,timeout=15)
+        return p, browser_tool.child_result(p)
+
+    def test_normal_variable_loop_and_split_save_need_no_metadata_or_plan(self):
+        _, first=self.run_simple("const task=await taskSpace('mission'); const p=task.page('p1'); for(const value of ['one','two']) await p.fill('@field',value); await p.keyboard.press('Tab'); console.log(await p.snapshot());")
+        self.assertTrue(first['ok'],first)
+        self.assertEqual(first['writesAttempted'],2)
+        self.assertFalse(mutation_outcome(self.folder)['unresolved'])
+        _, second=self.run_simple("await page.click('@save'); console.log(await page.snapshot());")
+        self.assertTrue(second['ok'],second)
+        self.assertEqual(second['saves'],1)
+        self.assertEqual(second['readbacks'],1)
+        self.assertEqual(json.loads(self.state.read_text())['persisted'],'two')
+        self.assertFalse((self.folder/'browser-mutation-uncertain.json').exists())
+        self.assertTrue((self.folder/'browser-last-atomic-readback.json').exists())
+
+    def test_pre_save_hiccup_and_stale_ref_do_not_create_holds_or_prevent_recovery(self):
+        _, failed=self.run_simple("await page.fill('@field','hiccup');")
+        self.assertFalse(failed['ok'])
+        self.assertFalse(failed['unresolvedWrites'])
+        self.assertFalse(mutation_outcome(self.folder)['unresolved'])
+        _, failed=self.run_simple("await page.click('@missing');")
+        self.assertFalse(failed['unresolvedWrites'])
+        _, recovered=self.run_simple("console.log(await page.snapshot()); await page.fill('@field','recovered'); await page.click('@save'); console.log(await page.snapshot());")
+        self.assertTrue(recovered['ok'],recovered)
+
+    def test_persisted_save_response_loss_retains_evidence_but_allows_inspection(self):
+        self.run_simple("await page.fill('@field','new');")
+        _, failed=self.run_simple("await page.click('@save');", SAVE_THROW='1')
+        self.assertTrue(failed['unresolvedWrites'])
+        self.assertTrue(mutation_outcome(self.folder)['unresolved'])
+        self.assertFalse((self.folder/'browser-mutation-uncertain.json').exists())
+        _, observed=self.run_simple("console.log(await page.snapshot());")
+        self.assertTrue(observed['ok'],observed)
+        self.assertEqual(observed['readbacks'],1)
+        self.assertEqual(json.loads(self.state.read_text())['persisted'],'new')
+
+    def test_original_rr_available_without_any_compiler_artifact(self):
+        _, r=self.run_simple("console.log(rr.sheets[0].populated_rows[0][0]); console.log(desired);")
+        self.assertTrue(r['ok'],r)
+        self.assertIn('Verified intent',r['logs'][0])
+
+    def test_reads_and_navigation_work_without_target_write_authority(self):
+        (self.folder/'authorized-target.json').unlink()
+        _, r=self.run_simple("console.log(await page.snapshot()); await page.goto('https://app.cvent.com/events2/eventselection'); console.log(await page.info());")
+        self.assertTrue(r['ok'],r)
+        _, r=self.run_simple("await page.fill('@field','no');")
+        self.assertFalse(r['ok'])
+        self.assertEqual(r['writesAttempted'],0)
+
+    def test_same_event_route_and_origin_changes_work(self):
+        _, r=self.run_simple("await page.goto('https://events.app.cvent.com/details?evtstub=test-event'); await page.fill('@field','same event');")
+        self.assertTrue(r['ok'],r)
+        _, r=self.run_simple("await page.goto('https://events.app.cvent.com/keyless-config'); await page.fill('@field','same keyless event');")
+        self.assertTrue(r['ok'],r)
+
+    def test_cross_event_page_and_frame_writes_are_blocked(self):
+        _, r=self.run_simple("await page.goto('https://app.cvent.com/view?evtstub=another'); await page.fill('@field','no');")
+        self.assertFalse(r['ok'])
+        self.assertEqual(r['writesAttempted'],0)
+        self.state.write_text(json.dumps({'url':'https://app.cvent.com/view?evtstub=test-event','editor':True,'value':'old'}))
+        _, r=self.run_simple("await page.fill('@field','no');", FRAME_URL='https://app.cvent.com/view?evtstub=another')
+        self.assertFalse(r['ok'])
+        self.assertEqual(r['writesAttempted'],0)
+
+    def test_permanent_control_blocks(self):
+        for ref in ['delete','archive','remove','publish','send','schedule','test-send','new']:
+            with self.subTest(ref=ref):
+                _, r=self.run_simple(f"await page.click('@{ref}');")
+                self.assertFalse(r['ok'],r)
+                self.assertEqual(r['writesAttempted'],0)
+        for ref in ['identity','code']:
+            _, r=self.run_simple(f"await page.fill('@{ref}','no');")
+            self.assertFalse(r['ok'],r)
+            self.assertEqual(r['writesAttempted'],0)
+
+    def test_attendee_contact_account_and_shared_writes_blocked(self):
+        for area in ['attendees','contacts','account','global','library']:
+            _, r=self.run_simple(f"await page.goto('https://app.cvent.com/{area}/edit?evtstub=test-event'); await page.fill('@field','no');")
+            self.assertFalse(r['ok'],r)
+            self.assertEqual(r['writesAttempted'],0)
+
+    def test_destructive_url_navigation_blocked(self):
+        for op in ['Delete','Archive','Publish','CreateEvent','SendEmail']:
+            _, r=self.run_simple(f"await page.goto('https://app.cvent.com/config/{op}?evtstub=test-event');")
+            self.assertFalse(r['ok'],r)
+            self.assertEqual(r['writesAttempted'],0)
+
+    def test_no_general_node_host_escape_or_raw_protocol(self):
+        attacks=["page.info.constructor('return process')()", "(await page.info()).constructor.constructor('return process')()", "try { await page.click('@missing') } catch(e) { e.constructor.constructor('return process')() }", "await import('node:fs')", "await page.evaluate('fetch(\"/Delete\")')", "await page.cdp('Runtime.evaluate',{})", "process.exit(0)"]
+        for script in attacks:
+            with self.subTest(script=script):
+                _, r=self.run_simple(script)
+                self.assertFalse(r['ok'],r)
+                self.assertEqual(r['writesAttempted'],0)
+
+    def test_uploads_only_job_owned_regular_files_including_array_api(self):
+        (self.folder/'uploads').mkdir()
+        file=self.folder/'uploads'/'asset.txt';file.write_text('RR asset')
+        _, r=self.run_simple(f"await page.setInputFiles('@file',[{json.dumps(str(file))}]);")
+        self.assertTrue(r['ok'],r)
+        link=self.folder/'uploads'/'escape';link.symlink_to(self.state)
+        _, r=self.run_simple(f"await page.setInputFiles('@file',{json.dumps(str(link))});")
+        self.assertFalse(r['ok'],r)
+        self.assertEqual(r['writesAttempted'],0)
+
+    def test_lease_loss_blocks_before_dispatch(self):
+        _, r=self.run_simple("await page.fill('@field','no');",CVENT_JOB_ID='test-job')
+        self.assertFalse(r['ok'])
+        self.assertIn('lease context',r['error'])
+        self.assertEqual(r['writesAttempted'],0)
+
+    def test_real_extension_bypasses_controller_and_records_pi_verification(self):
+        p=subprocess.run(['node','tests/simple_extension.mjs'],cwd=regressions.ROOT,text=True,capture_output=True,timeout=30)
+        self.assertEqual(p.returncode,0,(p.stdout+p.stderr)[-9000:])
+
+    def test_router_does_not_require_rr_sources_or_atomic_shape(self):
+        proc,r=self.run_simple("await page.fill('@field','split edit');")
+        with patch.object(browser_tool,'CURRENT',self.folder),patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()),patch.object(browser_tool,'guard',return_value={'url':'https://app.cvent.com/view?evtstub=test-event'}),patch.object(browser_tool.subprocess,'run',return_value=proc):
+            routed=browser_tool.run_direct(self.folder/'browser-runtime.json',self.runtime,'ego','script',{'intent':'read','script':"await page.fill('@field','split edit');"})
+        self.assertTrue(routed['ok'],routed)
+        self.assertFalse(mutation_outcome(self.folder)['unresolved'])

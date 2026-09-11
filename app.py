@@ -326,10 +326,15 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
             if provider_failure.lower() not in str(state.get("current_action", "")).lower():
                 state["current_action"] = f"{provider_failure}; {state.get('current_action', 'agent stopped')}"
     from completion_state import verified_completed_stages
-    state["completed"] = verified_completed_stages(state,
-        read_json(directory / "domain-results.json", {}),
-        read_json(directory / "final-verification.json", {}),
-        read_json(directory / "rr-validation.json", {}))
+    if read_json(directory / 'browser-runtime.json', {}).get('executionMode') == 'simple':
+        state['run_mode'] = 'simple'
+        # Pi owns its checklist; do not erase its progress using legacy domains.
+        state['completed'] = state.get('completed', [])
+    else:
+        state["completed"] = verified_completed_stages(state,
+            read_json(directory / "domain-results.json", {}),
+            read_json(directory / "final-verification.json", {}),
+            read_json(directory / "rr-validation.json", {}))
     state["automation_scope"] = scope_summary()
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)
