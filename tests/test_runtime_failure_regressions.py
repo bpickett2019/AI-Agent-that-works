@@ -37,7 +37,7 @@ export async function pageInfo(){return {url:'https://app.cvent.com/view?evtstub
 export async function waitForTimeout(){}
 export async function screenshot(){return '/offline/screenshot.png'}
 export async function snapshot(){if(process.env.CASE==='middle')throw Error('real snapshot failure');if(process.env.CASE==='string')throw 'real non-Error failure';return 'semantic snapshot'}
-export async function evaluateLocator(target){if(process.env.CASE==='writes')return {tag:target==='@save'?'BUTTON':'INPUT',connected:true,disabled:false,label:target==='@save'?'Save':target==='@delete'?'Delete':'Description'};throw Error('real target missing before dispatch')}
+export async function evaluateLocator(target){if(process.env.CASE==='writes')return {tag:['@save','@edit'].includes(target)?'BUTTON':'INPUT',connected:true,disabled:false,label:target==='@save'?'Save':target==='@edit'?'Edit':target==='@delete'?'Delete':'Description'};throw Error('real target missing before dispatch')}
 export async function click(){return true}
 export async function fill(target,text){if(process.env.CASE==='writes'){if(text==='fail')throw Error('real dispatched mutation failure');return true}throw Error('MUTATION SHOULD NOT HAVE BEEN DISPATCHED')}
 ''')
@@ -82,6 +82,12 @@ await click('@save'); await wait(0.1); cliLog(await snapshotText());
         self.assertEqual(result['saves'], 1)
         self.assertEqual(result['readbacks'], 1)
         self.assertEqual(result['actionCount'], 6)
+
+    def test_native_edit_button_is_navigation_not_an_uncertain_write(self):
+        proc, result = self.run_native("await click('@edit'); cliLog(await snapshotText());")
+        self.assertEqual(proc.returncode, 0, result)
+        self.assertEqual(result['writesAttempted'], 0)
+        self.assertEqual(result['saves'], 0)
 
     def test_native_holds_only_nonverified_source_and_blocks_protected_actions(self):
         for script, error in [("await fillInput('@input','x',{rrSource:'RR!B2'})", 'VERIFIED'),

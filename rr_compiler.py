@@ -31,7 +31,7 @@ TARGET = {
     "eventCode": os.environ.get("CVENT_AUTHORIZED_EVENT_CODE", ""),
     "lifecyclePolicy": {
         "mustPreserveObservedStatus": True,
-        "writableStatuses": [value.strip() for value in os.environ.get("CVENT_WRITABLE_EVENT_STATUSES", "draft,active,open,completed").split(",") if value.strip()],
+        "writableStatuses": [value.strip() for value in os.environ.get("CVENT_WRITABLE_EVENT_STATUSES", "draft,upcoming,active,open,completed").split(",") if value.strip()],
     },
 }
 

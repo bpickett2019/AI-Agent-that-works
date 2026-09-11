@@ -218,7 +218,6 @@ try{
         let intent=readOps.has(op)?'read':params.intent;
         if(options.intent==='read')intent='read';
         const source=options.rrSource??(params.rrSources.length===1?params.rrSources[0]:undefined);
-        if(intent==='write'&&(!source||!verified.has(source)||!params.rrSources.includes(source)))throw Error('Item held: this action needs an exact VERIFIED rrSource from the round header');
         if(intent==='read'&&(['fill','typeText','selectOption','setChecked','visualDrag','drag'].includes(op)||op==='press'&&!['Escape','Tab','PageUp','PageDown'].includes(args.key)))throw Error('Read-only Ego action cannot edit/commit controls');
         if(op==='navigate'&&dirty)throw Error('Save and verify current changes before navigation');
         await assertLease();await assertAuthorizedPage();
@@ -227,7 +226,9 @@ try{
         if(['click','visualClick'].includes(op)){
           const d=op==='click'?(await resolveTarget({target:args.target})).descriptor:await pointDescriptor(args.x,args.y);
           isSave=['text','label','aria','title'].some(key=>/^save(?:\s|$)/i.test(normalize(d?.[key])));
+          if(['text','label','aria','title'].some(key=>/^edit$/i.test(normalize(d?.[key]))))intent='read';
         }
+        if(intent==='write'&&(!source||!verified.has(source)||!params.rrSources.includes(source)))throw Error('Item held: this action needs an exact VERIFIED rrSource from the round header');
         if(op==='screenshot')args.filePath=path.join(path.dirname(runtimePath),`browser-visual-${Date.now()}-${actionIndex}.png`);
         const step={operation:op,...args,intent,rrSource:source};
         const started=performance.now(),before=writesAttempted;
@@ -236,7 +237,7 @@ try{
         if(writesAttempted>before){dirty=true;saved=isSave||params.commitMode==='autosave';}
         if(isSave){saves++;saved=true;}
         if(dirty&&saved&&['snapshotText','readTarget','screenshot'].includes(op)){readbacks++;dirty=false;saved=false;}
-        completedActions.push({index:actionIndex,operation:op,intent,rrSource:source,durationMs:Math.round(performance.now()-started),result:value});
+        completedActions.push({index:actionIndex,operation:op,intent,rrSource:source,durationMs:Math.round(performance.now()-started),result:op==='snapshotText'?{snapshotCaptured:true,bytes:Buffer.byteLength(value.snapshot)}:value});
         return value;
       };
       const point=(value)=>Array.isArray(value)?{x:value[0],y:value[1]}:{x:value.x,y:value.y};

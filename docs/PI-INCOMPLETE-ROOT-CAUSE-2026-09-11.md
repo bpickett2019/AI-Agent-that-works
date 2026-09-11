@@ -142,8 +142,30 @@ zero remaining event leases. This was not the fresh patched acceptance job.
 - Persist actual system prompt/tool activation and JSON stdout for later diagnosis.
 - Preserve source checkpoint UI, leases, profiles and Azure topology unchanged.
 
-151 offline tests passed, including real Pi CLI startup/skill activation without
+152 offline tests passed, including real Pi CLI startup/skill activation without
 any model call; actual Ego-executor multi-action fake-browser Save/readback;
 nonverified item and protected-action rejections; final-state/uncertain precedence;
 existing lease/runtime/recovery/compiler regressions. Python compilation, Node
 syntax and diff whitespace checks passed. Offline passes are not live acceptance.
+
+## Live follow-up before the fresh acceptance job
+
+Release eae56b3 was pushed, passed 151 tests on Azure, deployed and health-checked.
+A user-initiated retry of the historical job started PID 513171 at 04:32:32,
+using a NEW Pi session on that release. Its pi-capabilities.json proves read/bash
+and the RR/browser tools active, missing:[]. It executed native Ego scripts,
+loaded CGJWS, bound the exact event, and resumed after an SSO handoff.
+Our new upload `job_fe2a7f0078b24cf09819395d30ec511e` was created but its /api/start
+returned 409 because PID 513171 already held the event lease. It did not launch
+an extra agent.
+
+At 04:35:53.316 that concurrent run proved another exact policy problem:
+`Write blocked: selected event lifecycle status upcoming is not writable under approved product policy`.
+Inventory now says Upcoming, not historical Completed. The default product
+allowlist omitted this ordinary editable state. No configuration mutation was
+dispatched (write audit and pending/uncertain markers absent). We stopped that
+blocked attempt through the existing controller rather than let it repeat denied
+writes. Follow-up adds Upcoming to the existing defaults, tests it, treats an
+observed Edit button as navigation even when the caller overstates write intent,
+and forbids guessed Cvent navigation URLs in the prompt. Native snapshot results
+are no longer duplicated in both action metadata and cliLog output. No UI change.

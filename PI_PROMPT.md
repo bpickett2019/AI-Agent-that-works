@@ -14,7 +14,7 @@ The RR governs configuration, never selection or identity of the event. A workbo
 
 1. Set progress to running with `cvent_job_update`. Call `cvent_prepare_rr` for the server's verified RR plan and first domain evidence. Read the loaded `ego-browser` skill using `read`.
 2. Use `cvent_login_handoff` to check authentication or wait for user SSO/MFA in this same browser. Successful login means proceed, not finish.
-3. Use `cvent_browser` with intent `read`: `scanEventList`, then `openAuthorizedEvent`, then `authorizeTarget`. Require the exact name and canonical key. The existing lifecycle does NOT need to be Draft. Draft, Active/Open and Completed are permitted when Cvent exposes editable event-local controls. Never change lifecycle.
+3. Use `cvent_browser` with intent `read`: `scanEventList`, then `openAuthorizedEvent`, then `authorizeTarget`. Require the exact name and canonical key. The existing lifecycle does NOT need to be Draft. Draft, Upcoming, Active/Open and Completed are permitted when Cvent exposes editable event-local controls. Never change lifecycle.
 4. Use the Ego skill's `bash` / `ego-browser nodejs` workflow to inspect and configure. The read and bash tools are callable; bash executes browser heredocs, not arbitrary shell commands. Use `cvent_plan` for remaining populated domains and source evidence. Prepare/plan use the actual uploaded workbook, not hardcoded event requirements.
 
 Pi owns navigation, UI understanding and decisions. Specialized `cvent_execute_section` helpers are optional accelerators, never requirements. Ordinary configuration must use live Ego UI when no helper exists. Browser helper scripts can contain loops, fresh observations and conditional multi-action workflows. Do not return to the model after every click.
@@ -30,7 +30,7 @@ Exact identity and parent context found â†’ update differences. Proven absent â†
 
 For each populated domain:
 - Read its verified plan once, including all pages if paginated. Keep exact sheet/range provenance.
-- Inspect live UI with `snapshotText()`; use `captureScreenshot()` for visual/virtualized surfaces.
+- Start with `snapshotText()` on the already-open page; navigate using the actual visible Cvent menus. Never invent or guess a Cvent URL (legacy and modern routes are different and guessed paths can redirect to login). Use `gotoAndWait` only for URLs actually observed in this job. Use `captureScreenshot()` for visual/virtualized surfaces.
 - Configure predictable differences together with click/fill/select/check/keyboard/mouse actions in one coherent script. Use only fresh observed refs or exact observed locators. One script may inspect and branch as necessary.
 - Click real Save, wait for readiness, read saved values back. Inspect failures rather than claim success from dispatch. Use screenshots/keyboard for Site Designer where semantic DOM is insufficient.
 - Record individual actual matches/exceptions with `cvent_verify_domain`; optionally record progress with `cvent_record_domain`. Omitted items remain NOT_CONFIGURED.

@@ -152,7 +152,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
 
     def test_lifecycle_policy_allows_configurable_statuses_and_blocks_locked_or_unknown(self):
         browser_tool.local_probe=lambda runtime:{'url':'https://app.cvent.com/event?evtstub=locked'}
-        for status in ('Draft','Active','Open','Completed'):
+        for status in ('Draft','Upcoming','Active','Open','Completed'):
             self.write_lock(status)
             browser_tool.guard(self.runtime,'configureAdmissionItems',{'intent':'write'})
         for status in ('Cancelled','Canceled','Archived','Lifecycle Surprise'):
