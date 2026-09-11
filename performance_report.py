@@ -36,6 +36,33 @@ def iso_ms(first, last):
     except Exception: return 0
 
 
+def event_span_ms(events):
+    if not events: return 0
+    try:
+        ends = [datetime.fromisoformat(item["timestamp"]).timestamp() * 1000 for item in events]
+        starts = [end - float(item.get("durationMs", 0)) for end, item in zip(ends, events)]
+        return round(max(ends) - min(starts), 1)
+    except Exception: return 0
+
+
+def legacy_human_handoff_ms(directory):
+    """Backfill runs recorded before explicit human_handoff telemetry existed."""
+    try:
+        started = None
+        total = 0.0
+        for line in (directory / "activity.log").read_text().splitlines():
+            timestamp, _, message = line.partition("  ")
+            if "browser control handed to user for SSO/MFA" in message:
+                started = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            elif started and "User returned browser control" in message:
+                ended = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                total += (ended - started).total_seconds() * 1000
+                started = None
+        return round(total, 1)
+    except Exception:
+        return 0
+
+
 def atomic(path, payload):
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     with os.fdopen(fd, "w") as handle: json.dump(payload, handle, indent=2); handle.write("\n")
@@ -52,6 +79,9 @@ def main(directory):
     stage_markers = [event for event in events if event.get("kind") == "stage_marker"]
     first_browser = next((event for event in events if event.get("kind") == "first_browser_action"), {})
     trusted_procedures = [event for event in events if event.get("kind") == "trusted_section_procedure"]
+    human_handoffs = [event for event in events if event.get("kind") == "human_handoff"]
+    model_turns = [event for event in events if event.get("kind") == "model_response_progress"]
+    ego_rounds = [event for event in events if event.get("kind") == "ego_execution_round"]
     stage_times = {}
     for index, event in enumerate(stage_markers):
         end = stage_markers[index + 1]["timestamp"] if index + 1 < len(stage_markers) else (events[-1]["timestamp"] if events else event["timestamp"])
@@ -78,25 +108,56 @@ def main(directory):
                 "maxProcesses": max((sample.get("processGroups", {}).get(group, {}).get("processes", 0) for sample in samples), default=0)}
     state = read_json(directory / "state.json", {})
     total_ms = iso_ms(state.get("started_at"), state.get("updated_at")) if state.get("started_at") else 0
-    categories = [("Anthropic responses", sum(event.get("durationMs", 0) for event in model)), ("Browser operations", sum(event.get("durationMs", 0) for event in browser)),
-        ("RR preflight", preflight.get("totalMs", 0)), *[(f"Stage {name}", value) for name, value in stage_times.items()]]
+    human_ms = round(sum(event.get("durationMs", 0) for event in human_handoffs), 1) if human_handoffs else legacy_human_handoff_ms(directory)
+    non_human_ms = max(0, round(total_ms - human_ms, 1))
+    model_ms = round(sum(event.get("durationMs", 0) for event in model), 1)
+    sections = {}
+    observed_sections = {str(event.get("section")) for event in events if event.get("section")}
+    for section in sorted(observed_sections):
+        section_turns = [event for event in model_turns if event.get("section") == section]
+        section_rounds = [event for event in ego_rounds if event.get("domain") == section]
+        section_browser = [event for event in browser if event.get("section") == section]
+        section_model = [event for event in model if event.get("section") == section]
+        section_events = [event for event in events if event.get("section") == section or event.get("domain") == section]
+        action_count = sum(event.get("actionCount", 0) for event in section_rounds)
+        sections[section] = {
+            "modelTurns": len(section_turns),
+            "modelTurnsWithAction": sum(event.get("browserOperations", 0) > 0 for event in section_turns),
+            "modelTurnsWithZeroProgress": sum(bool(event.get("zeroProgress")) for event in section_turns),
+            "egoRounds": len(section_rounds),
+            "actionsPerEgoRound": round(action_count / len(section_rounds), 2) if section_rounds else 0,
+            "browserOperations": len(section_browser),
+            "modelTimeMs": round(sum(event.get("durationMs", 0) for event in section_model), 1),
+            "browserTimeMs": round(sum(event.get("durationMs", 0) for event in section_browser), 1),
+            "totalSectionTimeMs": event_span_ms(section_events),
+            "modelCallBudgetExceeded": sum(event.get("kind") == "MODEL_CALL_BUDGET_EXCEEDED" for event in section_events),
+        }
+    categories = [("Anthropic responses", model_ms), ("Browser operations", sum(event.get("durationMs", 0) for event in browser)),
+        ("Human handoff", human_ms), ("RR preflight", preflight.get("totalMs", 0)), *[(f"Stage {name}", value) for name, value in stage_times.items()]]
     summary = {
-        "schemaVersion": 1, "environment": next((item for item in systems if item.get("kind") == "environment"), {}), "totalAutomationMs": total_ms,
+        "schemaVersion": 2, "environment": next((item for item in systems if item.get("kind") == "environment"), {}), "totalAutomationMs": total_ms,
+        "humanHandoffMs": human_ms, "nonHumanAutomationMs": non_human_ms,
+        "modelActiveShareOfNonHumanPercent": round(100 * model_ms / non_human_ms, 1) if non_human_ms else 0,
         "rr": {"stages": preflight.get("stages", []), "totalMs": preflight.get("totalMs", 0), "validationCounts": preflight.get("validationCounts", {})},
         "anthropic": {"calls": len(model), "inputTokens": sum(item.get("inputTokens", 0) for item in model), "outputTokens": sum(item.get("outputTokens", 0) for item in model),
             "cacheReadTokens": sum(item.get("cacheReadTokens", 0) for item in model), "cacheWriteTokens": sum(item.get("cacheWriteTokens", 0) for item in model),
-            "totalResponseMs": round(sum(item.get("durationMs", 0) for item in model), 1), "responseP50Ms": percentile([item.get("durationMs", 0) for item in model], .5),
+            "totalResponseMs": model_ms, "responseP50Ms": percentile([item.get("durationMs", 0) for item in model], .5),
             "responseP95Ms": percentile([item.get("durationMs", 0) for item in model], .95), "firstTokenP50Ms": percentile(first_tokens, .5), "firstTokenP95Ms": percentile(first_tokens, .95)},
         "browser": {"operations": len(browser), "totalMs": round(sum(item.get("durationMs", 0) for item in browser), 1),
             "snapshots": sum(bool(item.get("snapshot")) for item in browser), "fullSnapshots": sum(bool(item.get("fullSnapshot")) for item in browser),
             "navigations": sum(bool(item.get("navigation")) for item in browser), "writes": sum(item.get("intent") == "write" for item in browser),
             "targetedReadbacks": sum(item.get("intent") == "read" and not item.get("fullSnapshot") for item in browser)},
         "executionLoop": {"timeToFirstBrowserActionMs": first_browser.get("durationMs", 0),
+            "modelTurns": len(model_turns), "modelTurnsWithAction": sum(event.get("browserOperations", 0) > 0 for event in model_turns),
+            "modelTurnsWithZeroProgress": sum(bool(event.get("zeroProgress")) for event in model_turns),
+            "modelCallBudgetExceeded": sum(event.get("kind") == "MODEL_CALL_BUDGET_EXCEEDED" for event in events),
+            "egoRounds": len(ego_rounds), "actionsPerEgoRound": round(sum(event.get("actionCount", 0) for event in ego_rounds) / len(ego_rounds), 2) if ego_rounds else 0,
             "sectionStateMissions": sum(event.get("kind") == "browser_operation" and event.get("operation") == "sectionState" for event in events),
             "contextPrunes": sum(event.get("kind") == "context_pruned" for event in events),
             "trustedSectionProcedures": [{"domain": event.get("domain"), "status": event.get("status"),
                 "records": event.get("records", 0), "mutations": event.get("mutationCount", 0), "durationMs": event.get("durationMs", 0)}
                 for event in trusted_procedures]},
+        "sections": sections,
         "stageDurationsMs": stage_times, "forgeStatusUpdates": len(stage_markers), "api": {"reads": 0, "writes": 0}, "computeAndDisk": compute,
         "securitySoftware": {"observedProcessMetrics": compute.get("security", {}), "causalOverheadEstablished": False, "exclusionsApplied": False},
         "topMeasuredTimeCategories": [{"name": name, "durationMs": round(value, 1)} for name, value in sorted(categories, key=lambda item: item[1], reverse=True)[:5]],

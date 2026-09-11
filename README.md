@@ -71,13 +71,19 @@ returned. The same persistent per-slot Chromium profile is reused across handoff
 no authentication material is copied into prompts or logs.
 
 Before Steel or Pi starts, a one-token Anthropic availability probe fails closed
-when the approved account cannot serve requests. During execution, each section
-uses a compact validated RR-derived mission. Ego dynamically inspects and operates
-the current Cvent UI through bounded semantic navigation, click, fill, select,
-check, Save, upload, and readback capabilities. Coherent editor actions can be
-batched in one model tool call; existing section procedures remain optional
-high-volume optimizations rather than write prerequisites. JavaScript and raw CDP
-remain unavailable to the model. Discount creation may use the fixed RR-derived
+when the approved account cannot serve requests. During execution, each section uses a compact validated RR-derived mission. Ego
+observes the current Cvent UI semantically (`snapshotText`) or visually
+(`screenshot`), copies native refs from the latest semantic snapshot, then
+executes all currently predictable navigation, mouse, keyboard, form, Save, and
+verification actions continuously in one model tool call and one Ego process
+(up to 80, without treating 80 as a target). Ordinary known sections target 1–3
+model turns. Primitive calls are reserved for genuinely state-dependent recovery.
+Turn telemetry flags `MODEL_RESPONSE_WITH_ZERO_PROGRESS`, excess section calls,
+and low-action coherent rounds; the final performance summary reports model
+turns, turns with action, zero-progress turns, Ego rounds, action density, and
+model/browser/total time per section. Existing section procedures remain optional high-volume
+optimizations rather than write prerequisites. JavaScript and raw CDP remain
+unavailable to the model. Discount creation may use the fixed RR-derived
 bulk-import workbook. Provider failure after zero writes is
 `failed_prewrite`; after conclusively read-back writes it is
 `failed_recoverable` and resumes with fresh state/delta computation; only an

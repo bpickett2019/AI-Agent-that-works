@@ -40,9 +40,9 @@ async function cdpSnapshot(options = {}) {
       }
     }
     for (const node of allNodes) {
-      if (node.backendNodeId && node.role?.value && node.role.value !== "generic") {
+      if (node.backendDOMNodeId && node.role?.value && node.role.value !== "generic") {
         allRefs.push({
-          backendNodeId: node.backendNodeId,
+          backendNodeId: node.backendDOMNodeId,
           role: node.role.value,
           name: node.name?.value || ""
         });
@@ -67,7 +67,7 @@ function formatAxTree(nodes, options = {}) {
     const indent = "  ".repeat(depth);
     const role = node.role?.value || "unknown";
     const name = node.name?.value || "";
-    const ref = node.backendNodeId ? `[@ref=${node.backendNodeId}]` : "";
+    const ref = node.backendDOMNodeId ? `[ref=${node.backendDOMNodeId}]` : "";
     if (role === "generic" || role === "none" || role === "InlineTextBox") {
       if (node.childIds) {
         for (const childId of node.childIds) {

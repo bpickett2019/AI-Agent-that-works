@@ -29,27 +29,32 @@ existing bounded operations and typed action inputs to Pi. It still does not
 expose JavaScript, CDP, browser storage, cookies, credentials, shell, arbitrary
 network access, or arbitrary local files.
 
-`cvent_ego_actions` executes up to 80 model-planned actions for one currently
-inspected editor/coherent configuration group. Every step still passes through
-the canonical Python safety gateway. A mutating batch requires:
+The separate `cvent_ego_actions` wrapper has been removed. `cvent_browser` now
+accepts `operation: actions` and executes up to 80 model-planned actions for a
+currently inspected editor or sequence of saved records. One round uses one
+Python safety-gateway invocation and one Ego Node process rather than relaunching
+both processes for every step. A mutating round requires:
 
 - one independently validated RR domain;
 - RR source evidence for every write;
 - an exact target preflight on the page where the action occurs;
 - an explicit Save action, or an explicit autosave mode;
 - a post-write snapshot/control/target/section readback;
-- no navigation away after mutation before the model evaluates readback.
+- meaningful readback after each saved/autosaved group before later navigation.
 
-This changes the normal interaction from one model response per primitive to
-one model response/tool call per coherent editor. When intermediate UI state is
-not predictable, the model can inspect again and continue; changed layouts no
-longer require an application release.
+This changes the normal interaction from one model response and process pair per
+primitive to one model response and one Ego process per coherent round. When
+intermediate UI state is not predictable, the model can inspect again and
+continue; changed layouts no longer require an application release. Ordinary DOM
+pages use `snapshotText → locators → actions → readback`; visual/virtualized
+surfaces use `screenshot → coordinate mouse/keyboard actions → screenshot/readback`.
 
 ## Safety retained outside UI interpretation
 
 Every write still requires the selected event's canonical identity, bound
 lifecycle, current page event key, matching BrowserRuntime, agent-owned browser
-gate, and active canonical event lease. Every attempted/succeeded/uncertain
+gate, and active canonical event lease. The coherent executor rechecks lease and
+live event context immediately before each write. Every attempted/succeeded/uncertain
 write is audited. Timeout or post-dispatch failure creates a job-local uncertainty
 marker and blocks replay.
 
@@ -70,3 +75,62 @@ Fixed section routes/menu paths remain cache/bootstrap hints only.
 
 No code, route, count, or decision branches on ATTED, SPONCOMP, BDNY, or
 Medtrade. Those identities occur only in test evidence/job data.
+
+## Live validation
+
+Run `job_e405c8574bcf4f5fb210c8c594b94cba` exercised the current RR against the
+existing authorized event `(C+D) Medtrade Testing Clone 2` on September 10.
+After human SSO/MFA, Ego found exactly one inventory match, bound event key
+`e712e34c-6117-4d13-bf4c-8ed54cf2b495`, preserved observed lifecycle status
+`Completed`, opened the event, navigated between the new and classic Cvent
+surfaces, opened Event Information edit mode, and read live controls and values.
+Screenshots show the browser responding and rendering each page transition.
+
+Telemetry before the provider stopped the run:
+
+- 51 model responses, 486.9 seconds total;
+- 23 completed browser operations, 23.5 seconds total;
+- one full semantic snapshot rather than a snapshot after every primitive;
+- three completed coherent Ego rounds, each carrying two actions in one Node
+  process (six actions in three process launches rather than six);
+- 19.97 seconds to first browser action;
+- 2.35 seconds average per completed two-action coherent round;
+- 0 successful saved writes and 0 protected actions.
+
+The run did not complete. Anthropic stopped it for insufficient API credit while
+it was still in `event_settings`. A conservative uncertainty marker from an
+earlier write-declared round remained unresolved: target resolution failed, and
+fresh reads showed the time zone and start date were still at their original
+values. Because the agent then exited, the job correctly ended
+`failed_uncertain` rather than claiming completion.
+
+The response-by-response classification is in
+[`LIVE-MODEL-TURN-AUDIT-2026-09-10.md`](LIVE-MODEL-TURN-AUDIT-2026-09-10.md).
+Only 20 of 51 responses caused a completed browser operation, 23 qualified as
+zero-progress, 14 reread available information, and 27 belonged to wrapper or
+selector-error fallout. The three successful coherent rounds averaged only two
+actions; they proved capability but not effective orchestration.
+
+The default contract is now action-heavy: one domain plan read, one sufficient
+semantic or visual observation, then one substantial action/Save/readback round.
+Event Settings, Registration Types, Admission Items, and Pricing target 1–3
+model turns. Telemetry records model turns with action, zero-progress turns,
+coherent-round density, budget overruns, and complete per-section model/browser
+wall times. Repeated plan pages return only a compact already-delivered notice,
+and `controlInventory` now excludes hidden and irrelevant page-wide controls.
+
+The vendored native snapshot implementation also used the wrong CDP AX property
+(`backendNodeId` instead of `backendDOMNodeId`), so its advertised refs were
+missing. It now emits `[ref=N]`, accepts the normal ref spellings, and enables the
+intended snapshot → fresh ref → many actions path.
+
+The live failure exposed one additional dispatch-accounting issue. The Ego
+adapter counted a write as attempted when safety checks passed, before the
+low-level browser helper was actually dispatched. The adapter now validates a
+native select option before dispatch and increments `writesAttempted` only when
+a mutating helper is actually dispatched. Selector and native-option failures
+that occur before dispatch therefore remain pre-write failures; failures during
+or after a dispatched action still create the existing uncertainty hold. The
+prompt also now tells the model to use `fill` directly, use only declared action
+names, prefer compact `sectionState` over a 198 KB control inventory, and never
+mistake renderer `recover` for mutation verification.

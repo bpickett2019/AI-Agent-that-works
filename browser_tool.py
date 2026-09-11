@@ -5,14 +5,14 @@ import argparse,json,os,re,subprocess,sys,time,urllib.error,urllib.parse,urllib.
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
-from browser_gate import action
+from browser_gate import action, child_lock_fds
 from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
 ROOT=Path(__file__).resolve().parent;CURRENT=Path(os.environ.get('CVENT_JOB_DIR',ROOT/'data'/'current'))
 TRUSTED_PROCEDURES={'configureAdmissionItems','configureRegistrationTypes'}
 TRUSTED_INSPECTIONS={'inspectRegistrationTypeCapabilities'}
-EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','readTarget','sectionState','controlInventory','pageInfo','scanEventList','scroll','click','activate','fill','type','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
-INTENT_REQUIRED={'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
+EGO={'probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','snapshotText','screenshot','readTarget','sectionState','controlInventory','pageInfo','scanEventList','actions','scroll','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','wait','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag','uploadDiscountImport',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
+INTENT_REQUIRED={'actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','hover','selectOption','setChecked','press','search','selectText','drag','visualDrag',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}
 def event_key(url):
     try:
         pairs=parse_qs(urlparse(url).query,keep_blank_values=True)
@@ -83,7 +83,7 @@ def assert_safe_write_target(operation,params,descriptor):
 
 def guard(runtime,operation,params):
     if runtime.get('accessMode')=='read_only_reconciliation':
-        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','controlInventory','readTarget','recover','wait','scroll',*TRUSTED_INSPECTIONS}
+        readonly={'probe','pageInfo','authStatus','navigate','scanEventList','openAuthorizedEvent','authorizeTarget','sectionState','snapshotText','screenshot','controlInventory','readTarget','recover','wait','scroll','actions',*TRUSTED_INSPECTIONS}
         if params.get('intent')=='write' or operation not in readonly:
             raise RuntimeError('Read-only reconciliation cannot dispatch configuration writes')
     current=local_probe(runtime);lock=target_lock()
@@ -157,19 +157,21 @@ def authenticated_profile_status(runtime):
     return {'ok':True,'operation':'authStatus','authenticated':authenticated,'persistedProfile':bool(metadata),'workerSlot':slot,'profileMatch':profile_match,'accountContextMatch':context_match,'loginRequired':not authenticated}
 
 def recover_browser(runtime_path,runtime,tool,params):
-    deadline=time.monotonic()+max(10,min(int(params.get('timeoutSeconds',240)),300));last='renderer did not respond'
-    while time.monotonic()<deadline:
-        try:
-            with action(runtime['browserRuntimeId'],'PI_EGO'):
-                current=local_probe(runtime)
-                proc=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','probe','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=25)
-                result=child_result(proc)
-                if not proc.returncode and result.get('ok'):
-                    return {'ok':True,'tool':tool,'operation':'recover','recovered':True,'page':result.get('page'),'url':current.get('url'),'title':current.get('title'),'router':tool}
-                last=result.get('error',last)
-        except Exception as error:last=str(error)
-        time.sleep(3)
-    raise RuntimeError(f'Browser renderer did not recover within the bounded wait: {last[-500:]}')
+    # One read-only recovery probe, not a 240-second loop against dead Chromium.
+    # Canonical identity remains mandatory; no browser/profile restart or tab swap.
+    deadline=time.monotonic()+max(10,min(int(params.get('timeoutSeconds',30)),30))
+    try:
+        with action(runtime['browserRuntimeId'],'PI_EGO'):
+            current=local_probe(runtime)
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise TimeoutError('Canonical runtime probe exhausted recovery deadline')
+            proc=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','probe','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=min(25,remaining),pass_fds=child_lock_fds())
+            result=child_result(proc)
+            if proc.returncode or not result.get('ok'):
+                raise RuntimeError(result.get('error','helper returned no structured result'))
+            return {'ok':True,'tool':tool,'operation':'recover','recovered':True,'page':result.get('page'),'url':current.get('url'),'title':current.get('title'),'router':tool}
+    except Exception as error:
+        raise RuntimeError(f'Browser renderer did not recover after one bounded probe: {type(error).__name__}: {error}') from error
 def preflight_action_target(runtime_path,operation,params):
     keys=['target']
     if operation=='drag':keys.append('destination')
@@ -177,7 +179,7 @@ def preflight_action_target(runtime_path,operation,params):
     for key in keys:
         target=params.get(key)
         if not target:continue
-        probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','__preflightTarget','--params',json.dumps({'target':target,'context':params.get('targetContext'),'index':params.get('targetIndex')})],cwd=ROOT,text=True,capture_output=True,timeout=30)
+        probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','__preflightTarget','--params',json.dumps({'target':target,'context':params.get('targetContext'),'index':params.get('targetIndex')})],cwd=ROOT,text=True,capture_output=True,timeout=30,pass_fds=child_lock_fds())
         result=child_result(probe)
         if probe.returncode or not result.get('ok'):
             raise RuntimeError('Write rejected before browser dispatch: '+result.get('error','target could not be resolved')[-800:])
@@ -238,15 +240,51 @@ def fixed_upload_artifact(params):
     if path.parent!=CURRENT.resolve():raise RuntimeError('Upload artifact escaped the private job workspace')
     return path
 
+def fixed_screenshot_path(index=0):
+    candidate=(CURRENT/f'browser-visual-{int(time.time()*1000)}-{index}.png').resolve()
+    if candidate.parent!=CURRENT.resolve():raise RuntimeError('Screenshot artifact escaped the private job workspace')
+    return candidate
+
+def validate_action_round(runtime,params):
+    allowed={'intent','domain','objective','commitMode','steps','timeoutSeconds'}
+    if set(params)-allowed:raise RuntimeError('Coherent Ego action round contains unsupported parameters')
+    steps=params.get('steps')
+    if not isinstance(steps,list) or not 1<=len(steps)<=80:raise RuntimeError('Coherent Ego action round requires 1-80 browser steps')
+    writes=0
+    safe=[]
+    for index,step in enumerate(steps):
+        if not isinstance(step,dict):raise RuntimeError(f'Ego action {index+1} is not an object')
+        operation=str(step.get('operation') or '')
+        if operation not in EGO-{'actions','probe','recover','authStatus','authorizeTarget','openAuthorizedEvent','scanEventList',*TRUSTED_INSPECTIONS,*TRUSTED_PROCEDURES}:
+            raise RuntimeError(f'Ego action {index+1} is not an approved adaptive operation')
+        intent=step.get('intent')
+        if intent not in ('read','write'):raise RuntimeError(f'Ego action {index+1} requires explicit read/write intent')
+        if intent=='write':
+            writes+=1
+            if not str(step.get('rrSource') or '').strip():raise RuntimeError(f'Ego action {index+1} write lacks verified RR source')
+        if operation in ('fill','type','typeText','selectOption','setChecked','drag','visualDrag','uploadDiscountImport') and intent!='write':
+            raise RuntimeError(f'Ego action {index+1} {operation} requires write intent')
+        if operation=='navigate':guard(runtime,'navigate',step)
+        if operation in ('visualClick','visualDoubleClick','visualDrag'):
+            coordinates=[step.get('x'),step.get('y')]+([step.get('toX'),step.get('toY')] if operation=='visualDrag' else [])
+            if any(not isinstance(value,(int,float)) or value<0 or value>10000 for value in coordinates):raise RuntimeError(f'Ego action {index+1} has invalid visual coordinates')
+        normalized=dict(step)
+        if operation=='uploadDiscountImport':normalized['filePath']=str(fixed_upload_artifact(step))
+        if operation=='screenshot':normalized['filePath']=str(fixed_screenshot_path(index))
+        safe.append(normalized)
+    if writes and params.get('intent')!='write':raise RuntimeError('A mutating Ego action round requires write intent')
+    if not writes and params.get('intent')!='read':raise RuntimeError('A read-only Ego action round requires read intent')
+    return safe,writes
+
 def run_direct(runtime_path,runtime,tool,operation,params):
     executable=['node','ego_direct.mjs']
     if operation=='recover':return recover_browser(runtime_path,runtime,tool,params)
-    with action(runtime['browserRuntimeId'],'PI_EGO'):
+    with action(runtime['browserRuntimeId'],'PI_EGO',params.get('intent')=='write'):
         current=guard(runtime,operation,params)
         if operation=='authStatus':
             return {'tool':'ego','router':'ego',**authenticated_profile_status(runtime)}
         if operation=='authorizeTarget':
-            probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','snapshotText','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=90);observed=child_result(probe)
+            probe=subprocess.run(['node','ego_direct.mjs','--runtime',str(runtime_path),'--operation','snapshotText','--params','{}'],cwd=ROOT,text=True,capture_output=True,timeout=90,pass_fds=child_lock_fds());observed=child_result(probe)
             info=local_probe(runtime);key=event_key(info.get('url',''));inventory=selected_event_inventory()
             host=(urlparse(info.get('url','')).hostname or '').lower()
             if params.get('eventName')!=runtime['authorizedEventName'] or runtime['authorizedEventName'].lower() not in json.dumps(observed).lower() or not key or not host.endswith('cvent.com'):raise RuntimeError('Exact visible authorized event identity was not proven')
@@ -257,20 +295,25 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             runtime['targetBrowserIdentity'].update({'url':info['url'],'title':info['title']});tmp=runtime_path.with_suffix('.tmp');tmp.write_text(json.dumps(runtime,indent=2));tmp.replace(runtime_path)
             return {'ok':True,'tool':'ego','operation':operation,'authorizedTarget':lock,'router':'ego'}
         is_write=params.get('intent')=='write'
+        action_writes=0
         if operation in TRUSTED_INSPECTIONS:validate_trusted_inspection(operation,params)
         if operation in TRUSTED_PROCEDURES:validate_trusted_procedure(operation,params)
+        if operation=='actions':
+            params['steps'],action_writes=validate_action_round(runtime,params)
         if params.get('target') and operation in {'click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','readTarget'}:
             params=preflight_action_target(runtime_path,operation,params)
+        if operation=='screenshot':params['filePath']=str(fixed_screenshot_path())
         if is_write:
             if operation=='uploadDiscountImport':params['filePath']=str(fixed_upload_artifact(params))
             audit_scope_write(operation,params,current,'attempted')
         try:
-            proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90))
+            proc=subprocess.run(executable+['--runtime',str(runtime_path),'--operation',operation,'--params',json.dumps(params)],cwd=ROOT,text=True,capture_output=True,timeout=params.get('timeoutSeconds',90),pass_fds=child_lock_fds())
         except subprocess.TimeoutExpired as error:
             if is_write:
                 audit_scope_write(operation,params,current,'uncertain_timeout',error)
                 mark_mutation_uncertain(operation,params,current,error)
-            raise RuntimeError('Browser mutation outcome is uncertain after helper timeout; automatic replay is blocked') from error
+            if is_write:raise RuntimeError('Browser mutation outcome is uncertain after helper timeout; automatic replay is blocked') from error
+            raise RuntimeError('Browser read helper timed out; no mutation was dispatched') from error
     result=child_result(proc);result['router']=tool
     if operation=='openAuthorizedEvent' and not proc.returncode and result.get('ok'):
         selected=result.get('navigationTarget') or {};selected_key=event_key(str(selected.get('href') or ''))
@@ -281,8 +324,11 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             'href':selected.get('href'),'browser_runtime_id':runtime['browserRuntimeId'],'observed_at':datetime.now(timezone.utc).isoformat()})
     if params.get('intent')=='write':
         if proc.returncode or not result.get('ok'):
-            audit_scope_write(operation,params,current,'uncertain_error',result.get('error'))
-            mark_mutation_uncertain(operation,params,current,result.get('error','browser helper failed after write attempt'))
+            # Only a structured coherent-round zero-dispatch result proves a
+            # prewrite rejection. A crashed adapter with no result is uncertain.
+            attempted=result.get('writesAttempted',1) if operation=='actions' else 1
+            audit_scope_write(operation,params,current,'uncertain_error' if attempted else 'rejected_prewrite',result.get('error'))
+            if attempted:mark_mutation_uncertain(operation,params,current,result.get('error','browser helper failed after write attempt'))
         else:audit_scope_write(operation,params,current,'succeeded')
     if proc.returncode or not result.get('ok'):raise RuntimeError(result.get('error','browser tool failed'))
     return result

@@ -5,6 +5,9 @@ x-steel: &steel
   restart: unless-stopped
   init: true
   shm_size: "2gb"
+  mem_limit: "6gb"
+  memswap_limit: "6gb"
+  cpus: 2.0
   profiles: ["manual"]
   environment:
     FILTER_CHROME_ARGS: "--disable-dev-shm-usage"

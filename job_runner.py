@@ -442,8 +442,21 @@ class JobRunner:
         outcome = mutation_outcome(directory)
         writes_exist = outcome["hasAttempts"]
         provider_failure = self._provider_failure(directory)
+        controller_failure = read_json(directory / f"controller-failure-{process.pid}.json", {})
+        first_browser_failure = read_json(directory / f"first-browser-failure-{process.pid}.json", {})
+        stop_request = read_json(directory / f"stop-request-{process.pid}.json", {})
+        reasons = [provider_failure] if provider_failure else []
+        if stop_request:
+            reasons.append(f"Stop requested by {stop_request['actor']} at {stop_request['at']} (PID {process.pid})")
+        if controller_failure or (code != 0 and first_browser_failure):
+            first = controller_failure.get("first") or first_browser_failure
+            reasons.append(f"First browser failure during {first.get('operation', 'unknown')}: {first.get('message', '')}")
+            if controller_failure:
+                reasons.append(f"Runtime recovery stopped: {controller_failure.get('message', '')}")
+                # A terminating tool returns process code 0, but is not a successful build.
+                code, report_status, reported_state = 1, "", ""
         finish_state, uncertain, error = classify_process_outcome(
-            code, report_status, reported_state, writes_exist, outcome["unresolved"], provider_failure,
+            code, report_status, reported_state, writes_exist, outcome["unresolved"], "; ".join(reasons) or None,
         )
         try:
             self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
@@ -482,6 +495,10 @@ class JobRunner:
         job = self.store.get_job(job_id)
         process = active.process
         if process and process.poll() is None:
+            requested = {"actor": actor, "at": now(), "pid": process.pid, "reason": "explicit_stop_request"}
+            atomic_json(job_dir(job["workspace_id"], job_id) / f"stop-request-{process.pid}.json", requested)
+            self.store.audit(actor, "job.stop_requested", job_id, requested)
+            append_log(job_dir(job["workspace_id"], job_id), f"Stop requested by {actor}; terminating Pi PID {process.pid}")
             self._stop_process_tree(process.pid)
         # Monitor owns canonical teardown once a Pi process exists.
         if process:
@@ -545,15 +562,14 @@ class JobRunner:
         sessions = directory / "pi-sessions"
         capability_tools = (
             "cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
-            "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_ego_actions,cvent_section_state,cvent_execute_section,cvent_login_handoff,"
+            "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_section_state,cvent_execute_section,cvent_login_handoff,"
             "cvent_snapshot_chunk,cvent_finish"
         )
         command_line = [
             "pi", "-p", "--approve", "--provider", pi_provider(), "--model", pi_model(),
             "--thinking", os.environ.get("CVENT_PI_THINKING", "high"),
             "--no-extensions", "--extension", str(ROOT / "extensions/cvent-job-tools.ts"),
-            "--no-skills", "--skill", str(ROOT / ".agents/skills/cvent-browser/SKILL.md"),
-            "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
+            "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
             "--tools", capability_tools,
             "--session-dir", str(sessions), "--name", f"cvent-{job['id']}",
         ]
@@ -562,14 +578,34 @@ class JobRunner:
             if not session_files:
                 raise RuntimeError("No saved Pi session is available to continue")
             command_line += ["--session", str(session_files[0]),
-                             "Re-read the controlling job prompt and continue idempotently."]
+                             "Re-read and obey this complete controlling job prompt, then continue idempotently without replaying completed work:\n\n" + prompt]
         else:
             command_line.append(prompt)
         return command_line
 
     def render_prompt(self, job: dict[str, Any], directory: Path, runtime: dict[str, Any]) -> str:
+        workspace_root = directory.parent.parent if directory.parent.name == "jobs" else directory.parent
+        hold_source = workspace_root / "event-holds" / (re.sub(r"[^A-Za-z0-9._-]", "_", job["event_key"]) + ".json")
+        holds: list[dict[str, Any]] = []
+        if hold_source.exists():
+            document = json.loads(hold_source.read_text())
+            if document.get("eventKey") != job["event_key"] or not isinstance(document.get("holds"), list):
+                raise RuntimeError("Event replay-hold evidence is malformed or belongs to another event")
+            for hold in document["holds"]:
+                if not isinstance(hold, dict) or hold.get("automaticReplayPermitted") is not False or not hold.get("domain") or not hold.get("identity"):
+                    raise RuntimeError("Event replay-hold entry is malformed")
+                holds.append(hold)
+            atomic_json(directory / "replay-holds.json", {"schemaVersion": 1, "eventKey": job["event_key"], "holds": holds})
+        hold_lines = [
+            f'- `{hold["domain"]}` exact {hold.get("identityType", "identity")} `{hold["identity"]}`: '
+            f'{hold.get("outcome", "MATCH_UNCERTAIN_HUMAN_REVIEW")}; automatic replay is forbidden. '
+            "Read it if needed, but do not mutate any property of this held object."
+            for hold in holds
+        ]
+        replay_holds = "\n".join(hold_lines) if hold_lines else "- None."
         values = {
             "RR_PATH": str((directory / "input.xlsx").resolve()),
+            "REPLAY_HOLDS": replay_holds,
             "TARGET_URL": f"DISCOVER EXACTLY {job['event_name']} — THE RR MUST NOT SELECT THE TARGET",
             "STATE_PATH": str((directory / "state.json").resolve()), "LOG_PATH": str((directory / "activity.log").resolve()),
             "REPORT_PATH": str((directory / "final-report.json").resolve()),

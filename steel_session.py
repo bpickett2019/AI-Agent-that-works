@@ -13,6 +13,7 @@ from pathlib import Path
 
 from browser_runtime import command, pages, select_page
 from runtime_config import ROOT, STEEL_IMAGE, slot_by_id
+from steel_resources import check_capacity, WORKER_MEMORY, WORKER_CPUS, WORKER_SHM
 
 JOB_DIR = Path(os.environ.get("CVENT_JOB_DIR", ROOT / "data" / "current")).resolve()
 JOB_ID = os.environ.get("CVENT_JOB_ID", JOB_DIR.name)
@@ -36,6 +37,7 @@ def clear_stale_profile_locks():
 
 
 def recover_container_profile_locks():
+    check_capacity(STEEL_IMAGE)
     cleanup = subprocess.run(
         ["docker", "exec", CONTAINER, "sh", "-lc",
          "rm -f /tmp/steel-chrome/SingletonLock /tmp/steel-chrome/SingletonSocket /tmp/steel-chrome/SingletonCookie"],
@@ -92,6 +94,9 @@ def status():
 
 
 def create_container():
+    resources = check_capacity(STEEL_IMAGE)
+    JOB_DIR.mkdir(parents=True, exist_ok=True)
+    (JOB_DIR / 'steel-resource-admission.json').write_text(json.dumps(resources, indent=2))
     PROFILE.mkdir(parents=True, exist_ok=True)
     CACHE.mkdir(parents=True, exist_ok=True)
     os.chmod(PROFILE, 0o700)
@@ -103,6 +108,10 @@ def create_container():
             raise RuntimeError(f"Worker slot {SLOT.slot_id} is already owned by job {existing_job}")
         subprocess.run(["docker", "rm", "-f", CONTAINER], text=True, capture_output=True, timeout=30, check=True)
     elif existing_job:
+        # Apply the same budget to a stopped container from an older release.
+        subprocess.run(["docker", "update", "--memory", str(WORKER_MEMORY),
+                        "--memory-swap", str(WORKER_MEMORY), "--cpus", str(WORKER_CPUS), CONTAINER],
+                       text=True, capture_output=True, timeout=30, check=True)
         result = subprocess.run(["docker", "start", CONTAINER], text=True, capture_output=True, timeout=60)
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout)[-1500:])
@@ -110,7 +119,9 @@ def create_container():
     clear_stale_profile_locks()
     command_line = [
         "docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped", "--init",
-        "--shm-size", "2g", "--label", f"com.forge.cvent.job={JOB_ID}",
+        "--shm-size", str(WORKER_SHM), "--memory", str(WORKER_MEMORY),
+        "--memory-swap", str(WORKER_MEMORY), "--cpus", str(WORKER_CPUS),
+        "--label", f"com.forge.cvent.job={JOB_ID}",
         "--label", f"com.forge.cvent.slot={SLOT.slot_id}",
         "-e", "FILTER_CHROME_ARGS=--disable-dev-shm-usage --restore-last-session",
         "-p", f"127.0.0.1:{SLOT.api_port}:3000", "-p", f"127.0.0.1:{SLOT.cdp_port}:9223",

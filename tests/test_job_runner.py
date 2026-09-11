@@ -40,9 +40,10 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("bash", tools)
         self.assertEqual(tools, {
             "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_ego_actions", "cvent_section_state", "cvent_execute_section", "cvent_login_handoff",
+            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section", "cvent_login_handoff",
             "cvent_snapshot_chunk", "cvent_finish",
         })
+        self.assertNotIn("--skill", command)
         self.assertEqual(command[-1], "job prompt")
 
     def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
@@ -188,7 +189,27 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertIn(str(self.directory.resolve()), prompt)
         self.assertIn(DEFAULT_EVENT_NAME, prompt)
         self.assertIn(DEFAULT_EVENT_KEY, prompt)
+        self.assertIn("- None.", prompt)
         self.assertNotRegex(prompt, r"{{[A-Z0-9_]+}}")
+
+    def test_event_replay_holds_are_bound_into_prompt_and_resumed_session(self):
+        holds = self.directory.parent / "event-holds"
+        holds.mkdir()
+        (holds / f"{DEFAULT_EVENT_KEY}.json").write_text(json.dumps({
+            "eventKey": DEFAULT_EVENT_KEY,
+            "holds": [{"domain": "registration_types", "identityType": "code", "identity": "HELD-CODE",
+                       "outcome": "MATCH_UNCERTAIN_HUMAN_REVIEW", "automaticReplayPermitted": False}],
+        }))
+        prompt = self.runner.render_prompt(self.job, self.directory, {})
+        self.assertIn("`HELD-CODE`", prompt)
+        copied = json.loads((self.directory / "replay-holds.json").read_text())
+        self.assertEqual(copied["holds"][0]["identity"], "HELD-CODE")
+        sessions = self.directory / "pi-sessions"
+        sessions.mkdir()
+        (sessions / "saved.jsonl").write_text("{}\n")
+        command = self.runner.pi_command(self.job, self.directory, {"resume_requested": True}, prompt)
+        self.assertIn("HELD-CODE", command[-1])
+        self.assertIn("complete controlling job prompt", command[-1])
 
 
 if __name__ == "__main__":

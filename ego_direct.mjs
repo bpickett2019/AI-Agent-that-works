@@ -5,7 +5,7 @@ import path from 'node:path';
 import { inspectRegistrationTypeCapabilities, runTrustedCventProcedure } from './trusted_cvent_procedures.mjs';
 const argv=process.argv.slice(2);const arg=n=>argv[argv.indexOf(n)+1];
 const runtimePath=arg('--runtime');const operation=arg('--operation');const params=JSON.parse(arg('--params')||'{}');
-function output(value,ok=true){return new Promise((resolve,reject)=>{process.stdout.write('BROWSER_TOOL_RESULT='+JSON.stringify(ok?{ok:true,tool:'ego',operation,...value}:{ok:false,tool:'ego',operation,error:String(value)})+'\n',error=>error?reject(error):resolve())})}
+function output(value,ok=true){return new Promise((resolve,reject)=>{const failed=typeof value==='object'&&value?value:{error:String(value)};process.stdout.write('BROWSER_TOOL_RESULT='+JSON.stringify(ok?{ok:true,tool:'ego',operation,...value}:{ok:false,tool:'ego',operation,...failed,error:String(failed.error??value)})+'\n',error=>error?reject(error):resolve())})}
 function roleRequest(target){
   const match=String(target||'').match(/^role:([a-z][a-z0-9_-]*)\[name=(?:"([^"]+)"|'([^']+)'|([^\]]+))\]$/i);
   return match?{role:match[1].toLowerCase(),name:(match[2]??match[3]??match[4]??'').trim()}:null;
@@ -17,10 +17,14 @@ function readSnapshotCache(){
 function writeSnapshotCache(value){
   const temporary=`${snapshotCachePath}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,snapshotCachePath);fs.chmodSync(snapshotCachePath,0o600);
 }
-if(snapshotCachePath&&['click','activate','fill','type','navigate','selectOption','setChecked','press','drag','uploadDiscountImport','recover','openAuthorizedEvent','inspectRegistrationTypeCapabilities','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
+if(snapshotCachePath&&['actions','click','activate','visualClick','visualDoubleClick','fill','type','typeText','navigate','selectOption','setChecked','press','drag','visualDrag','uploadDiscountImport','recover','openAuthorizedEvent','inspectRegistrationTypeCapabilities','configureAdmissionItems','configureRegistrationTypes'].includes(operation)){try{fs.unlinkSync(snapshotCachePath)}catch(error){if(error?.code!=='ENOENT')throw error}}
 if(!runtimePath||!operation){await output('Explicit --runtime and --operation are required',false);process.exit(2)}
 const runtime=JSON.parse(fs.readFileSync(runtimePath,'utf8'));
 const cdpOrigin=new URL(runtime.cdpHttpOrigin);process.env.EGO_BROWSER_CDP_HOST=cdpOrigin.hostname;process.env.EGO_BROWSER_CDP_PORT=cdpOrigin.port;
+// Failure reporting lives outside try: startup, action, and postflight errors
+// must retain their original cause and every successfully completed action.
+const completedActions=[];
+let writesAttempted=0,actionIndex=-1;
 try{
   const ego=await import('./vendor/ego-browser-linux/dist/src/helpers.js');
   const tabs=await ego.listTabs();
@@ -30,21 +34,87 @@ try{
   await ego.switchTab(wanted);
   const marker=await ego.evaluate("window.__CVENT_BROWSER_RUNTIME_ID || (window.name.startsWith('cvent-runtime-') ? window.name : null)");
   if(marker!==runtime.browserRuntimeId)throw new Error('Ego marker mismatch — cross-browser routing blocked');
+  const normalize=value=>String(value??'').replace(/\s+/g,' ').trim();
+  async function dispatch(step,callback){
+    if(step.intent!=='write')return callback();
+    try{const value=await callback();writesAttempted++;return value}
+    catch(error){writesAttempted++;throw error}
+  }
+  const eventKey=url=>{try{const parsed=new URL(url),query=parsed.searchParams,keys=['evtstub','eventid','event'].map(name=>query.get(name)?.trim().toLowerCase()).filter(Boolean);if(keys.length)return keys.every(key=>key===keys[0])?keys[0]:null;return parsed.pathname.match(/\/events\/([0-9a-f-]{20,})/i)?.[1]?.toLowerCase()??null}catch{return null}};
+  async function assertLease(){
+    const endpoint=process.env.CVENT_LEASE_VALIDATE_URL,jobId=process.env.CVENT_JOB_ID,token=process.env.CVENT_LEASE_TOKEN,eventId=runtime.authorizedEventId;
+    if(!jobId&&process.env.CVENT_ENV!=='production')return;
+    if(!endpoint||!jobId||!token||!eventId)throw new Error('Write blocked: action round lease context is absent');
+    const url=new URL(endpoint);if(!['127.0.0.1','localhost','::1'].includes(url.hostname)||!['http:','https:'].includes(url.protocol))throw new Error('Write blocked: lease validator is not loopback');
+    url.searchParams.set('job_id',jobId);url.searchParams.set('event_id',eventId);
+    const response=await fetch(url,{headers:{'X-CVENT-Lease-Token':token},signal:AbortSignal.timeout(5000)});
+    if(response.status!==204)throw new Error('Write blocked: canonical event lease is no longer active');
+  }
+  async function assertAuthorizedPage(){
+    const info=await ego.pageInfo(),url=new URL(info.url),host=url.hostname.toLowerCase(),key=eventKey(info.url),expected=String(runtime.authorizedEventKey||'').toLowerCase();
+    if(url.protocol!=='https:'||!(host==='cvent.com'||host.endsWith('.cvent.com'))||!key||key!==expected)throw new Error('Write blocked: Ego left the exact authorized event');
+    if(/\/(?:attendees?|invitees?|contacts?|contact[-_]?types?|account(?:settings)?|organization|admin|global|library|profiles?)(?:\/|$)/i.test(url.pathname))throw new Error('Write blocked: protected Cvent area');
+  }
+  async function resolveTarget(request){
+    let target=request.target,descriptor,fallbackUsed=false;
+    try{descriptor=await ego.evaluateLocator(target,(element)=>{const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):element.closest('label');return {tag:element.tagName,role:element.getAttribute('role'),text:(element.innerText||element.textContent||'').trim().slice(0,500),label:(label?.innerText||label?.textContent||'').trim().slice(0,500),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),name:element.getAttribute('name'),href:element instanceof HTMLAnchorElement?element.href:null,disabled:'disabled' in element?Boolean(element.disabled):false,connected:element.isConnected}})}
+    catch(originalError){
+      const requested=roleRequest(target);if(!requested)throw originalError;const token=`cvent-round-target-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const found=await ego.evaluate(`(() => {const requested=${JSON.stringify(requested)},token=${JSON.stringify(token)},context=${JSON.stringify(String(request.targetContext||''))},index=${JSON.stringify(Number.isInteger(request.targetIndex)?request.targetIndex:null)},norm=v=>String(v||'').toLowerCase().replace(/[\\s:*]+/g,' ').trim(),role=e=>e.getAttribute('role')||(e.tagName==='BUTTON'?'button':e.tagName==='A'&&e.href?'link':e.tagName==='SELECT'?'combobox':e.matches('input,textarea')?'textbox':''),all=[...document.querySelectorAll('*')].filter(e=>role(e).toLowerCase()===requested.role&&e.isConnected),matches=all.filter(e=>{const id=e.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null,names=[e.getAttribute('aria-label'),e.getAttribute('title'),e.getAttribute('name'),label?.innerText,e.closest('label')?.innerText,e.innerText].filter(Boolean).map(norm),box=e.getBoundingClientRect(),style=getComputedStyle(e);if(!names.includes(norm(requested.name))||box.width<=0||box.height<=0||style.display==='none'||style.visibility==='hidden'||e.disabled)return false;if(!context)return true;let p=e.parentElement;for(let d=0;p&&d<10;d++,p=p.parentElement)if(norm(p.innerText||p.textContent).includes(norm(context)))return true;return false}),chosen=index!==null?matches[index]:matches.length===1?matches[0]:null;if(!chosen)return {count:matches.length};chosen.setAttribute('data-cvent-round-target',token);const id=chosen.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):chosen.closest('label');return {count:1,descriptor:{tag:chosen.tagName,role:role(chosen),text:(chosen.innerText||chosen.textContent||'').trim().slice(0,500),label:(label?.innerText||label?.textContent||'').trim().slice(0,500),aria:chosen.getAttribute('aria-label'),title:chosen.getAttribute('title'),name:chosen.getAttribute('name'),href:chosen instanceof HTMLAnchorElement?chosen.href:null,disabled:Boolean(chosen.disabled),connected:chosen.isConnected}}})()`);
+      if(found.count!==1)throw new Error(`Target resolution found ${found.count} exact accessible-name matches`);target=`[data-cvent-round-target="${token}"]`;descriptor=found.descriptor;fallbackUsed=true;
+    }
+    return {target,descriptor,fallbackUsed};
+  }
+  async function pointDescriptor(x,y){return ego.evaluate(`(() => {let e=document.elementFromPoint(${JSON.stringify(x)},${JSON.stringify(y)});if(!e)return null;e=e.closest('button,a,input,select,textarea,[role],[contenteditable=true]')||e;return {tag:e.tagName,role:e.getAttribute('role'),text:(e.innerText||e.textContent||'').trim().slice(0,500),label:e.getAttribute('aria-label')||e.getAttribute('title')||'',aria:e.getAttribute('aria-label'),title:e.getAttribute('title'),name:e.getAttribute('name'),href:e instanceof HTMLAnchorElement?e.href:null,disabled:Boolean(e.disabled),connected:e.isConnected}})()`)}
+  async function compactControlInventory(){return ego.evaluate(`(() => {const norm=value=>String(value||'').replace(/\\s+/g,' ').trim(),selectorFor=element=>element.id?'#'+CSS.escape(element.id):(element.getAttribute('name')?'[name="'+CSS.escape(element.getAttribute('name'))+'"]':element.getAttribute('data-cvent-id')?'[data-cvent-id="'+CSS.escape(element.getAttribute('data-cvent-id'))+'"]':element.getAttribute('data-testid')?'[data-testid="'+CSS.escape(element.getAttribute('data-testid'))+'"]':null),controls=[],seen=new Set();for(const element of document.querySelectorAll('input,select,textarea,button,[role=combobox],[contenteditable=true]')){if(seen.has(element))continue;seen.add(element);const type=(element.getAttribute('type')||'').toLowerCase(),style=getComputedStyle(element),box=element.getBoundingClientRect();if(type==='hidden'||!element.isConnected||box.width<=0||box.height<=0||style.display==='none'||style.visibility==='hidden')continue;const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):element.closest('label'),selector=selectorFor(element),name=norm(element.getAttribute('aria-label')||label?.innerText||element.getAttribute('title')||element.getAttribute('name')||element.innerText);if(!selector&&!name)continue;controls.push({tag:element.tagName,role:element.getAttribute('role'),label:name.slice(0,300),selector,type:type||null,value:type==='password'?null:('value' in element?String(element.value).slice(0,500):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null,options:element.tagName==='SELECT'?[...element.options].map(option=>({label:norm(option.textContent).slice(0,200),value:option.value,selected:option.selected,disabled:option.disabled})).slice(0,250):undefined});if(controls.length>=400)break}return {url:location.href,title:document.title,controls}})()`)}
+  async function authorizeInteractive(step,descriptor){
+    if(!descriptor||!descriptor.connected||descriptor.disabled)throw new Error('Action target is missing, disconnected, or disabled');
+    const labels=['text','label','aria','title','name'].map(key=>normalize(descriptor[key])).filter(Boolean),target=normalize(step.target);
+    const identity=/(?:event[-_ ]?(?:name|title|code)|evtstub|eventid|contact[-_ ]?type[-_ ]?(?:name|code))/i;
+    const protectedControl=/^(?:publish(?:\s|$)|go live(?:\s|$)|send(?:\s|$)|test[-\s]*(?:send|email)(?:\s|$)|schedule(?:\s|$)|delete(?:\s|$)|remove(?:\s|$)|archive(?:\s|$)|(?:create|new|copy|duplicate|clone)\s+(?:an?\s+)?(?:new\s+)?event(?:\s|$)|create\s+contact\s+type(?:\s|$)|attendees?$|invitees?$|contacts?$)/i;
+    const mutating=/^(?:save(?:\s|$)|save\s*(?:&|and)\s*close(?:\s|$)|create(?:\s|$)|add(?:\s|$)|update(?:\s|$)|apply(?:\s|$)|confirm(?:\s|$)|submit(?:\s|$))/i;
+    if(identity.test(target)||labels.some(label=>identity.test(label)))throw new Error('Write blocked: selected event identity is immutable');
+    if(labels.some(label=>protectedControl.test(label))||descriptor.href&&/\/(?:attendees?|invitees?|contacts?|contact[-_]?types?|account|organization|admin|global|library|profiles?)(?:\/|$)/i.test(new URL(descriptor.href).pathname))throw new Error('Action blocked: protected Cvent control');
+    if(step.intent!=='write'&&labels.some(label=>mutating.test(label)))throw new Error('Mutating control requires write intent and RR evidence');
+    if(step.intent==='write'){await assertLease();await assertAuthorizedPage();}
+  }
+  async function runAdaptive(step){
+    const op=step.operation;let resolved;
+    if(step.target&&['readTarget','click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport'].includes(op)){resolved=await resolveTarget(step);step={...step,target:resolved.target};if(op!=='readTarget')await authorizeInteractive(step,resolved.descriptor)}
+    if(['visualClick','visualDoubleClick','visualDrag'].includes(op))await authorizeInteractive(step,await pointDescriptor(step.x,step.y));
+    if(step.intent==='write'&&!['click','activate','fill','type','hover','selectOption','setChecked','press','search','selectText','drag','uploadDiscountImport','visualClick','visualDoubleClick','visualDrag'].includes(op)){await assertLease();await assertAuthorizedPage();}
+    switch(op){
+      case 'pageInfo':return {page:await ego.pageInfo()};
+      case 'snapshotText':return {snapshot:await ego.snapshot()};
+      case 'screenshot':return {screenshotPath:await ego.screenshot({path:step.filePath,fullPage:step.fullPage===true})};
+      case 'readTarget':return {target:step.target,...await ego.evaluateLocator(step.target,(element)=>{const type=(element.getAttribute('type')||'').toLowerCase();return {text:(element.innerText||element.textContent||'').trim(),value:type==='password'?null:('value' in element?String(element.value):null),checked:'checked' in element?Boolean(element.checked):null}})};
+      case 'controlInventory':return {snapshotKind:'controlInventory',snapshot:JSON.stringify(await compactControlInventory(),null,2)};
+      case 'sectionState':return await ego.evaluate(`(() => {const norm=v=>String(v||'').replace(/\\s+/g,' ').trim();return {url:location.href,title:document.title,rows:[...document.querySelectorAll('table tr,[role=row]')].slice(0,2000).map(r=>({text:norm(r.innerText||r.textContent).slice(0,5000),cells:[...r.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(c=>norm(c.innerText||c.textContent).slice(0,2000)),links:[...r.querySelectorAll('a[href]')].map(a=>({text:norm(a.innerText||a.textContent),href:a.href})).slice(0,20)})).filter(r=>r.text),headings:[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(e=>norm(e.innerText||e.textContent)).filter(Boolean),buttons:[...document.querySelectorAll('button,[role=button],input[type=submit]')].map(e=>norm(e.innerText||e.value||e.getAttribute('aria-label'))).filter(Boolean)}})()`);
+      case 'scroll':await ego.wheel(0,Number(step.deltaY??700));await ego.waitForTimeout(step.settleMs??500);return {scrolledBy:step.deltaY??700};
+      case 'click':await dispatch(step,()=>ego.click(step.target,{label:step.label}));return {clicked:true};
+      case 'activate':return {activated:await dispatch(step,()=>ego.evaluateLocator(step.target,(element)=>{element.click();return true}))};
+      case 'visualClick':await dispatch(step,()=>ego.click([step.x,step.y],{label:step.label}));return {clicked:[step.x,step.y]};
+      case 'visualDoubleClick':await dispatch(step,()=>ego.dblclick([step.x,step.y],{label:step.label}));return {doubleClicked:[step.x,step.y]};
+      case 'fill':await dispatch(step,()=>ego.fill(step.target,step.text??''));return {filled:true};
+      case 'type':await dispatch(step,async()=>{await ego.focus(step.target);await ego.insertText(step.text??'')});return {typed:true};
+      case 'typeText':await dispatch(step,()=>ego.insertText(step.text??''));return {typed:true};
+      case 'hover':await dispatch(step,()=>ego.hover(step.target));return {hovered:true};
+      case 'selectOption':{const d=await ego.evaluateLocator(step.target,e=>({tag:e.tagName,options:e.tagName==='SELECT'?[...e.options].map(o=>({label:String(o.textContent||'').replace(/\s+/g,' ').trim(),value:o.value,disabled:o.disabled})):[]}));if(d.tag==='SELECT'){const key=step.optionBy==='value'?'value':'label',matches=d.options.filter(option=>option[key]===String(step.option)&&!option.disabled);if(matches.length!==1)throw new Error(`Native Cvent combobox found ${matches.length} exact ${key} matches`);await dispatch(step,()=>ego.selectOption(step.target,{[key]:step.option}));return {selected:step.option}}if(step.optionBy==='value')throw new Error('Custom combobox requires exact option label');await ego.click(step.target);await ego.waitForTimeout(250);const option=await resolveTarget({target:`role:option[name="${String(step.option).replaceAll('"','\\"')}"]`});await dispatch(step,()=>ego.click(option.target));return {selected:step.option}}
+      case 'setChecked':await dispatch(step,()=>ego.setChecked(step.target,Boolean(step.checked)));return {checked:Boolean(step.checked)};
+      case 'press':await dispatch(step,async()=>{if(step.target)await ego.focus(step.target);await ego.press(step.key)});return {pressed:step.key};
+      case 'search':await dispatch(step,async()=>{await ego.fill(step.target,step.text??'');if(step.submit!==false)await ego.press('Enter')});return {query:step.text??''};
+      case 'selectText':return {selected:await ego.evaluateLocator(step.target,(element)=>{const range=document.createRange(),selection=getSelection();range.selectNodeContents(element);selection.removeAllRanges();selection.addRange(range);element.closest('[contenteditable=true]')?.focus();return selection.toString()})};
+      case 'drag':await dispatch(step,()=>ego.drag([step.target,step.destination],{delay:75}));return {dragged:true};
+      case 'visualDrag':await dispatch(step,()=>ego.drag([[step.x,step.y],[step.toX,step.toY]],{delay:75,label:step.label}));return {dragged:[[step.x,step.y],[step.toX,step.toY]]};
+      case 'uploadDiscountImport':await dispatch(step,()=>ego.setInputFiles(step.target,step.filePath));return {uploadedArtifact:'discount-import.xlsx'};
+      case 'navigate':{const url=new URL(step.url),key=eventKey(url.href),expected=String(runtime.authorizedEventKey||'').toLowerCase();if(!url.hostname.toLowerCase().endsWith('cvent.com')||key!==expected)throw new Error('Navigation outside exact authorized event blocked');await ego.goto(url.href,{waitUntil:step.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(step.timeoutSeconds??30),180)*1000)});await assertAuthorizedPage();return {navigated:url.href}}
+      case 'wait':if(step.target)await ego.waitForSelector(step.target,{timeout:step.ms??30000});else if(step.loadState)await ego.waitForLoadState(step.loadState,{timeout:step.ms??30000});else await ego.waitForTimeout(step.ms??1000);return {waitedMs:step.ms??1000};
+      default:throw new Error(`Unsupported coherent Ego action: ${op}`);
+    }
+  }
   let result;
   switch(operation){
-    case '__preflightTarget': {
-      let resolvedTarget=params.target,descriptor,fallbackUsed=false;
-      try{
-        descriptor=await ego.evaluateLocator(params.target,(element)=>{const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):element.closest('label');return {tag:element.tagName,role:element.getAttribute('role'),text:(element.innerText||element.textContent||'').trim().slice(0,500),label:(label?.innerText||label?.textContent||'').trim().slice(0,500),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),name:element.getAttribute('name'),href:element instanceof HTMLAnchorElement?element.href:null,disabled:'disabled' in element?Boolean(element.disabled):false,connected:element.isConnected}});
-      }catch(originalError){
-        const requested=roleRequest(params.target);if(!requested)throw originalError;
-        const token=`cvent-agent-target-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const fallback=await ego.evaluate(`(() => {const requested=${JSON.stringify(requested)},token=${JSON.stringify(token)},context=${JSON.stringify(String(params.context||''))},index=${JSON.stringify(Number.isInteger(params.index)?params.index:null)},normalize=value=>String(value||'').toLowerCase().replace(/[\\s:*]+/g,' ').trim(),implicitRole=element=>{const tag=element.tagName;const type=(element.getAttribute('type')||'').toLowerCase();if(tag==='SELECT')return 'combobox';if(tag==='TEXTAREA')return 'textbox';if(tag==='INPUT')return ['checkbox','radio','button','submit'].includes(type)?type:(type==='search'?'searchbox':'textbox');if(tag==='BUTTON')return 'button';if(tag==='A'&&element.hasAttribute('href'))return 'link';return ''},roots=[document],elements=[];for(let i=0;i<roots.length;i++){const root=roots[i];for(const element of root.querySelectorAll('*')){if(element.shadowRoot)roots.push(element.shadowRoot);const role=(element.getAttribute('role')||implicitRole(element)).toLowerCase();if(role!==requested.role||!element.isConnected)continue;const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null,groupLabel=element.closest('label')||element.parentElement?.querySelector(':scope > label'),names=[element.getAttribute('aria-label'),element.getAttribute('title'),element.getAttribute('name'),label?.innerText,groupLabel?.innerText].filter(Boolean).map(normalize);if(!names.includes(normalize(requested.name)))continue;if(context){let ancestor=element.parentElement,matched=false;for(let depth=0;ancestor&&depth<10;depth++,ancestor=ancestor.parentElement){if(normalize(ancestor.innerText||ancestor.textContent).includes(normalize(context))){matched=true;break}}if(!matched)continue}const rect=element.getBoundingClientRect(),style=getComputedStyle(element);if(rect.width<=0||rect.height<=0||style.visibility==='hidden'||style.display==='none'||('disabled' in element&&element.disabled))continue;elements.push(element)}}const candidates=index!==null&&index>=0&&index<elements.length?[elements[index]]:elements;if(candidates.length!==1)return {count:candidates.length,available:elements.length};const element=candidates[0],id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null,groupLabel=element.closest('label')||element.parentElement?.querySelector(':scope > label');element.setAttribute('data-cvent-agent-target',token);return {count:1,descriptor:{tag:element.tagName,role:element.getAttribute('role')||implicitRole(element),text:(element.innerText||element.textContent||'').trim().slice(0,500),label:(label?.innerText||groupLabel?.innerText||'').trim().slice(0,500),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),name:element.getAttribute('name'),href:element instanceof HTMLAnchorElement?element.href:null,disabled:'disabled' in element?Boolean(element.disabled):false,connected:element.isConnected}}})()`);
-        if(fallback.count!==1)throw new Error(`Write target preflight found ${fallback.count} exact accessible-name matches after the original locator failed`);
-        resolvedTarget=`[data-cvent-agent-target="${token}"]`;descriptor=fallback.descriptor;fallbackUsed=true;
-      }
-      result={resolved:descriptor,resolvedTarget,fallbackUsed};break;
-    }
+    case '__preflightTarget': {const resolved=await resolveTarget({target:params.target,targetContext:params.context,targetIndex:params.index});result={resolved:resolved.descriptor,resolvedTarget:resolved.target,fallbackUsed:resolved.fallbackUsed};break;}
     case 'probe': {const info=await ego.pageInfo();result={marker,targetId:wanted,url:info.url,title:info.title};break}
     case 'snapshotText': {
       const identity=await ego.evaluate(`(() => {if(!window.__CVENT_SNAPSHOT_DOCUMENT_ID){Object.defineProperty(window,'__CVENT_SNAPSHOT_DOCUMENT_ID',{value:crypto.randomUUID(),configurable:false});window.__CVENT_SNAPSHOT_GENERATION=0;new MutationObserver(()=>window.__CVENT_SNAPSHOT_GENERATION++).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true})}return {documentId:window.__CVENT_SNAPSHOT_DOCUMENT_ID,generation:window.__CVENT_SNAPSHOT_GENERATION,url:location.href}})()`);
@@ -78,8 +148,7 @@ try{
       result=await ego.evaluate(`(() => {const norm=v=>String(v||'').replace(/\\s+/g,' ').trim(),labelFor=element=>{const id=element.id,label=id?document.querySelector('label[for="'+CSS.escape(id)+'"]'):null;return norm(element.getAttribute('aria-label')||label?.innerText||element.closest('label')?.innerText||element.getAttribute('name')||element.getAttribute('placeholder'))},selectorFor=element=>element.id?'#'+CSS.escape(element.id):(element.getAttribute('name')?'[name="'+CSS.escape(element.getAttribute('name'))+'"]':null),rows=[...document.querySelectorAll('table tr,[role=row]')].slice(0,2000).map(row=>({text:norm(row.innerText||row.textContent).slice(0,5000),cells:[...row.querySelectorAll('th,td,[role=cell],[role=columnheader]')].map(cell=>norm(cell.innerText||cell.textContent).slice(0,2000)),links:[...row.querySelectorAll('a[href]')].map(link=>({text:norm(link.innerText||link.textContent).slice(0,1000),href:link.href})).slice(0,20)})).filter(row=>row.text),controls=[...document.querySelectorAll('input,select,textarea,[role=combobox]')].slice(0,500).map(element=>{const type=(element.getAttribute('type')||'').toLowerCase();return {selector:selectorFor(element),label:labelFor(element),type:type||element.tagName.toLowerCase(),value:type==='password'?null:('value' in element?String(element.value).slice(0,5000):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null,options:element.tagName==='SELECT'?[...element.options].map(option=>({label:norm(option.textContent),value:option.value,selected:option.selected})).slice(0,500):undefined}}),headings=[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(element=>norm(element.innerText||element.textContent)).filter(Boolean).slice(0,100),buttons=[...document.querySelectorAll('button,[role=button],input[type=submit]')].map(element=>({text:norm(element.innerText||element.value||element.getAttribute('aria-label')),disabled:Boolean(element.disabled)})).filter(item=>item.text).slice(0,200);return {url:location.href,title:document.title,rows,controls,headings,buttons}})()`);break;
     }
     case 'controlInventory': {
-      const inventory=await ego.evaluate(`(() => {const controls=[],seen=new Set();const walk=(root,path)=>{for(const element of root.querySelectorAll('*')){if(element.shadowRoot)walk(element.shadowRoot,path+' > '+element.tagName.toLowerCase()+(element.id?'#'+element.id:''));if(!element.matches('a,button,input,select,textarea,[role],[contenteditable=true]')||seen.has(element))continue;seen.add(element);const type=(element.getAttribute('type')||'').toLowerCase();controls.push({path,tag:element.tagName,role:element.getAttribute('role'),text:(element.innerText||element.textContent||'').trim().slice(0,500),id:element.id||null,name:element.getAttribute('name'),aria:element.getAttribute('aria-label'),title:element.getAttribute('title'),testId:element.getAttribute('data-cvent-id')||element.getAttribute('data-testid'),href:element instanceof HTMLAnchorElement?element.href:null,type:type||null,value:type==='password'?null:('value' in element?String(element.value).slice(0,500):null),checked:'checked' in element?Boolean(element.checked):null,disabled:'disabled' in element?Boolean(element.disabled):null})}};walk(document,'document');return {url:location.href,title:document.title,controls}})()`);
-      result={snapshotKind:'controlInventory',snapshot:JSON.stringify(inventory,null,2)};break;
+      result={snapshotKind:'controlInventory',snapshot:JSON.stringify(await compactControlInventory(),null,2)};break;
     }
     case 'pageInfo': result={page:await ego.pageInfo()};break;
     case 'scroll': {
@@ -121,13 +190,32 @@ try{
       await ego.goto(chosen.href,{waitUntil:'domcontentloaded',timeout});
       const afterPage=await ego.pageInfo(),afterUrl=new URL(afterPage.url),afterQuery=new URLSearchParams(afterUrl.search),afterKey=(afterQuery.get('evtstub')||afterQuery.get('eventid')||afterQuery.get('event')||'').toLowerCase();
       if(!afterUrl.hostname.toLowerCase().endsWith('cvent.com')||afterKey!==expectedKey||/\/events2\/eventselection/i.test(afterUrl.pathname))throw new Error('Bounded event navigation did not enter the exact authorized event');
-      const snapshot=await ego.snapshot();
-      result={openedEventKey:expectedKey,activation:'exact-visible-inventory-href',inventoryUrl:before.url,navigationTarget:{name:chosen.name,code:chosen.code,status:chosen.status,href:chosen.href,diagnostics:chosen,passes},snapshot};break;
+      // Do not request a full AX tree while the modern event shell is still
+      // loading hundreds of chunks. That added no identity evidence and could
+      // crash Chromium before target authorization. The next domain observation
+      // takes one native snapshot after the landing page has settled.
+      await ego.waitForTimeout(1000);
+      const landing=await ego.evaluate(`(() => ({ready:document.readyState,title:document.title,headings:[...document.querySelectorAll('h1,h2,h3,[role=heading]')].map(element=>String(element.innerText||element.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean).slice(0,20)}))()`);
+      result={openedEventKey:expectedKey,activation:'exact-visible-inventory-href',inventoryUrl:before.url,navigationTarget:{name:chosen.name,code:chosen.code,status:chosen.status,href:chosen.href,diagnostics:chosen,passes},landing};break;
     }
+    case 'actions': {
+      const actions=completedActions;
+      for(let index=0;index<params.steps.length;index++){
+        actionIndex=index;
+        const step=params.steps[index],started=performance.now();
+        const actionResult=await runAdaptive(step);
+        actions.push({index,operation:step.operation,intent:step.intent,durationMs:Math.round((performance.now()-started)*10)/10,result:actionResult});
+      }
+      result={objective:params.objective,commitMode:params.commitMode,actions,writesAttempted,actionCount:actions.length};break;
+    }
+    case 'screenshot': result={screenshotPath:await ego.screenshot({path:params.filePath,fullPage:params.fullPage===true})};break;
+    case 'visualClick': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.click([params.x,params.y],{label:params.label})};break;
+    case 'visualDoubleClick': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.dblclick([params.x,params.y],{label:params.label})};break;
     case 'click': result={result:await ego.click(params.target)};break;
     case 'activate': result={result:await ego.evaluateLocator(params.target,(element)=>{if(!(element instanceof HTMLElement))throw new Error('activate target must be an HTML element');element.click();return true})};break;
     case 'fill': result={result:await ego.fill(params.target,params.text??'')};break;
     case 'type': await ego.focus(params.target);result={result:await ego.insertText(params.text??'')};break;
+    case 'typeText': if(params.intent==='write'){await assertLease();await assertAuthorizedPage();writesAttempted++}result={result:await ego.insertText(params.text??'')};break;
     case 'hover': result={result:await ego.hover(params.target)};break;
     case 'selectOption': {
       const descriptor=await ego.evaluateLocator(params.target,(element)=>({tag:element.tagName,role:element.getAttribute('role')||''}));
@@ -159,6 +247,7 @@ try{
     }
     case 'selectText': result={selected:await ego.evaluateLocator(params.target,(element)=>{const range=document.createRange();range.selectNodeContents(element);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);element.closest('[contenteditable=true]')?.focus();return selection.toString()})};break;
     case 'drag': result={result:await ego.drag([params.target,params.destination],{delay:75})};break;
+    case 'visualDrag': await authorizeInteractive(params,await pointDescriptor(params.x,params.y));result={result:await ego.drag([[params.x,params.y],[params.toX,params.toY]],{delay:75,label:params.label})};break;
     case 'uploadDiscountImport': await ego.setInputFiles(params.target,params.filePath);result={uploadedArtifact:'discount-import.xlsx'};break;
     case 'navigate': result={result:await ego.goto(params.url,{waitUntil:params.waitUntil||'domcontentloaded',timeout:Math.max(1000,Math.min(Number(params.timeoutSeconds??30),180)*1000)})};break;
     case 'wait': {
@@ -174,4 +263,4 @@ try{
   if(after!==runtime.browserRuntimeId)throw new Error('Runtime marker changed after Ego action');
   const page=await ego.pageInfo();
   await output({marker:after,targetId:wanted,observedAt:new Date().toISOString(),page,...result});process.exit(0);
-}catch(e){await output(e?.stack||e?.message||String(e),false);process.exit(1)}
+}catch(e){await output({error:e?.stack||e?.message||String(e),actionIndex,writesAttempted,completedActions},false);process.exit(1)}

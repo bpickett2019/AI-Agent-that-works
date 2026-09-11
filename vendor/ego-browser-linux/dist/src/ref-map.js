@@ -28,7 +28,9 @@ class RefMap {
 }
 function parseRef(input) {
   const trimmed = String(input || "").trim();
+  const bracketed = trimmed.match(/^\[@?ref=(\d+)\]$/)?.[1] ?? null;
   for (const candidate of [
+    bracketed,
     trimmed.startsWith("@") ? trimmed.slice(1) : null,
     trimmed.startsWith("ref=") ? trimmed.slice(4) : null,
     trimmed

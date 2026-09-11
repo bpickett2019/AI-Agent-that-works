@@ -6,11 +6,11 @@ Keep the current Ego + Steel architecture unchanged for the demo. Do not refacto
 
 The two stale `cvent-steel-worker-*` containers were stopped. The canonical `cvent-one-shot-steel` container, browser runtime, login profile, and active CVENT Agent were preserved.
 
-## Non-negotiable observation policy
+## Observation policy
 
-**Never optimize performance by making DOM reads smaller.** Full-page/full-context DOM reads remain required so the agent can understand the complete interface, detect related controls, and verify state without losing context.
+Use Ego's default full-page `snapshotText` when entering an unknown ordinary DOM page or when the layout materially changed. That snapshot exists to enable action; it is not the deliverable. Do not repeat the same full snapshot after every primitive. Targeted reads and screenshots are appropriate for meaningful post-save verification, and screenshots plus mouse/keyboard operations are required for visual or virtualized surfaces.
 
-Post-demo optimization must not introduce partial-widget snapshots, reduced DOM scopes, truncated semantic reads, or selector-only observation as substitutes for complete reads. Targeted readiness checks may supplement full DOM reads, but may never replace or shrink them.
+Never reduce a snapshot so far that Ego cannot understand the relevant interface, but optimize primarily by taking fewer snapshots and performing more useful actions per coherent execution round.
 
 Also preserve:
 
@@ -18,13 +18,13 @@ Also preserve:
 - the browser action gate;
 - canonical runtime marker and target-ID verification;
 - authorized event-key verification;
-- confirmed Forge Intake `scopeIds` on every write;
+- independently validated RR provenance on every write;
 - unpublished-state and protected-identity safeguards;
 - the existing local Steel profile and authentication boundary.
 
 ## Why this runtime feels slower than desktop Ego Lite
 
-Desktop Ego Lite keeps its native browser, task space, helper runtime, and CDP connection alive. The current CVENT Agent path repeats substantial setup for individual operations:
+Desktop Ego Lite keeps its native browser, task space, helper runtime, and CDP connection alive. The regressed CVENT Agent path repeated substantial setup for individual operations:
 
 1. Start the Python browser router.
 2. Acquire and verify the cross-process browser gate.
@@ -49,27 +49,13 @@ Observed baseline during the demo run:
 
 InstantView is Silicon Motion software driving the two external monitors. Do not stop it or disrupt the monitor setup.
 
-## Post-demo optimization backlog
+## Restored execution architecture
 
-### 1. Persistent Ego worker — highest priority
+`cvent_browser(operation: actions)` now sends one model-planned sequence to one Python safety-gateway invocation and one Ego Node process. Ego imports its helpers, attaches to the canonical target, then continuously executes up to 80 navigation, semantic or visual actions, Saves, and readbacks. It no longer launches Python and Node once per step.
 
-Run one long-lived local Ego worker that retains:
+Each mutating sub-action still carries verified RR provenance. The action executor rechecks the active lease and exact event context immediately before each write, blocks permanent protected controls, and returns all action/readback evidence together. Navigation after a write is accepted only after the prior saved/autosaved group has a meaningful readback.
 
-- the Node process;
-- imported Ego helpers;
-- the browser-level CDP WebSocket;
-- the canonical target selection;
-- task-local ref/session state.
-
-Route commands to it over a local Unix socket or localhost-only API. The Python safety router remains authoritative and must fail closed if the worker, marker, target ID, event key, or browser gate differs.
-
-### 2. Safe multi-action transactions
-
-Allow related operations to execute within one worker transaction rather than launching a process for each step. Examples include observe → click → wait → full readback.
-
-Each mutating sub-action must still carry and validate exact confirmed Forge Intake `scopeIds`. Never batch across ownership changes, event-key changes, navigation to another event, or uncertain UI state.
-
-### 3. Event-driven stabilization
+### Remaining: event-driven stabilization
 
 Replace arbitrary fixed sleeps with readiness signals such as:
 
@@ -81,15 +67,15 @@ Replace arbitrary fixed sleeps with readiness signals such as:
 
 After readiness is reached, still perform the required complete DOM read. Readiness checks improve waiting behavior; they do not reduce observation coverage.
 
-### 4. Combine duplicate CDP handshakes
+### Remaining: combine duplicate CDP handshakes
 
 Today the Python live probe and Ego helper may establish separate CDP connections for one action. Have the persistent worker return verified marker, target ID, URL, title, and event key with each operation so redundant connection setup can be removed without weakening checks.
 
-### 5. Cache static policy data safely
+### Remaining: cache static policy data safely
 
 Keep the compiled Forge Intake manifest in memory inside the long-lived router/worker. Revalidate its file identity and SHA-256 whenever its mtime, size, inode, or configured path changes. Never cache authorization lock or live browser identity without a fresh check at mutation time.
 
-### 6. Reduce orchestration overhead, not DOM coverage
+### Remaining: reduce orchestration overhead, not observation quality
 
 Possible reductions include:
 
@@ -99,21 +85,21 @@ Possible reductions include:
 - combining adjacent safe operations;
 - reducing unnecessary status subprocesses and UI polling work.
 
-Do not reduce full DOM reads or post-write verification.
+Do not reduce the first sufficient observation on a materially changed page or any required post-write verification.
 
-### 7. Improve selector recovery
+### Remaining: improve selector recovery
 
 Record action timing and failure categories. When a selector fails, take one complete fresh DOM read and re-resolve from current state rather than repeating stale selectors or fixed waits. Preserve semantic-first interaction and bounded JS/CDP escape hatches.
 
-### 8. Steel container lifecycle cleanup
+### Remaining: Steel container lifecycle cleanup
 
 Automatically identify and stop stale `cvent-steel-worker-*` containers without touching the canonical `cvent-one-shot-steel` container. Require explicit identity checks before cleanup. Consider a startup reconciliation step and a graceful shutdown policy.
 
-### 9. Review unrelated workloads safely
+### Remaining: review unrelated workloads safely
 
 Inventory unused Docker/Supabase projects and other heavy local processes after the demo. Stop only workloads the user explicitly confirms are unused. Never stop InstantView, WindowServer, the canonical Steel container, the active CVENT Agent, or the persistent login profile as a performance shortcut.
 
-### 10. Add performance telemetry
+### Completed/continuing: performance telemetry
 
 Measure and log, without sensitive payloads:
 
@@ -130,6 +116,59 @@ Measure and log, without sensitive payloads:
 
 Use these measurements to compare the existing process-per-action implementation with the persistent worker.
 
+## September 10 live measurement
+
+The RR-to-existing-event run `job_e405c8574bcf4f5fb210c8c594b94cba`
+reached the exact authorized event and exercised native semantic and screenshot
+workflows before Anthropic rejected further calls for insufficient credit. Its
+performance summary recorded 51 model responses (486.9 seconds) and 23 browser
+operations (23.5 seconds). Three coherent read rounds performed six actions in
+three Ego launches, a 50% launch reduction for those steps. Their average round
+latency was 2.35 seconds, or about 1.18 seconds per contained action, versus the
+older observed 2.8-second scoped-click baseline. Only one full semantic snapshot
+was taken; later evidence used screenshots, a control inventory, and targeted
+reads.
+
+The consistent end-to-end denominator is total automation minus measured human
+handoff: 834.6 − 281.0 = 553.6 seconds. Model response time was therefore about
+486.9 / 553.6 ≈ 87.9% using the rounded benchmark values (88.0% from exact
+telemetry) of non-human automation time, not 95%. The earlier 95%
+figure mixed the narrower Pi event span with the wider end-to-end total and was
+incorrect. This is above the prior approximately 82% benchmark, but it is not a
+completion-speed result: the run spent too many model turns
+recovering from invalid action syntax, exact-locator mismatch, and a large
+control inventory, then stopped before any saved write. Browser execution was
+not the dominant measured cost.
+
+The live run also demonstrated visible navigation from Cvent inventory to the
+bound event Home page and classic Event Information editor. The browser remained
+responsive while rendering event details and edit controls. Final status was
+`failed_uncertain`, with zero successful writes and all protected-action counts
+zero; no complete end-to-end duration can honestly be reported.
+
+### Before/after benchmark status
+
+| Metric | September 10 baseline | Fresh action-heavy run |
+|---|---:|---:|
+| Model responses | 51 | Pending provider credit and hold review |
+| Responses with completed browser operation | 20 | Pending |
+| Zero-progress responses (retrospective rule) | 23 | Pending |
+| Ego rounds | 3 | Pending |
+| Actions per Ego round | 2.0 | Pending |
+| Model response time | 486.9 s | Pending |
+| Browser operation time | 23.5 s | Pending |
+| Human handoff | 281.5 s | Pending |
+| Non-human automation | 553.1 s | Pending |
+| Model share of non-human automation | 88.0% exact | Pending |
+| Successful saved writes | 0 | Pending |
+| End-to-end RR completion | No | Pending |
+
+The new summary schema adds, for every observed section: total model turns,
+turns with browser action, zero-progress turns, Ego rounds, actions per round,
+browser operations, model time, browser time, total wall span, and 1–3-turn
+budget overruns. A valid "after" column requires a new job; it cannot be inferred
+from unit tests or from the incomplete baseline.
+
 ## Azure evaluation after the demo
 
 Azure may improve stability by isolating Steel and Ego from desktop display and local development workloads. It will not by itself fix process-per-action overhead.
@@ -140,11 +179,8 @@ Benchmark local optimized execution before deciding to migrate. Compare the same
 
 ## Recommended order after the demo
 
-1. Add timing telemetry.
-2. Implement the persistent Ego worker.
-3. Add safe multi-action transactions.
-4. Replace fixed sleeps with event-driven readiness checks.
-5. Optimize duplicate probes and static policy loading.
-6. Add stale Steel lifecycle cleanup.
-7. Benchmark the optimized local system.
-8. Run an equivalent Azure proof of concept only if local results remain insufficient.
+1. Repeat the live RR run after Anthropic credit is restored; the September 10 run stopped in `event_settings` before a saved write.
+2. Replace remaining fixed sleeps with event-driven readiness checks.
+3. Optimize duplicate probes and static policy loading.
+4. Add stale Steel lifecycle cleanup.
+5. Consider a persistent worker only if per-round process startup remains material after model round trips are reduced.

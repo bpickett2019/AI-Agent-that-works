@@ -3,19 +3,24 @@ import { randomUUID, createHash } from "node:crypto";
 import { open, readFile, realpath, rename, mkdir, appendFile, lstat, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
+import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget } from "./prewrite-orchestration.mjs";
+
+const rrCache = new ValidatedRRCache();
+const recoveryBudget = new BrowserRecoveryBudget();
+let preparedRR: any = null;
 
 const BROWSER_OPERATION_NAMES = [
-  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
-  "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "screenshot", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
+  "actions", "scroll", "click", "activate", "visualClick", "visualDoubleClick", "fill", "type", "typeText", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "visualDrag", "uploadDiscountImport",
 ];
 const PI_BROWSER_OPERATION_NAMES = BROWSER_OPERATION_NAMES;
-const EGO_ACTION_OPERATIONS = ["pageInfo", "snapshotText", "readTarget", "sectionState", "controlInventory", "scroll", "click", "activate", "fill", "type", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "uploadDiscountImport"] as const;
+const EGO_ACTION_OPERATIONS = ["pageInfo", "snapshotText", "screenshot", "readTarget", "sectionState", "controlInventory", "scroll", "click", "activate", "visualClick", "visualDoubleClick", "fill", "type", "typeText", "navigate", "wait", "hover", "selectOption", "setChecked", "press", "search", "selectText", "drag", "visualDrag", "uploadDiscountImport"] as const;
 const TRUSTED_SECTION_PROCEDURES: Record<string, string> = {
   admission_items: "configureAdmissionItems", registration_types: "configureRegistrationTypes",
 };
 const BROWSER_OPERATIONS = new Set(BROWSER_OPERATION_NAMES);
 const READ_ONLY_OPERATIONS = new Set([
-  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
+  "probe", "recover", "authStatus", "authorizeTarget", "openAuthorizedEvent", "snapshotText", "screenshot", "readTarget", "sectionState", "controlInventory", "pageInfo", "scanEventList",
   "scroll", "navigate", "wait", "hover", "search", "selectText",]);
 const ALLOWED_KEYS = new Set([
   "Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -43,7 +48,7 @@ const ARTIFACTS: Record<string, string> = {
 };
 const ALLOWED_TOOLS = new Set([
   "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_ego_actions", "cvent_section_state", "cvent_execute_section",
+  "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_section_state", "cvent_execute_section",
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
@@ -57,6 +62,12 @@ const ROUTE_CACHE = join(resolve(requiredEnvironment("CVENT_JOB_DIR")), "cvent-r
 const queues = new Map<string, Promise<unknown>>();
 const extensionStarted = performance.now();
 let firstBrowserActionRecorded = false;
+type TurnProgress = {
+  turnIndex: number; section: string; browserOperations: number; browserActions: number; egoRounds: number;
+  toolNames: string[]; requiredVerification: boolean; ambiguityResolved: boolean; humanOrSecurityBoundary: boolean;
+  repeatedRead: boolean; modelDurationMs: number; toolCalls: Map<string, { name: string; args: any }>;
+};
+let activeTurnProgress: TurnProgress | null = null;
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -100,6 +111,23 @@ function toolText(value: unknown): { content: Array<{ type: "text"; text: string
   return { content: [{ type: "text", text }], details: {} };
 }
 
+async function toolBrowserResult(value: any): Promise<any> {
+  const base = toolText(value);
+  const paths = new Set<string>();
+  const visit = (item: any): void => {
+    if (!item || typeof item !== "object") return;
+    if (typeof item.screenshotPath === "string") paths.add(item.screenshotPath);
+    for (const child of Object.values(item)) visit(child);
+  };
+  visit(value);
+  for (const candidate of [...paths].slice(-2)) {
+    const path = assertFixedJobPath(candidate);
+    const image = await readJobFile(path, 12 * 1024 * 1024);
+    base.content.push({ type: "image", data: image.toString("base64"), mimeType: "image/png" } as any);
+  }
+  return base;
+}
+
 function safeChildEnvironment(kind: "browser" | "prepare"): NodeJS.ProcessEnv {
   const names = ["PATH", "LANG", "LC_ALL", "TZ"];
   const environment: NodeJS.ProcessEnv = {};
@@ -119,6 +147,7 @@ function safeChildEnvironment(kind: "browser" | "prepare"): NodeJS.ProcessEnv {
 }
 
 function runFixed(executable: string, args: string[], kind: "browser" | "prepare", signal?: AbortSignal, timeout = 120000): Promise<{ stdout: string; stderr: string }> {
+  const started = performance.now();
   return new Promise((resolvePromise, rejectPromise) => {
     execFile(executable, args, {
       cwd: repoRoot,
@@ -127,9 +156,20 @@ function runFixed(executable: string, args: string[], kind: "browser" | "prepare
       maxBuffer: MAX_CHILD_OUTPUT,
       signal,
       windowsHide: true,
-    }, (error, stdout, stderr) => {
+    }, async (error, stdout, stderr) => {
       if (error) {
-        rejectPromise(new Error(redact(`${error.message}\n${stderr || stdout}`)));
+        const message = redact(`${error.message}\n${stderr || stdout}`);
+        if (kind === "browser") {
+          const operation = args[args.indexOf("--operation") + 1] || "unknown";
+          recoveryBudget.failure(operation, message);
+          try {
+            await appendPerformance("browser_operation_failed", started, { operation, error: message, pid: process.pid });
+            await appendActivity(`Browser operation ${operation} failed: ${message.slice(-900)}`);
+            if (recoveryBudget.firstFailure) await atomicJson(join(jobDir, `first-browser-failure-${process.pid}.json`), recoveryBudget.firstFailure);
+            if (recoveryBudget.terminalFailure) await atomicJson(join(jobDir, `controller-failure-${process.pid}.json`), recoveryBudget.terminalFailure);
+          } catch { /* Preserve the actual helper error if telemetry fails. */ }
+        }
+        rejectPromise(new Error(message));
         return;
       }
       resolvePromise({ stdout: String(stdout), stderr: String(stderr) });
@@ -241,6 +281,16 @@ function hash(buffer: Buffer): string {
 }
 
 async function verifiedCompiledExpectations(): Promise<any> {
+  const revision = async () => {
+    await assertPrivateJobRoot();
+    const files = await Promise.all(["input.xlsx", "expected-domains.json", "rr-validation.json", "configuration-plan.json"].map(async (name) => {
+      const info = await lstat(join(jobDir, name));
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error("RR artifacts must be regular private job files");
+      return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs];
+    }));
+    return JSON.stringify([files, requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY"), requiredEnvironment("CVENT_AUTHORIZED_EVENT_ID"), requiredEnvironment("CVENT_AUTHORIZED_EVENT_NAME")]);
+  };
+  return rrCache.get(revision, async () => {
   const input = await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
   const expected = await readJson(join(jobDir, "expected-domains.json"), null);
   const validation = await readJson(join(jobDir, "rr-validation.json"), null);
@@ -255,6 +305,7 @@ async function verifiedCompiledExpectations(): Promise<any> {
     throw new Error("Write blocked: compiled RR expectations are stale or belong to another target");
   }
   return expected;
+  });
 }
 
 async function assertCompiledExpectations(): Promise<void> {
@@ -277,14 +328,23 @@ async function invokeBrowser(operation: string, params: Record<string, unknown>,
   }
   await readJobFile(runtimePath, 1024 * 1024);
   const trusted = Object.values(TRUSTED_SECTION_PROCEDURES).includes(operation);
-  const timeout = Math.max(1, Math.min(timeoutSeconds, trusted ? 900 : operation === "recover" ? 300 : 180));
+  const coherent = operation === "actions";
+  const timeout = Math.max(1, Math.min(timeoutSeconds, operation === "recover" ? 30 : trusted || coherent ? 900 : 180));
   const boundedParams = { ...params, timeoutSeconds: timeout };
   const output = await runFixed(python, [
     join(repoRoot, "browser_tool.py"), "--runtime", runtimePath, "--tool", "ego",
     "--operation", operation, "--params", JSON.stringify(boundedParams),
-  ], "browser", signal, (timeout + (operation === "recover" ? 45 : trusted ? 30 : 10)) * 1000);
+  ], "browser", signal, (timeout + (operation === "recover" ? 45 : trusted || coherent ? 30 : 10)) * 1000);
   const result = parseMarker(output.stdout, "BROWSER_ROUTER_RESULT=");
-  await appendPerformance("browser_operation", started, { operation, intent: params.intent, navigation: ["navigate", "openAuthorizedEvent"].includes(operation), snapshot: operation === "snapshotText", fullSnapshot: operation === "snapshotText", responseBytes: Buffer.byteLength(JSON.stringify(result)) });
+  if (operation === "recover") recoveryBudget.recovered();
+  const actionCount = coherent ? (params.steps as any[])?.length ?? 0 : 1;
+  if (activeTurnProgress) {
+    activeTurnProgress.browserOperations += 1;
+    activeTurnProgress.browserActions += actionCount;
+    if (coherent) activeTurnProgress.egoRounds += 1;
+    if (!activeTurnProgress.section && typeof params.domain === "string") activeTurnProgress.section = params.domain;
+  }
+  await appendPerformance("browser_operation", started, { operation, section: activeTurnProgress?.section || params.domain || "", intent: params.intent, navigation: ["navigate", "openAuthorizedEvent"].includes(operation), snapshot: operation === "snapshotText", fullSnapshot: operation === "snapshotText", egoExecutionRound: coherent, actionCount, responseBytes: Buffer.byteLength(JSON.stringify(result)) });
   return result;
 }
 
@@ -398,6 +458,22 @@ async function assertDomainEvidenceVerified(domain: string): Promise<void> {
   if (unsupported.length) throw new Error(`Trusted ${domain} procedure blocked: ${unsupported.length} RR evidence items are not independently VERIFIED`);
 }
 
+async function replayHolds(domain: string): Promise<any[]> {
+  const document = await readJson(join(jobDir, "replay-holds.json"), { holds: [] });
+  if (document.eventKey && document.eventKey !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY"))
+    throw new Error("Replay-hold evidence belongs to another event");
+  return (document.holds ?? []).filter((hold: any) => hold?.domain === domain && hold?.automaticReplayPermitted === false && cleanText(hold?.identity, 500));
+}
+
+async function assertNoHeldReplay(domain: string, payload: any): Promise<void> {
+  const serialized = JSON.stringify(payload);
+  for (const hold of await replayHolds(domain)) {
+    const identity = cleanText(hold.identity, 500);
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_-])${identity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_-]|$)`, "i");
+    if (pattern.test(serialized)) throw new Error(`MATCH_UNCERTAIN_HUMAN_REVIEW: automatic replay is blocked for held ${domain} identity ${identity}`);
+  }
+}
+
 function compactSectionComparison(domain: string, expected: any, observed: any): any {
   const rows = observed.rows ?? [];
   const normalizedRows = rows.map((row: any) => ({ ...row, normalized: cleanText(row.text, 10000).toLowerCase().replace(/\s+/g, " ") }));
@@ -445,7 +521,12 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     if (input.targetContext) params.targetContext = cleanText(input.targetContext, 1000);
     if (Number.isInteger(input.targetIndex)) params.targetIndex = Math.max(0, Math.min(Number(input.targetIndex), 20));
   }
-  if (["fill", "type", "search"].includes(operation)) params.text = cleanText(input.text, 20000);
+  if (["fill", "type", "typeText", "search"].includes(operation)) params.text = cleanText(input.text, 20000);
+  if (["visualClick", "visualDoubleClick", "visualDrag"].includes(operation)) {
+    params.x = Number(input.x); params.y = Number(input.y);
+    if (operation === "visualDrag") { params.toX = Number(input.toX); params.toY = Number(input.toY); }
+  }
+  if (operation === "screenshot") params.fullPage = input.fullPage === true;
   if (operation === "selectOption") {
     params.option = cleanText(input.option, 2000);
     params.optionBy = input.optionBy === "value" ? "value" : "label";
@@ -468,6 +549,7 @@ function browserParams(operation: string, input: any): Record<string, unknown> {
     if (["load", "domcontentloaded", "networkidle"].includes(input.loadState)) params.loadState = input.loadState;
   }
   params.intent = input.intent;
+  if (input.label) params.label = cleanText(input.label, 120);
   if (input.rrSource) params.rrSource = cleanText(input.rrSource, 500);
   return params;
 }
@@ -476,13 +558,37 @@ function validateGeneralBrowserAction(operation: string, params: any): void {
   if (!BROWSER_OPERATIONS.has(operation)) throw new Error("Capability denied: browser operation is not approved");
   if (!new Set(["read", "write"]).has(params.intent)) throw new Error("Capability denied: explicit read or write intent is required");
   if (READ_ONLY_OPERATIONS.has(operation) && params.intent !== "read") throw new Error(`${operation} is a read-only capability`);
-  if (["fill", "type", "selectOption", "setChecked", "drag", "uploadDiscountImport"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
+  if (["fill", "type", "typeText", "selectOption", "setChecked", "drag", "visualDrag", "uploadDiscountImport"].includes(operation) && params.intent !== "write") throw new Error(`${operation} requires write intent`);
   if (operation === "press" && !ALLOWED_KEYS.has(String(params.key))) throw new Error("Capability denied: keyboard key is not approved");
   if (operation === "press" && ["Backspace", "Delete"].includes(String(params.key)) && params.intent !== "write") throw new Error(`${params.key} requires write intent`);
   if (operation === "selectOption" && !["label", "value", undefined].includes(params.optionBy)) throw new Error("Capability denied: optionBy must be label or value");
   if (operation === "drag" && !params.destination) throw new Error("Capability denied: drag destination is required");
+  if (["visualClick", "visualDoubleClick", "visualDrag"].includes(operation)) {
+    for (const coordinate of operation === "visualDrag" ? [params.x, params.y, params.toX, params.toY] : [params.x, params.y]) {
+      if (!Number.isFinite(coordinate) || coordinate < 0 || coordinate > 10000) throw new Error("Capability denied: visual action coordinates are invalid");
+    }
+  }
   if (params.intent === "write" && !cleanText(params.rrSource, 500)) throw new Error("Dynamic Cvent writes require verified RR source evidence");
 }
+
+function validateActionRound(commitMode: string, steps: any[]): void {
+  let unverifiedWrite = false;
+  let saveObserved = false;
+  const readbacks = new Set(["readTarget", "sectionState", "controlInventory", "snapshotText", "screenshot"]);
+  for (const step of steps) {
+    validateGeneralBrowserAction(String(step.operation), step);
+    if (step.operation === "navigate" && unverifiedWrite) throw new Error("Verify the saved configuration group before navigating within an Ego action round");
+    if (step.intent === "write") {
+      unverifiedWrite = true;
+      if (["click", "activate", "press", "visualClick"].includes(step.operation) && /save/i.test(String(step.target ?? step.key ?? step.label ?? ""))) saveObserved = true;
+    } else if (unverifiedWrite && readbacks.has(step.operation) && (commitMode === "autosave" || saveObserved)) {
+      unverifiedWrite = false;
+      saveObserved = false;
+    }
+  }
+  if (unverifiedWrite) throw new Error("Every saved/autosaved configuration group needs meaningful readback in the same Ego action round");
+}
+
 
 function utf8Chunks(text: string, maxBytes: number): string[] {
   const chunks: string[] = [];
@@ -586,7 +692,7 @@ function pageArrays(value: any, offset: number, limit: number): any {
 const optionalStrings = Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 200 }));
 const browserActionFields = {
   intent: Type.Union([Type.Literal("read"), Type.Literal("write")]),
-  target: Type.Optional(Type.String({ maxLength: 4000, description: 'An exact target: role:<role>[name="<exact accessible name>"] or a stable CSS selector returned by controlInventory. Never use XPath-style text(), a bare element type, or snapshot prose such as menuitem "Details".' })),
+  target: Type.Optional(Type.String({ maxLength: 4000, description: 'An exact target copied from the latest Ego snapshot (`@123`, `ref=123`, or `[ref=123]`), an exact role:<role>[name="<accessible name>"], or stable CSS returned by compact section state. Prefer fresh snapshot refs. Never invent selector syntax.' })),
   targetContext: Type.Optional(Type.String({ maxLength: 1000 })),
   targetIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
   text: Type.Optional(Type.String({ maxLength: 20000 })),
@@ -602,6 +708,13 @@ const browserActionFields = {
   ms: Type.Optional(Type.Integer({ minimum: 50, maximum: 30000 })),
   domain: Type.Optional(literalUnion(DOMAIN_NAMES)),
   rrSource: Type.Optional(Type.String({ maxLength: 500 })),
+  x: Type.Optional(Type.Number({ minimum: 0, maximum: 10000 })),
+  y: Type.Optional(Type.Number({ minimum: 0, maximum: 10000 })),
+  toX: Type.Optional(Type.Number({ minimum: 0, maximum: 10000 })),
+  toY: Type.Optional(Type.Number({ minimum: 0, maximum: 10000 })),
+  fullPage: Type.Optional(Type.Boolean()),
+  label: Type.Optional(Type.String({ maxLength: 120 })),
+
   timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
 };
 const egoActionSchema = Type.Object({ operation: literalUnion(EGO_ACTION_OPERATIONS), ...browserActionFields });
@@ -609,25 +722,35 @@ const egoActionSchema = Type.Object({ operation: literalUnion(EGO_ACTION_OPERATI
 export default function cventJobTools(pi: any) {
   let turnStarted = 0;
   let firstTokenRecorded = false;
+  let currentSection = "";
+  const sectionTurns = new Map<string, number>();
+  const deliveredPlanReads = new Set<string>();
   const safeMetric = async (kind: string, started: number, details: Record<string, unknown> = {}) => {
     try { await appendPerformance(kind, started, details); } catch { /* metrics never block configuration */ }
   };
+  const sectionFrom = (toolName: string, args: any): string => {
+    const candidate = toolName === "cvent_plan" || toolName === "cvent_expectations" ? args?.section : args?.domain ?? args?.stage;
+    return DOMAINS.has(String(candidate ?? "")) ? String(candidate) : "";
+  };
+  const planDeliveryKey = (args: any): string =>
+    `${String(args?.section ?? "")}:${Number(args?.offset ?? 0)}:${Number(args?.limit ?? 0)}`;
   pi.on("session_start", async () => {
     pi.setActiveTools([...ALLOWED_TOOLS]);
     await safeMetric("pi_session_start", performance.now(), { pid: process.pid });
   });
   pi.on("context", async (event: any) => {
     const messages = event.messages ?? [];
-    if (messages.length <= 32) return undefined;
-    const initial = messages.find((message: any) => message.role === "user");
-    let start = Math.max(0, messages.length - 28);
-    while (start < messages.length && messages[start]?.role === "toolResult") start += 1;
-    const recent = messages.slice(start);
-    const filtered = initial && !recent.includes(initial) ? [initial, ...recent] : recent;
+    const filtered = retainJobContext(messages);
+    if (filtered === messages) return undefined;
     await safeMetric("context_pruned", performance.now(), { originalMessages: messages.length, retainedMessages: filtered.length });
     return { messages: filtered };
   });
-  pi.on("turn_start", () => { turnStarted = performance.now(); firstTokenRecorded = false; });
+  pi.on("turn_start", (event: any) => {
+    turnStarted = performance.now(); firstTokenRecorded = false;
+    activeTurnProgress = { turnIndex: Number(event.turnIndex ?? 0), section: currentSection, browserOperations: 0, browserActions: 0, egoRounds: 0,
+      toolNames: [], requiredVerification: false, ambiguityResolved: false, humanOrSecurityBoundary: false,
+      repeatedRead: false, modelDurationMs: 0, toolCalls: new Map() };
+  });
   pi.on("message_update", async (event: any) => {
     if (!firstTokenRecorded && event.message?.role === "assistant") {
       firstTokenRecorded = true;
@@ -637,17 +760,77 @@ export default function cventJobTools(pi: any) {
   pi.on("message_end", async (event: any) => {
     if (event.message?.role !== "assistant") return;
     const usage = event.message.usage ?? {};
+    const calls = (event.message.content ?? []).filter((item: any) => item.type === "toolCall");
+    for (const call of calls) {
+      const section = sectionFrom(String(call.name), call.arguments);
+      if (section) { currentSection = section; if (activeTurnProgress) activeTurnProgress.section = section; }
+    }
+    if (activeTurnProgress) {
+      activeTurnProgress.toolNames = calls.map((call: any) => String(call.name));
+      activeTurnProgress.modelDurationMs = Math.max(0, Math.round((performance.now() - (turnStarted || performance.now())) * 10) / 10);
+    }
     await safeMetric("anthropic_response", turnStarted || performance.now(), {
+      turnIndex: activeTurnProgress?.turnIndex ?? 0, section: activeTurnProgress?.section || "",
       inputTokens: usage.input ?? 0, outputTokens: usage.output ?? 0,
       cacheReadTokens: usage.cacheRead ?? 0, cacheWriteTokens: usage.cacheWrite ?? 0,
       totalTokens: usage.totalTokens ?? 0,
     });
   });
+  pi.on("tool_execution_start", (event: any) => {
+    if (!activeTurnProgress) return;
+    activeTurnProgress.toolCalls.set(String(event.toolCallId), { name: String(event.toolName), args: event.args ?? {} });
+    const section = sectionFrom(String(event.toolName), event.args);
+    if (section) { activeTurnProgress.section = section; currentSection = section; }
+    if (["cvent_plan", "cvent_expectations"].includes(String(event.toolName))) {
+      const key = planDeliveryKey(event.args);
+      if (deliveredPlanReads.has(key)) activeTurnProgress.repeatedRead = true;
+    }
+  });
+  pi.on("tool_execution_end", (event: any) => {
+    if (!activeTurnProgress || event.isError) return;
+    const call = activeTurnProgress.toolCalls.get(String(event.toolCallId));
+    const name = String(call?.name ?? event.toolName ?? "");
+    if (["cvent_plan", "cvent_expectations"].includes(name)) {
+      const args = call?.args ?? {};
+      const key = planDeliveryKey(args);
+      if (!deliveredPlanReads.has(key)) activeTurnProgress.ambiguityResolved = true;
+      deliveredPlanReads.add(key);
+    }
+    if (name === "cvent_snapshot_chunk") activeTurnProgress.ambiguityResolved = true;
+    if (["cvent_prepare_rr", "cvent_verify_domain", "cvent_finish"].includes(name)) activeTurnProgress.requiredVerification = true;
+    if (name === "cvent_login_handoff") activeTurnProgress.humanOrSecurityBoundary = true;
+  });
+  pi.on("turn_end", async () => {
+    const progress = activeTurnProgress;
+    if (!progress) return;
+    const zeroProgress = progress.browserOperations === 0 && !progress.ambiguityResolved && !progress.requiredVerification && !progress.humanOrSecurityBoundary;
+    let sectionTurn = 0;
+    if (DOMAINS.has(progress.section)) {
+      sectionTurn = (sectionTurns.get(progress.section) ?? 0) + 1;
+      sectionTurns.set(progress.section, sectionTurn);
+    }
+    const details = { turnIndex: progress.turnIndex, section: progress.section, sectionTurn, browserOperations: progress.browserOperations,
+      browserActions: progress.browserActions, egoRounds: progress.egoRounds, toolNames: progress.toolNames,
+      modelDurationMs: progress.modelDurationMs, repeatedRead: progress.repeatedRead, zeroProgress };
+    await safeMetric("model_response_progress", turnStarted || performance.now(), details);
+    if (zeroProgress) await safeMetric("MODEL_RESPONSE_WITH_ZERO_PROGRESS", performance.now(), details);
+    if (["event_settings", "registration_types", "admission_items", "pricing"].includes(progress.section) && sectionTurn > 3)
+      await safeMetric("MODEL_CALL_BUDGET_EXCEEDED", performance.now(), { section: progress.section, sectionTurn, targetMaximum: 3 });
+    activeTurnProgress = null;
+  });
   pi.on("before_agent_start", () => pi.setActiveTools([...ALLOWED_TOOLS]));
-  pi.on("tool_call", (event: any) => {
+  pi.on("tool_call", async (event: any) => {
     if (!ALLOWED_TOOLS.has(event.toolName)) {
       return { block: true, reason: "Capability denied: this production agent has no shell or general filesystem tools" };
     }
+    const decision = recoveryBudget.allow(event.toolName, event.input);
+    if (!decision.allowed) {
+      if (decision.terminal) await atomicJson(join(jobDir, `controller-failure-${process.pid}.json`), recoveryBudget.terminalFailure);
+      return { block: true, terminate: decision.terminal, reason: decision.terminal
+        ? "Browser runtime failed; stopping without further actions. The controller has the exact error. Do not reload the RR or reset the profile."
+        : "Browser runtime unavailable, not an RR or login failure. Only one cvent_browser recover (intent read) is permitted; do not reread plans or request SSO." };
+    }
+    if (decision.recovery || (event.toolName === "cvent_browser" && event.input?.operation === "recover")) event.input.timeoutSeconds = 30;
     return undefined;
   });
 
@@ -658,11 +841,19 @@ export default function cventJobTools(pi: any) {
     parameters: Type.Object({}),
     async execute(_id: string, _params: unknown, signal: AbortSignal) {
       return withQueue("job-files", async () => {
-        await readJobFile(join(jobDir, "input.xlsx"), 25 * 1024 * 1024);
         try {
           const existing = await verifiedCompiledExpectations();
-          await appendActivity(`RR preflight reverified ${existing.counts?.applicableFields ?? 0} writable configuration fields`);
-          return toolText({ ok: true, reusedPreflight: true, counts: existing.counts, identifiers: existing.identifierRegistry });
+          const alreadyPrepared = preparedRR === existing;
+          if (alreadyPrepared) return toolText({ ok: true, reusedPreflight: true, alreadyPrepared: true, instruction: "The validated RR plan is still in context. Continue at the browser boundary; do not repeat setup." });
+          const plan = await readJson(join(jobDir, "configuration-plan.json"), null);
+          const validation = await readJson(join(jobDir, "rr-validation.json"), null);
+          const firstDomain = plan.mission?.[0]?.domain;
+          await appendActivity(`RR plan ready: ${existing.counts?.applicableFields ?? 0} RR evidence fields; server preflight reused`);
+          preparedRR = existing;
+          return toolText({ ok: true, reusedPreflight: true, counts: existing.counts, target: plan.target,
+            mission: plan.mission.map((section: any) => ({ order: section.order, domain: section.domain, verifiedItems: section.verifiedItemIds?.length ?? 0, heldItems: section.heldItems })),
+            firstDomain, items: validation.items.filter((item: any) => item.domain === firstDomain),
+            instruction: "Setup and the first domain plan are complete. Check authentication and open the exact authorized event next. Do not reread summary or mission." });
         } catch {
           // Missing or stale artifacts are rebuilt only by the same fixed approved helpers below.
         }
@@ -695,6 +886,8 @@ export default function cventJobTools(pi: any) {
       const expected = await readJson(join(jobDir, "expected-domains.json"), null);
       if (!expected) throw new Error("Run cvent_prepare_rr first");
       const section = String(params.section);
+      const deliveryKey = planDeliveryKey(params);
+      if (deliveredPlanReads.has(deliveryKey)) return toolText({ ok: true, alreadyDelivered: true, section, instruction: "Use the validated RR data already present in the live model context; do not reread it through another wrapper." });
       let value: any;
       if (section === "summary") value = { rr: expected.rr, target: expected.target, counts: expected.counts };
       else if (section === "protected") value = expected.protected;
@@ -719,6 +912,8 @@ export default function cventJobTools(pi: any) {
       const plan = await readJson(join(jobDir, "configuration-plan.json"), null);
       const validation = await readJson(join(jobDir, "rr-validation.json"), null);
       const section = String(params.section);
+      const deliveryKey = planDeliveryKey(params);
+      if (deliveredPlanReads.has(deliveryKey)) return toolText({ ok: true, alreadyDelivered: true, section, instruction: "Use the validated RR data already present in the live model context; do not reread it through another wrapper." });
       if (section === "summary") return toolText({ counts: validation.counts, target: plan.target, executionRule: plan.executionRule });
       if (section === "mission") return toolText(plan.mission);
       if (!DOMAINS.has(section)) throw new Error("Capability denied: unknown plan section");
@@ -943,6 +1138,7 @@ export default function cventJobTools(pi: any) {
         gate.updatedAt = new Date().toISOString();
         await atomicJson(gatePath, gate);
         await appendActivity("Cvent login required; browser control handed to user for SSO/MFA");
+        const humanHandoffStarted = performance.now();
 
         const deadline = Date.now() + 60 * 60 * 1000;
         while (Date.now() < deadline) {
@@ -957,11 +1153,13 @@ export default function cventJobTools(pi: any) {
             resumed.updated_at = new Date().toISOString();
             await atomicJson(statePath, resumed);
             await appendActivity("User returned browser control; authenticated slot profile verified and persisted automatically");
+            await safeMetric("human_handoff", humanHandoffStarted, { boundary: "cvent_sso_mfa", completed: true });
             return toolText({ ok: true, resumed: true, profilePersisted: true,
               instruction: "Forge verified and persisted this slot's Cvent login. Fresh-read pageInfo and a complete snapshot before continuing." });
           }
           if (current.ownership === "NONE") throw new Error("Browser return was blocked; human review is required");
         }
+        await safeMetric("human_handoff", humanHandoffStarted, { boundary: "cvent_sso_mfa", completed: false });
         throw new Error("Cvent login handoff timed out after 60 minutes");
       });
     },
@@ -1017,8 +1215,10 @@ export default function cventJobTools(pi: any) {
         if (await pendingWriteReadback()) throw new Error("Complete the pending Cvent write readback before starting a trusted section procedure");
         const expected = await verifiedCompiledExpectations();
         await assertDomainEvidenceVerified(domain);
-        const records = trustedProcedureRecords(domain, expected);
-        if (!records.length) return toolText({ ok: true, domain, status: "ALREADY_CORRECT", records: [], detail: "RR contains no records for this section" });
+        const holds = await replayHolds(domain);
+        const heldIdentities = new Set(holds.map((hold: any) => cleanText(hold.identity, 500).toLowerCase()));
+        const records = trustedProcedureRecords(domain, expected).filter((record: any) => !heldIdentities.has(cleanText(record.code, 500).toLowerCase()));
+        if (!records.length) return toolText({ ok: true, domain, status: "ALREADY_CORRECT", records: [], replayHolds: holds, detail: "RR contains no non-held records for this section" });
         await updateBrowserProgress(`Running trusted multi-step Ego procedure for ${domain}`);
         const started = performance.now();
         const result = await invokeBrowser(operation, {
@@ -1030,63 +1230,7 @@ export default function cventJobTools(pi: any) {
           rrSha256: expected.rr?.sha256, recordedAt: new Date().toISOString() });
         await appendActivity(`Trusted ${domain} Ego mission returned ${result.status}: ${result.records?.length ?? 0} records, ${result.mutationCount ?? 0} mutations`);
         await updateBrowserProgress(result.status === "AUTH_REQUIRED" ? `Cvent authentication required while entering ${domain}` : `Trusted ${domain} mission finished: ${result.status}`);
-        return toolText({ ok: true, domain, ...result });
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "cvent_ego_actions",
-    label: "Execute adaptive Ego actions",
-    description: "Execute one model-planned, bounded sequence of ordinary Ego browser actions against the exact authorized event. Use exact role:<role>[name=\"<accessible name>\"] targets or stable CSS from controlInventory. Entering a section or edit mode is a read_only mission; changing configuration is a save/autosave mission. A save mission must include the actual explicit Save click/press followed by readback—not merely an Edit click. Group an editor's actions without a Claude round-trip per primitive. Safety, lease, lifecycle, target preflight, write audit, uncertainty, and protected-action blocks apply to every step. Specialized section procedures are optional optimizations, not prerequisites.",
-    parameters: Type.Object({
-      domain: literalUnion(DOMAIN_NAMES),
-      objective: Type.String({ minLength: 1, maxLength: 1200 }),
-      commitMode: Type.Union([Type.Literal("save"), Type.Literal("autosave"), Type.Literal("read_only")]),
-      steps: Type.Array(egoActionSchema, { minItems: 1, maxItems: 80 }),
-    }),
-    async execute(_id: string, params: any, signal: AbortSignal) {
-      return withQueue("browser", async () => {
-        await assertSnapshotConsumed();
-        const domain = String(params.domain), steps = params.steps as any[];
-        const writeIndexes = steps.flatMap((step, index) => step.intent === "write" ? [index] : []);
-        if (params.commitMode === "read_only" && writeIndexes.length) throw new Error("Read-only Ego action mission cannot contain writes");
-        if (params.commitMode !== "read_only" && !writeIndexes.length) throw new Error("Configuration Ego action mission contains no writes");
-        if (writeIndexes.length) {
-          await assertCompiledExpectations();
-          await assertDomainEvidenceVerified(domain);
-          const lastWrite = writeIndexes[writeIndexes.length - 1];
-          const readbacks = new Set(["readTarget", "sectionState", "controlInventory", "snapshotText"]);
-          if (!steps.slice(lastWrite + 1).some(step => step.intent === "read" && readbacks.has(step.operation))) {
-            throw new Error("Adaptive Ego write mission requires an explicit post-write readback step");
-          }
-          if (steps.slice(writeIndexes[0] + 1).some(step => step.operation === "navigate")) {
-            throw new Error("Adaptive Ego write mission cannot navigate away before Claude evaluates its readback");
-          }
-          if (params.commitMode === "save" && !steps.some(step => step.intent === "write" && ["click", "activate", "press"].includes(step.operation) && /save/i.test(String(step.target ?? step.key ?? "")))) {
-            throw new Error("Adaptive Ego save mission requires an explicit reviewed Save action");
-          }
-        }
-        await updateBrowserProgress(`Ego dynamically executing ${domain}: ${cleanText(params.objective, 500)}`);
-        const results: any[] = [];
-        for (let index = 0; index < steps.length; index++) {
-          const step = steps[index], operation = String(step.operation);
-          validateGeneralBrowserAction(operation, step);
-          if (step.intent === "write") {
-            const pending = await pendingWriteReadback() ?? {};
-            await atomicJson(WRITE_READBACK_PENDING, {
-              operations: [...(pending.operations ?? []), operation].slice(-100),
-              rrSources: [...(pending.rrSources ?? []), cleanText(step.rrSource, 500)].slice(-100),
-              requiredAt: pending.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
-            });
-          }
-          const result = await invokeBrowser(operation, browserParams(operation, step), signal, Number(step.timeoutSeconds ?? 90));
-          results.push({ index, operation, intent: step.intent, result });
-        }
-        if (writeIndexes.length) await clearWriteReadback();
-        await appendActivity(`Adaptive Ego ${domain} mission completed ${steps.length} browser actions in one model tool call: ${cleanText(params.objective, 500)}`);
-        await updateBrowserProgress(`Adaptive Ego ${domain} mission returned with post-write readback`);
-        return toolText({ ok: true, domain, objective: params.objective, commitMode: params.commitMode, actions: results });
+        return toolText({ ok: true, domain, replayHolds: holds, ...result });
       });
     },
   });
@@ -1094,16 +1238,49 @@ export default function cventJobTools(pi: any) {
   pi.registerTool({
     name: "cvent_browser",
     label: "General Cvent Ego browser",
-    description: "Dynamically inspect and operate the real Cvent UI in the canonical browser. Ordinary exact-event navigation, create/update controls, Save, and readback are available; the application independently enforces RR provenance, lease/lifecycle, target preflight, auditing, uncertainty, and permanent protected-action blocks.",
+    description: "Ego's read/write browser operator for the exact selected Cvent event. Observe once with snapshotText for semantic DOM or screenshot for visual/virtualized UI, then use operation=actions for substantial predictable progress—normally many click/fill/select/keyboard/save/readback steps, potentially across multiple exact records—in one Ego process. Copy refs from the newest snapshot. Primitive operations are exceptional and only for genuinely unpredictable next state. The gateway independently enforces RR provenance, lease/lifecycle, target identity, protected-action blocks, auditing, and uncertain-write holds.",
     parameters: Type.Object({
       operation: Type.Union(PI_BROWSER_OPERATION_NAMES.map((name) => Type.Literal(name))),
       ...browserActionFields,
+      objective: Type.Optional(Type.String({ minLength: 1, maxLength: 1200 })),
+      commitMode: Type.Optional(Type.Union([Type.Literal("save"), Type.Literal("autosave"), Type.Literal("read_only")])),
+      steps: Type.Optional(Type.Array(egoActionSchema, { minItems: 1, maxItems: 80 })),
       maxScrolls: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })),
     }),
     async execute(_id: string, params: any, signal: AbortSignal) {
       const operation = String(params.operation);
-      validateGeneralBrowserAction(operation, params);
+      if (operation !== "actions") validateGeneralBrowserAction(operation, params);
       return withQueue("browser", async () => {
+        if (operation === "actions") {
+          const domain = String(params.domain ?? ""), steps = params.steps as any[] | undefined;
+          if (!DOMAINS.has(domain) || !params.objective || !params.commitMode || !steps?.length) throw new Error("A coherent Ego action round requires domain, objective, commitMode, and steps");
+          const writeIndexes = steps.flatMap((step, index) => step.intent === "write" ? [index] : []);
+          if (params.commitMode === "read_only" && writeIndexes.length) throw new Error("Read-only Ego action round cannot contain writes");
+          if (params.commitMode !== "read_only" && !writeIndexes.length) throw new Error("Configuration Ego action round contains no writes");
+          validateActionRound(params.commitMode, steps);
+          await assertSnapshotConsumed();
+          if (writeIndexes.length) {
+            await assertCompiledExpectations();
+            await assertDomainEvidenceVerified(domain);
+            await assertNoHeldReplay(domain, params);
+            const pending = await pendingWriteReadback() ?? {};
+            await atomicJson(WRITE_READBACK_PENDING, {
+              operations: [...(pending.operations ?? []), ...writeIndexes.map(index => steps[index].operation)].slice(-100),
+              rrSources: [...(pending.rrSources ?? []), ...writeIndexes.map(index => cleanText(steps[index].rrSource, 500))].slice(-100),
+              requiredAt: pending.requiredAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
+            });
+          }
+          await updateBrowserProgress(`Ego executing coherent ${domain} work: ${cleanText(params.objective, 500)}`);
+          const boundedSteps = steps.map(step => ({ operation: String(step.operation), ...browserParams(String(step.operation), step) }));
+          const result = await invokeBrowser("actions", { intent: writeIndexes.length ? "write" : "read", domain, objective: cleanText(params.objective, 1200), commitMode: params.commitMode, steps: boundedSteps }, signal, Number(params.timeoutSeconds ?? 780));
+          if (writeIndexes.length) await clearWriteReadback();
+          await appendPerformance("ego_execution_round", performance.now(), { domain, actionCount: steps.length, writeCount: writeIndexes.length, fullSnapshots: steps.filter(step => step.operation === "snapshotText").length });
+          await appendPerformance("EGO_ROUND_ACTION_DENSITY", performance.now(), { domain, actionCount: steps.length, writeCount: writeIndexes.length, objective: cleanText(params.objective, 500) });
+          if (steps.length < 4) await appendPerformance("LOW_ACTION_DENSITY", performance.now(), { domain, actionCount: steps.length, commitMode: params.commitMode, objective: cleanText(params.objective, 500) });
+          await appendActivity(`Ego ${domain} round completed ${steps.length} continuous browser actions: ${cleanText(params.objective, 500)}`);
+          await updateBrowserProgress(`Ego ${domain} round verified and returned`);
+          return toolBrowserResult(result);
+        }
         const write = params.intent === "write";
         await updateBrowserProgress(write ? `Validating scoped Cvent write: ${operation}` : `Reading Cvent browser: ${operation}`);
         try {
@@ -1113,9 +1290,14 @@ export default function cventJobTools(pi: any) {
           if (readback && ["navigate", "openAuthorizedEvent", "scanEventList"].includes(operation)) {
             throw new Error("Verify pending Cvent configuration changes before leaving the current page");
           }
-          if (write) await assertCompiledExpectations();
+          if (write) {
+            await assertCompiledExpectations();
+            if (!params.domain) throw new Error("Every adaptive Cvent write requires its validated RR domain");
+            await assertDomainEvidenceVerified(String(params.domain));
+            await assertNoHeldReplay(String(params.domain), params);
+          }
           const input = browserParams(operation, params);
-          const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 240 : 90)), operation === "recover" ? 300 : 180));
+          const timeout = Math.max(1, Math.min(Number(params.timeoutSeconds ?? (operation === "recover" ? 35 : 90)), operation === "recover" ? 35 : 180));
           const result = await invokeBrowser(operation, input, signal, timeout);
           if (operation === "navigate" && params.url) await rememberSectionRoute(String(params.url));
           const packaged = await saveLargeSnapshot(result);
@@ -1132,7 +1314,7 @@ export default function cventJobTools(pi: any) {
             if (!transport || transport.complete === true) await clearWriteReadback();
           }
           await updateBrowserProgress(write ? `Configuring selected Cvent event: ${operation}` : `Cvent browser read complete: ${operation}`);
-          return toolText(packaged);
+          return toolBrowserResult(packaged);
         } catch (error) {
           await updateBrowserProgress(`${write ? "Cvent write" : "Cvent browser read"} blocked safely during ${operation}`);
           throw error;

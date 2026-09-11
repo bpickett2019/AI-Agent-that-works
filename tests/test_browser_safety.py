@@ -8,7 +8,6 @@ ROOT=Path(__file__).resolve().parents[1]
 HTML=(ROOT/'templates/index.html').read_text()
 APP=(ROOT/'app.py').read_text()
 PROMPT=(ROOT/'PI_PROMPT.md').read_text()
-SKILL=(ROOT/'.agents/skills/cvent-browser/SKILL.md').read_text()
 ROUTER=(ROOT/'browser_tool.py').read_text()
 EGO_DIRECT=(ROOT/'ego_direct.mjs').read_text()
 
@@ -216,6 +215,38 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertFalse((self.base/'scope-write-audit.jsonl').exists())
         self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
 
+    def test_coherent_action_round_uses_one_ego_process_for_many_actions(self):
+        current={'url':'https://app.cvent.com/event?evtstub=locked'}
+        params={'intent':'read','domain':'pricing','objective':'open and inspect pricing','commitMode':'read_only','steps':[
+            {'operation':'click','intent':'read','target':'role:menuitem[name="Registration"]'},
+            {'operation':'wait','intent':'read','ms':250},
+            {'operation':'sectionState','intent':'read','domain':'pricing'},
+        ]}
+        completed=subprocess.CompletedProcess(['node'],0,'BROWSER_TOOL_RESULT={"ok":true,"actions":[],"actionCount":3,"writesAttempted":0}\n','')
+        with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
+             patch.object(browser_tool,'guard',return_value=current), \
+             patch.object(browser_tool.subprocess,'run',return_value=completed) as launched:
+            result=browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','actions',params)
+        self.assertEqual(result['actionCount'],3)
+        self.assertEqual(launched.call_count,1)
+        self.assertIn('--operation',launched.call_args.args[0])
+        self.assertIn('actions',launched.call_args.args[0])
+
+    def test_failed_action_round_before_first_write_does_not_create_uncertainty_hold(self):
+        current={'url':'https://app.cvent.com/event?evtstub=locked'}
+        params={'intent':'write','domain':'pricing','objective':'save pricing','commitMode':'save','steps':[
+            {'operation':'fill','intent':'write','target':'#fee','text':'10','rrSource':'Pricing!B2'},
+        ]}
+        failed=subprocess.CompletedProcess(['node'],1,'BROWSER_TOOL_RESULT={"ok":false,"error":"target absent","writesAttempted":0,"actionIndex":0}\n','')
+        with patch.object(browser_tool,'action',side_effect=lambda *_:nullcontext()), \
+             patch.object(browser_tool,'guard',return_value=current), \
+             patch.object(browser_tool.subprocess,'run',return_value=failed):
+            with self.assertRaisesRegex(RuntimeError,'target absent'):
+                browser_tool.run_direct(self.base/'runtime.json',self.runtime,'ego','actions',params)
+        records=[json.loads(line) for line in (self.base/'scope-write-audit.jsonl').read_text().splitlines()]
+        self.assertEqual([record['result'] for record in records],['attempted','rejected_prewrite'])
+        self.assertFalse((self.base/'browser-mutation-uncertain.json').exists())
+
     def test_trusted_procedure_accepts_only_typed_rr_values(self):
         admission={'intent':'write','rrSource':'VERIFIED RR domain: admission_items','timeoutSeconds':600,'records':[
             {'code':'FULL','name':'Full Access','source':'Sheet!D5','registrationTypes':[{'code':'ATT','name':'Attendee'}],'knownRegistrationTypes':[{'code':'ATT','name':'Attendee'}]},
@@ -317,7 +348,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
 
     def test_ego_inside_steel_is_the_only_active_router(self):
         self.assertIn('Use only the fixed `cvent_*` tools',PROMPT)
-        self.assertIn('Ego is the default live Cvent UI operator',SKILL)
+        self.assertFalse((ROOT/'.agents/skills/cvent-browser/SKILL.md').exists())
         self.assertFalse((ROOT/'browser_use_operator.py').exists())
         self.assertFalse((ROOT/'browser_use_direct.py').exists())
         self.assertIn("choices=['auto','ego']",ROUTER)
@@ -326,7 +357,7 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('The uploaded RR is the source of truth',PROMPT)
         self.assertNotIn("scopeIds",ROUTER)
         self.assertIn('Do not require per-field scope IDs',PROMPT)
-        self.assertIn('Use Ego semantically against the current UI',PROMPT)
+        self.assertIn("Use Ego's native observe → act repeatedly → verify → continue pattern",PROMPT)
         self.assertIn('no shell, generic filesystem',PROMPT)
         extension=(ROOT/'extensions/cvent-job-tools.ts').read_text()
         self.assertIn('this production agent has no shell or general filesystem tools',extension)
@@ -339,18 +370,37 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertNotIn('params.expression',extension)
         self.assertNotIn('params.method',extension)
         self.assertIn('name: "cvent_execute_section"',extension)
-        self.assertIn('name: "cvent_ego_actions"',extension)
+        self.assertNotIn('name: "cvent_ego_actions"',extension)
         self.assertIn('General Cvent Ego browser',extension)
+        self.assertIn('operation === "actions"',extension)
+        self.assertIn('one Ego process',extension)
+        self.assertIn('let writesAttempted=0,actionIndex=-1;\ntry{',EGO_DIRECT)
+        self.assertIn('async function dispatch(step,callback)',EGO_DIRECT)
+        self.assertIn('Native Cvent combobox found',EGO_DIRECT)
+        self.assertIn("const landing=await ego.evaluate",EGO_DIRECT)
+        self.assertIn('compactControlInventory',EGO_DIRECT)
+        self.assertNotIn("await assertAuthorizedPage();writesAttempted++;",EGO_DIRECT)
+        snapshot=(ROOT/'vendor/ego-browser-linux/dist/src/cdp-snapshot.js').read_text()
+        refs=(ROOT/'vendor/ego-browser-linux/dist/src/ref-map.js').read_text()
+        self.assertIn('node.backendDOMNodeId',snapshot)
+        self.assertIn('`[ref=${node.backendDOMNodeId}]`',snapshot)
+        self.assertIn('trimmed.match(/^\\[@?ref=',refs)
+        self.assertIn('MODEL_RESPONSE_WITH_ZERO_PROGRESS',extension)
+        self.assertIn('MODEL_CALL_BUDGET_EXCEEDED',extension)
+        self.assertIn('EGO_ROUND_ACTION_DENSITY',extension)
         self.assertIn('PI_BROWSER_OPERATION_NAMES',extension)
         self.assertIn('trustedProcedureRecords',extension)
         self.assertNotIn('cvent_run_js',extension)
         self.assertNotIn('cvent_raw_cdp',extension)
-        for operation in ('recover','authStatus','openAuthorizedEvent','readTarget','sectionState','controlInventory','activate','selectOption','setChecked','press','search','hover','selectText','drag','uploadDiscountImport'):
+        for operation in ('recover','authStatus','openAuthorizedEvent','snapshotText','screenshot','actions','readTarget','sectionState','controlInventory','activate','visualClick','visualDoubleClick','typeText','selectOption','setChecked','press','search','hover','selectText','drag','visualDrag','uploadDiscountImport'):
             self.assertIn(f'"{operation}"',extension)
         self.assertIn('Snapshot chunks must be read exactly once in order',extension)
         self.assertIn('Snapshot worker/browser/job identity mismatch',extension)
         self.assertIn('assertCompiledExpectations',extension)
         self.assertIn('compiled RR expectations are stale or belong to another target',extension)
+        self.assertIn('assertNoHeldReplay',extension)
+        self.assertIn('Every adaptive Cvent write requires its validated RR domain',extension)
+        self.assertIn('replayHolds: holds',extension)
         self.assertNotIn('scope IDs are not applicable in the compiled RR',extension)
         self.assertIn('reusedPreflight',extension)
         self.assertIn('Configuring selected Cvent event',extension)
@@ -394,13 +444,13 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn("$('browser-error').textContent=e.message",ui)
         self.assertIn('fixConnectionLabel',APP)
         self.assertIn('immediately call `cvent_login_handoff`',PROMPT)
-        self.assertIn('use `cvent_login_handoff` for human SSO/MFA',SKILL)
+        self.assertIn('immediately call `cvent_login_handoff`',PROMPT)
     def test_ego_scroll_search_precedes_advanced_search(self):
         self.assertIn("'scanEventList'",ROUTER)
         self.assertIn('`scanEventList` → successful `openAuthorizedEvent` → `authorizeTarget`',PROMPT)
         self.assertIn('Require exactly one exact name/key match',PROMPT)
-        self.assertIn('role:button[name="Edit"]',PROMPT)
-        self.assertIn('an Edit click alone is not a save mission',PROMPT)
+        self.assertIn('copy its fresh `[ref=N]` target',PROMPT)
+        self.assertIn('not one field per return',PROMPT)
 
 class BrowserGateTests(unittest.TestCase):
     def setUp(self):
