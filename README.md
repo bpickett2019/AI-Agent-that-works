@@ -25,7 +25,14 @@ python -m uvicorn app:app --env-file .env.local --host 127.0.0.1 --port 8880
 
 Open <http://127.0.0.1:8880>. Docker must be running. Select the approved event,
 upload the RR, then explicitly start the build and complete Cvent login when asked.
-Starting the UI alone does not run a build. `.env.local`, OAuth credentials,
+Starting the UI alone does not run a build. Empty, draft and finished workspaces
+make no background polling requests after their initial page load. Live status
+polling is enabled only for an active job with a stored RR workbook and bound
+event; these local status requests never call the model. Uploading alone does
+not spend model tokens—START BUILD/CONTINUE must be explicitly requested.
+An existing active job retains its stored workbook/target even when new-upload
+fields are blank; its loaded workbook and bound target are displayed separately.
+`.env.local`, OAuth credentials,
 workbooks, browser profiles and job logs are not committed. Without the explicit
 Simple Mode/Codex settings, the inherited code defaults to Anthropic/controlled mode.
 

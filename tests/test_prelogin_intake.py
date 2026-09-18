@@ -37,6 +37,7 @@ class PreloginIntakeTests(unittest.TestCase):
             stack.enter_context(patch.object(runner,'shutdown'))
             start = stack.enter_context(patch.object(runner,'start',return_value={}))
             browser = stack.enter_context(patch.object(runner,'steel_command',side_effect=AssertionError('No browser before start')))
+            provider = stack.enter_context(patch.object(runner,'verify_provider_access',side_effect=AssertionError('No provider before explicit start')))
             stack.enter_context(patch('event_inventory.events_for_workspace',side_effect=AssertionError('No login before upload')))
             wb = Workbook(); wb.active['A1'] = 'Different workbook event name must not select the target'
             data = io.BytesIO(); wb.save(data); wb.close()
@@ -46,6 +47,11 @@ class PreloginIntakeTests(unittest.TestCase):
                 self.assertEqual(events.status_code,200)
                 self.assertEqual(events.json(),[{'event_id':KEY,'name':'Selected Clone','event_code':'EVT-1'}])
                 headers = {'X-CSRF-Token':me['csrf']}
+                self.assertEqual(client.get('/api/jobs').json(), [])
+                self.assertEqual(client.get('/api/status?worker_slot=2').json()['status'], 'waiting_for_rr')
+                self.assertEqual(client.post('/api/start', headers=headers).status_code, 404)
+                self.assertEqual(client.post('/api/upload', headers=headers).status_code, 422)
+                start.assert_not_called(); browser.assert_not_called(); provider.assert_not_called()
                 response = client.post('/api/upload',headers=headers,data={'event_id':KEY,'worker_slot':'1'},files={'rr':('RR.xlsx',data.getvalue(),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
                 self.assertEqual(response.status_code,200,response.text)
                 job = store.get_job(response.json()['job_id'])
@@ -55,7 +61,7 @@ class PreloginIntakeTests(unittest.TestCase):
                 jobdir = directory(job['workspace_id'],job['id'])
                 self.assertTrue((jobdir/'input.xlsx').exists())
                 self.assertFalse((jobdir/'authorized-target.json').exists())
-                start.assert_not_called(); browser.assert_not_called()
+                start.assert_not_called(); browser.assert_not_called(); provider.assert_not_called()
                 unknown = client.post('/api/upload',headers=headers,data={'event_id':'11111111-1111-4111-8111-111111111111'},files={'rr':('RR.xlsx',data.getvalue())})
                 self.assertEqual(unknown.status_code,404)
                 result = client.post('/api/start',headers=headers,params={'job_id':job['id']})
