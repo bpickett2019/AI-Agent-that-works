@@ -17,17 +17,53 @@ is read only from `ANTHROPIC_API_KEY`; Azure production loads it from Key Vault
 with a VM managed identity. No API key is accepted in the UI, source, Terraform
 variables, or process command line.
 
+## Local ChatGPT subscription / Astra
+
+The local-only Simple Mode runner can use `openai-codex/gpt-6-astra` through the
+operator's existing Pi OAuth login. It does not use an OpenAI API key or the
+Anthropic key. This is explicitly rejected in staging/production.
+
+Keep the existing local data root, authorized-event list, identity, and loopback
+lease URL, and start the server with these additional settings:
+
+```bash
+export CVENT_ENV=development CVENT_EXECUTION_MODE=simple CVENT_LOCAL_CODEX=1
+export CVENT_PI_PROVIDER=openai-codex CVENT_PI_MODEL=gpt-6-astra
+export CVENT_PI_AUTH_FILE="$HOME/.pi/agent/auth.json"
+# From /Users/bp/cvent-local-dynamic, with the existing local settings:
+python3 -m uvicorn app:app --host 127.0.0.1 --port 8878
+```
+
+`local_codex.py` validates private, operator-owned OAuth storage. The Pi SDK
+launcher uses its canonical path for shared refresh locking while retaining
+per-job settings, sessions, and the existing restricted Cvent extension/tools.
+Credentials are never copied into job directories. Startup performs a no-tools
+subscription availability probe before Steel or Cvent; quota exhaustion still
+fails closed. No fallback to another model or API billing is allowed.
+
+A successful provider probe or workbook-read smoke test is **not** evidence of a
+completed Cvent build. A live full-RR run still requires the selected event,
+user authentication, and persisted readback verification.
+
 ## Emergency Simple Mode
 
 Set `CVENT_EXECUTION_MODE=simple` in the server environment and restart with no active leases. The unchanged UI launches one Pi mission with the original RR evidence and selected event. Pi owns its checklist, Ego actions, Save/readback and recovery; the legacy domain/adaptor/provenance/atomic-round controller is bypassed. Browser ownership, canonical-event leases, target checks, permanent action blocks and audits remain. Owned reads remain available on error/login pages so Pi can recover; mutations still require live target/authentication proof. Ego stdout is saved as readable text. Final reporting preserves Pi's QA and counts native UI edits, Save clicks and acknowledged commit observations separately. Use assisted rollout until live full-RR completion is established; unit tests alone are not acceptance.
 
 ## Local development
 
+For **offline dynamic Excel → Pi → Ego regression checks**, run
+`bash scripts/test_local_dynamic.sh` from this checkout. No API key, SSO, live
+browser, or deployment is needed. See [local implementation and test scope](docs/LOCAL-DYNAMIC-EXCEL-EGO.md).
+
+The server command below is separate: even on localhost, starting a live job
+can contact the model provider and Cvent. Do not use it for offline validation.
+
 ```bash
 cd /Users/bp/cvent-one-shot
 python3 -m pip install -r requirements.txt
 npm ci
 export CVENT_ENV=development
+export CVENT_EXECUTION_MODE=simple
 export CVENT_DEV_AUTH_SUBJECT=local-operator
 export CVENT_DEV_AUTH_NAME='Local operator'
 export CVENT_DEV_AUTH_ADMIN=1
@@ -38,10 +74,17 @@ python3 -m uvicorn app:app --host 127.0.0.1 --port 8877
 Open <http://127.0.0.1:8877>. Docker must be running. Local development auth is
 explicit and cannot activate when `CVENT_ENV=production`.
 
-Selectable events are refreshed from each workspace's authenticated Cvent event
-inventory and cached only in that workspace. Selection binds the exact canonical
-event key/name/code into the job; `openAuthorizedEvent` re-resolves that identity
-in live Cvent before writes. RR content never selects or changes event identity.
+For the original **target → upload → browser → login → execute** flow, configure
+`CVENT_AUTHORIZED_EVENTS_JSON` (or its base64 equivalent `CVENT_AUTHORIZED_EVENTS_B64`)
+with an explicit list of `{event_id, event_key, name, event_code}` objects. IDs must
+be the same canonical Cvent UUID. That list is available before Cvent login, so
+intake does not depend on an authenticated browser. Without explicit configuration,
+selection uses the workspace's authenticated inventory as before.
+
+After START BUILD, the existing worker launches Steel and Pi; login happens in that
+browser. `openAuthorizedEvent` must independently re-resolve the selected exact
+identity in live Cvent before writes. Intake authorization is not live target proof,
+and RR content never selects or changes event identity.
 
 ## Safety model
 

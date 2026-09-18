@@ -3,7 +3,7 @@
 !.env.example
 .DS_Store
 __pycache__/
-node_modules/
+node_modules
 *.py[cod]
 *.log
 *.pid

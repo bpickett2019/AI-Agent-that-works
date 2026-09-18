@@ -1,11 +1,13 @@
 """Authenticated, workspace-local Cvent event inventory and exact target resolution."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -101,11 +103,42 @@ def events_for_workspace(workspace_id: str) -> tuple[AuthorizedEvent, ...]:
         return read_events(workspace_id)
 
 
+def selectable_events(workspace_id: str) -> tuple[AuthorizedEvent, ...]:
+    """Intake authorization is not proof of a live authenticated Cvent target.
+
+    Preserve the original target -> upload -> browser -> login flow when an
+    operator supplies the explicit allowlist. Jobs must still resolve the exact
+    canonical event in the authenticated browser before any Cvent write.
+    """
+    raw = os.environ.get("CVENT_AUTHORIZED_EVENTS_JSON")
+    encoded = os.environ.get("CVENT_AUTHORIZED_EVENTS_B64")
+    if raw is None and encoded is None:
+        return events_for_workspace(workspace_id)
+    try:
+        values = json.loads(raw if raw is not None else base64.b64decode(encoded, validate=True).decode("utf-8"))
+        if not isinstance(values, list) or not values:
+            raise ValueError("expected a non-empty event list")
+        events = []
+        seen = set()
+        for value in values:
+            key = str(uuid.UUID(value["event_key"]))
+            event_id = str(uuid.UUID(value["event_id"]))
+            name = value["name"]
+            code = value.get("event_code", "")
+            if event_id != key or key in seen or not isinstance(name, str) or not name.strip() or not isinstance(code, str):
+                raise ValueError("ambiguous or invalid event identity")
+            seen.add(key)
+            events.append(AuthorizedEvent(key, name.strip(), key, code.strip()))
+        return tuple(events)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise RuntimeError("Invalid server-authorized target list; require unique canonical event_id/event_key and exact name") from exc
+
+
 def resolve_event(workspace_id: str, event_id: str) -> AuthorizedEvent:
     wanted = str(event_id or "").strip().lower()
-    matches = [event for event in events_for_workspace(workspace_id) if event.event_id == wanted]
+    matches = [event for event in selectable_events(workspace_id) if event.event_id == wanted]
     if not matches:
-        raise KeyError("EVENT_NOT_FOUND: selected event is absent from authenticated Cvent inventory")
+        raise KeyError("EVENT_NOT_FOUND: selected event is absent from the authorized target list")
     if len(matches) != 1:
         raise KeyError("EVENT_AMBIGUOUS: selected event does not resolve uniquely")
     return matches[0]

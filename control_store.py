@@ -192,6 +192,40 @@ class ControlStore:
                 rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [dict(row) for row in rows]
 
+    def _reservation_details(self, conn: sqlite3.Connection, lease: sqlite3.Row) -> dict[str, Any]:
+        """Explain a reservation without treating UI/process state as release authority."""
+        holder = conn.execute("SELECT * FROM jobs WHERE id=?", (lease["holder_job_id"],)).fetchone()
+        state = holder["state"] if holder else "unknown"
+        phase = {"starting": "starting browser/agent", "running": "agent running",
+                 "login_required": "waiting for Cvent sign-in", "stopping": "stopping safely"}.get(state, "reservation awaiting reconciliation")
+        # During a handoff Pi keeps its live lease while state.json/browser-gate
+        # record USER ownership; the database can still say running.
+        if holder and state in {"running", "login_required"}:
+            directory = self.path.parent / "workspaces" / holder["workspace_id"] / "jobs" / holder["id"]
+            try:
+                gate = json.loads((directory / "browser-gate.json").read_text())
+                progress = json.loads((directory / "state.json").read_text())
+                if gate.get("ownership") == "USER":
+                    phase = "waiting for Cvent sign-in" if progress.get("status") == "login_required" else "waiting for browser control"
+            except (OSError, ValueError, AttributeError):
+                pass
+        return {"job_id": lease["holder_job_id"], "slot_id": lease["slot_id"],
+                "job_state": state, "phase": phase, "pid": holder["pid"] if holder else None,
+                "heartbeat_at": lease["heartbeat_at"], "expires_at": lease["expires_at"]}
+
+    @staticmethod
+    def _reservation_message(blockers: list[dict[str, Any]], event: bool = False) -> str:
+        # Deliberately avoid the legacy friendlyError trigger phrases. The
+        # existing UI otherwise rewrites every selected slot into "USER 1".
+        if len(blockers) == 1:
+            item = blockers[0]
+            slot = item["slot_id"]
+            location = f"worker slot {slot}" if slot is not None else "another worker"
+            subject = f"This event is reserved on {location}" if event else f"Worker slot {slot} is reserved"
+            return f"{subject}: {item['phase']}. Resume the existing run or ask its operator to stop it safely. This new run was not started or queued."
+        summary = "; ".join(f"{item['slot_id']}: {item['phase']}" for item in blockers)
+        return f"No worker slots are free ({summary}). Resume an existing run or ask its operator to stop it safely. This new run was not started or queued."
+
     def reserve_now(self, job_id: str, actor: str) -> dict[str, Any]:
         """Immediately acquire a worker and event lease or reject without waiting.
 
@@ -209,23 +243,29 @@ class ControlStore:
             startable = {"draft", "login_required", "review_required", "failed", "failed_prewrite", "failed_recoverable", "cancelled"}
             if not job or job["state"] not in startable:
                 result = {"error": "Job cannot be started from its current state"}
-            elif conn.execute("SELECT 1 FROM event_leases WHERE event_id=?", (job["event_id"],)).fetchone():
-                result = {"error": "Event is busy; another job holds the canonical event lease"}
-                self._audit(conn, actor, "job.start_rejected", job_id, {"reason": "event_busy"})
+            elif event_lease := conn.execute(
+                """SELECT e.*,w.slot_id FROM event_leases e LEFT JOIN worker_leases w
+                   ON w.holder_job_id=e.holder_job_id AND w.token=e.token WHERE e.event_id=?""",
+                (job["event_id"],),
+            ).fetchone():
+                blockers = [self._reservation_details(conn, event_lease)]
+                result = {"error": self._reservation_message(blockers, event=True)}
+                self._audit(conn, actor, "job.start_rejected", job_id,
+                            {"reason": "event_busy", "requested_slot": job["preferred_slot"], "blockers": blockers})
             else:
-                occupied = {row[0] for row in conn.execute("SELECT slot_id FROM worker_leases")}
+                occupied = {row["slot_id"]: row for row in conn.execute("SELECT * FROM worker_leases")}
                 preferred = job["preferred_slot"]
                 slot_id = preferred if preferred in range(1, self.slots + 1) and preferred not in occupied else (
                     next((slot for slot in range(1, self.slots + 1) if slot not in occupied), None)
                     if preferred is None else None
                 )
                 if slot_id is None:
-                    message = (
-                        f"Selected worker slot {preferred} is busy"
-                        if preferred is not None else "All three worker slots are busy"
-                    )
+                    blockers = [self._reservation_details(conn, occupied[slot])
+                                for slot in sorted(occupied) if preferred is None or slot == preferred]
+                    message = self._reservation_message(blockers) if blockers else "Requested worker slot is invalid; choose an available configured slot."
                     result = {"error": message}
-                    self._audit(conn, actor, "job.start_rejected", job_id, {"reason": "worker_busy"})
+                    self._audit(conn, actor, "job.start_rejected", job_id,
+                                {"reason": "worker_busy", "requested_slot": preferred, "blockers": blockers})
                 else:
                     token = uuid.uuid4().hex
                     values = (job_id, token, now, now, expires)

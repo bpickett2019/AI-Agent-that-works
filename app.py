@@ -23,7 +23,7 @@ from browser_gate import BrowserGate
 from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page
 from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
-from event_inventory import events_for_workspace, read_events, resolve_event
+from event_inventory import selectable_events, read_events, resolve_event
 from runtime_config import DATA_ROOT, ROOT, browser_auth_metadata_path, browser_profile_dir, job_dir, validate_production_environment
 from workbook_ops import info as workbook_info_data, sheet as workbook_sheet_data, update as update_workbook_data
 
@@ -264,7 +264,7 @@ def me(request: Request):
 def events(request: Request):
     identity = current_user(request)
     try:
-        inventory = events_for_workspace(identity["workspace_id"])
+        inventory = selectable_events(identity["workspace_id"])
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
     return [{"event_id": event.event_id, "name": event.name, "event_code": event.event_code}

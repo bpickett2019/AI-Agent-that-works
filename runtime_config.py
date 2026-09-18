@@ -93,15 +93,20 @@ def slot_by_id(slot_id: int) -> WorkerSlot:
 
 def pi_provider() -> str:
     provider = os.environ.get("CVENT_PI_PROVIDER", "anthropic")
-    if provider != "anthropic":
-        raise RuntimeError("CVENT_PI_PROVIDER must be anthropic")
+    if provider == "openai-codex":
+        from local_codex import require_local_codex
+        require_local_codex()
+    elif provider != "anthropic":
+        raise RuntimeError("Unsupported CVENT_PI_PROVIDER")
     return provider
 
 
 def pi_model() -> str:
-    model = os.environ.get("CVENT_PI_MODEL", "claude-sonnet-4-6")
-    if model not in {"claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"}:
-        raise RuntimeError("CVENT_PI_MODEL must be claude-sonnet-4-6")
+    provider = pi_provider()
+    expected = "gpt-6-astra" if provider == "openai-codex" else "claude-sonnet-4-6"
+    model = os.environ.get("CVENT_PI_MODEL", expected)
+    if model not in {expected, f"{provider}/{expected}"}:
+        raise RuntimeError(f"CVENT_PI_MODEL must be {expected}")
     return model.split("/", 1)[-1]
 
 

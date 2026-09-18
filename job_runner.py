@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from performance_monitor import monitor as monitor_performance
 from mutation_outcome import mutation_outcome
 from runtime_config import DATA_ROOT, ROOT, AuthorizedEvent, browser_cache_dir, browser_profile_dir, job_dir, pi_model, pi_provider, slot_by_id
 from telemetry_report import write_telemetry_report
+from local_codex import codex_environment
 
 
 def now() -> str:
@@ -68,6 +70,14 @@ def classify_process_outcome(code: int, report_status: str, reported_state: str,
     )
     error = f"{provider_failure}; {outcome}" if provider_failure else f"CVENT Agent exited with code {code}; {outcome}"
     return finish_state, uncertain, error
+
+
+def stopped_job_action(state: str, error: str | None) -> str:
+    if error:
+        return error
+    if state == "login_required":
+        return "Agent stopped waiting for login; worker released. Continue this job to reopen the browser and sign in."
+    return "Draft build complete" if state == "completed" else "Review required"
 
 
 class UploadTooLarge(ValueError):
@@ -215,6 +225,10 @@ class JobRunner:
             "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_FEDERATED_TOKEN_FILE",
         ):
             environment.pop(name, None)
+        if pi_provider() == "openai-codex":
+            environment.pop("ANTHROPIC_API_KEY", None)
+            environment.pop("OPENAI_API_KEY", None)
+            environment.update(codex_environment(job_dir(job["workspace_id"], job["id"])))
         return environment
 
     def prepare_environment(self, job: dict[str, Any], slot_id: int) -> dict[str, str]:
@@ -236,33 +250,53 @@ class JobRunner:
         return environment
 
     def verify_provider_access(self, directory: Path) -> dict[str, Any]:
-        """Fail before Steel/Cvent when the approved Anthropic account cannot serve even one token."""
+        """Fail before Steel/Cvent if the selected provider cannot serve a bounded probe."""
+        provider, model = pi_provider(), pi_model()
         cache = read_json(directory / "provider-probe.json", {})
         try:
             checked = datetime.fromisoformat(cache.get("checkedAt", ""))
-            if cache.get("ok") and (datetime.now(timezone.utc) - checked).total_seconds() < 600:
+            if (cache.get("ok") and cache.get("provider") == provider and cache.get("model") == model
+                    and 0 <= (datetime.now(timezone.utc) - checked).total_seconds() < 600):
                 return cache
         except Exception:
             pass
         environment = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if os.environ.get(name)}
-        environment["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_API_KEY", "")
-        environment["CVENT_PI_MODEL"] = pi_model()
+        environment["CVENT_PI_MODEL"] = model
+        if provider == "openai-codex":
+            environment.update(codex_environment(directory))
+            command = ["node", str(ROOT / "scripts/run_pi_codex.mjs"), "--probe"]
+            cwd, timeout = directory, 60
+            scope = "No-tools Codex subscription availability probe; not a remaining-quota check"
+        else:
+            environment["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_API_KEY", "")
+            command = [sys.executable, str(ROOT / "provider_probe.py")]
+            cwd, timeout = ROOT, 30
+            scope = "One-token Anthropic availability probe; not a remaining-credit balance check"
         started = time.monotonic()
-        completed = subprocess.run([sys.executable, str(ROOT / "provider_probe.py")], cwd=ROOT, env=environment,
-                                   text=True, capture_output=True, timeout=30)
+        try:
+            completed = subprocess.run(command, cwd=cwd, env=environment,
+                                       text=True, capture_output=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            atomic_json(directory / "provider-probe.json", {
+                "ok": False, "classification": "probe_unavailable", "provider": provider,
+                "model": model, "checkedAt": now(), "errorType": type(exc).__name__,
+            })
+            raise RuntimeError(f"{provider} preflight failed: probe_unavailable") from exc
         try:
             result = json.loads((completed.stdout or "{}").splitlines()[-1])
         except Exception:
             result = {"ok": False, "classification": "invalid_probe_result"}
+        if not isinstance(result, dict):
+            result = {"ok": False, "classification": "invalid_probe_result"}
         result.update({"checkedAt": now(), "durationMs": round((time.monotonic() - started) * 1000, 1),
-                       "scope": "one-token availability probe; Anthropic exposes no approved remaining-credit balance endpoint"})
+                       "provider": provider, "model": model, "scope": scope})
         atomic_json(directory / "provider-probe.json", result)
         if completed.returncode or not result.get("ok"):
-            raise RuntimeError(f"Anthropic preflight failed: {result.get('classification', 'unavailable')}")
+            raise RuntimeError(f"{provider} preflight failed: {result.get('classification', 'unavailable')}")
         return result
 
     def prepare_rr(self, job: dict[str, Any], slot_id: int) -> dict[str, Any]:
-        """Compile the current RR before any browser or model process can start."""
+        """Load literal workbook evidence; compiled hints are optional in Simple Mode."""
         directory = job_dir(job["workspace_id"], job["id"])
         workbook = directory / "input.xlsx"
         inspection = directory / "input.inspection.json"
@@ -275,23 +309,54 @@ class JobRunner:
         completed = None
         timings = []
         preflight_started = time.monotonic()
+        simple = os.environ.get("CVENT_EXECUTION_MODE") == "simple"
+
+        def original_only(reason: str) -> dict[str, Any]:
+            # Never feed stale/wrong-event compiler output to Pi; retain it as
+            # diagnostic evidence rather than destroying artifacts on resume.
+            archive = directory / "compiler-diagnostics" / uuid.uuid4().hex
+            for name in ("expected-domains.json", "rr-validation.json", "configuration-plan.json"):
+                source = directory / name
+                if source.exists():
+                    archive.mkdir(parents=True, exist_ok=True)
+                    source.rename(archive / name)
+            atomic_json(directory / "preflight-performance.json", {
+                "stages": timings, "totalMs": round((time.monotonic() - preflight_started) * 1000, 1),
+                "source": "original_workbook", "compilerWarning": reason,
+            })
+            append_log(directory, "Optional RR compiler unavailable; Pi will use original sheet/cell evidence: " + reason)
+            return {}
+
         for stage, command_line in commands:
             started = time.monotonic()
-            completed = subprocess.run(
-                command_line, cwd=ROOT, env=environment, text=True, capture_output=True, timeout=180,
-            )
+            try:
+                completed = subprocess.run(
+                    command_line, cwd=ROOT, env=environment, text=True, capture_output=True, timeout=180,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                timings.append({"stage": stage, "durationMs": round((time.monotonic() - started) * 1000, 1)})
+                if simple and stage != "rr_load_inspection":
+                    return original_only(f"{stage}: {type(exc).__name__}")
+                raise RuntimeError(f"RR preflight failed at {stage}: {type(exc).__name__}") from exc
             timings.append({"stage": stage, "durationMs": round((time.monotonic() - started) * 1000, 1)})
             if completed.returncode:
                 detail = (completed.stderr or completed.stdout).strip().splitlines()
-                if os.environ.get('CVENT_EXECUTION_MODE') == 'simple' and stage != 'rr_load_inspection':
-                    for name in ('expected-domains.json', 'rr-validation.json', 'configuration-plan.json'):
-                        (directory / name).unlink(missing_ok=True)
-                    append_log(directory, 'Optional RR compiler unavailable; Pi will use original sheet/cell evidence: ' + (detail[-1] if detail else stage))
-                    return {}
-                raise RuntimeError("RR preflight failed: " + (detail[-1] if detail else "approved helper failed"))
+                reason = detail[-1] if detail else "approved helper failed"
+                if simple and stage != "rr_load_inspection":
+                    return original_only(reason)
+                raise RuntimeError("RR preflight failed: " + reason)
         expected = read_json(directory / "expected-domains.json", {})
         validation = read_json(directory / "rr-validation.json", {})
         plan = read_json(directory / "configuration-plan.json", {})
+        if (
+            not all(isinstance(value, dict) for value in (expected, validation, plan))
+            or not isinstance(expected.get("rr"), dict)
+            or not isinstance(expected.get("target"), dict)
+            or not isinstance(plan.get("target"), dict)
+        ):
+            if simple:
+                return original_only("RR compiler produced malformed expectations")
+            raise RuntimeError("RR preflight produced malformed expectations")
         atomic_json(directory / "preflight-performance.json", {
             "stages": timings, "totalMs": round((time.monotonic() - preflight_started) * 1000, 1),
             "validationCounts": validation.get("counts", {}),
@@ -307,6 +372,8 @@ class JobRunner:
             or plan.get("rrSha256") != expected.get("rr", {}).get("sha256")
             or plan.get("target", {}).get("eventId") != job["event_id"]
         ):
+            if simple:
+                return original_only("RR preflight produced stale or mismatched expectations")
             raise RuntimeError("RR preflight produced stale or mismatched expectations")
         return expected
 
@@ -377,10 +444,11 @@ class JobRunner:
                 "worker_slot": active.slot_id, "started_at": state.get("started_at") or now(), "updated_at": now(),
             })
             atomic_json(directory / "state.json", state)
-            state.update({"current_action": "Verifying Anthropic account access before Cvent", "updated_at": now()})
+            state.update({"current_action": f"Verifying {pi_provider()}/{pi_model()} access before Cvent", "updated_at": now(),
+                          "model_provider": pi_provider(), "model_id": pi_model()})
             atomic_json(directory / "state.json", state)
             provider = self.verify_provider_access(directory)
-            append_log(directory, f"Anthropic one-token access probe passed in {provider.get('durationMs', 0)} ms")
+            append_log(directory, f"{pi_provider()}/{pi_model()} access probe passed in {provider.get('durationMs', 0)} ms")
             state.update({"current_action": "Compiling and verifying the current RR", "updated_at": now()})
             atomic_json(directory / "state.json", state)
             expected = self.prepare_rr(job, active.slot_id)
@@ -419,7 +487,7 @@ class JobRunner:
                 "pi_pid": process.pid, "process_started_at": now(), "resume_requested": False, "updated_at": now(),
             })
             atomic_json(directory / "state.json", state)
-            append_log(directory, f"Started isolated Anthropic Pi process PID {process.pid} on worker {active.slot_id}")
+            append_log(directory, f"Started isolated {pi_provider()}/{pi_model()} Pi process PID {process.pid} on worker {active.slot_id}")
             self._monitor(job, active)
         except Exception as exc:
             append_log(directory, f"Worker launch failed closed: {type(exc).__name__}: {exc}")
@@ -504,7 +572,7 @@ class JobRunner:
             except Exception:
                 pass
         state.update({
-            "status": finish_state, "current_action": error or ("Draft build complete" if finish_state == "completed" else "Review required"),
+            "status": finish_state, "current_action": stopped_job_action(finish_state, error),
             "pi_pid": None, "last_process_started_at": state.get("process_started_at"), "process_started_at": None,
             "worker_slot": None, "updated_at": now(),
         })
@@ -609,6 +677,8 @@ class JobRunner:
             "--tools", capability_tools,
             "--session-dir", str(sessions), "--name", f"cvent-{job['id']}",
         ]
+        if pi_provider() == "openai-codex":
+            command_line = ["node", str(ROOT / "scripts/run_pi_codex.mjs"), "--job"]
         if state.get("resume_requested") is True:
             session_files = sorted(sessions.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
             if not session_files:
@@ -676,7 +746,7 @@ class JobRunner:
         config = directory / "pi-config"
         config.mkdir(parents=True, exist_ok=True)
         atomic_json(config / "settings.json", {
-            "defaultProvider": "anthropic", "defaultModel": "claude-sonnet-4-6",
+            "defaultProvider": pi_provider(), "defaultModel": pi_model(),
             "defaultThinkingLevel": os.environ.get("CVENT_PI_THINKING", "high"),
             "defaultProjectTrust": "never", "enableInstallTelemetry": False,
             "retry": {
@@ -713,8 +783,10 @@ class JobRunner:
             text = handle.read().decode(errors="replace").lower()
         if "credit balance is too low" in text:
             return "Anthropic API credit balance is too low"
+        if "codex_job_failed" in text:
+            return "Codex subscription job failed; inspect the job session and provider access before retrying"
         if "rate_limit_error" in text or "rate limit" in text or "status 429" in text:
-            return "Anthropic API rate limit prevented the agent from continuing"
+            return f"{pi_provider()} rate limit prevented the agent from continuing"
         if "authentication_error" in text or "invalid x-api-key" in text:
             return "Anthropic API authentication failed"
         return None
@@ -729,7 +801,8 @@ class JobRunner:
     def _is_pi_process(pid: int) -> bool:
         try:
             command = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True).strip()
-            return bool(command and re.search(r"(^|/)pi(?:\s|$)", command))
+            return bool(command and (re.search(r"(^|/)pi(?:\s|$)", command)
+                                     or str(ROOT / "scripts/run_pi_codex.mjs") in command))
         except Exception:
             return False
 

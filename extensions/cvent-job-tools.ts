@@ -1283,8 +1283,8 @@ export default function cventJobTools(pi: any) {
       status: Type.Optional(literalUnion(["running", "login_required", "review_required"])),
       stage: Type.Optional(SIMPLE ? Type.String({ maxLength: 80 }) : literalUnion(JOB_STAGES)),
       action: Type.Optional(Type.String({ maxLength: 1200 })),
-      completed: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 20 })),
-      pending: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 20 })),
+      completed: Type.Optional(Type.Array(Type.String({ maxLength: SIMPLE ? 500 : 80 }), { maxItems: SIMPLE ? 1000 : 20 })),
+      pending: Type.Optional(Type.Array(Type.String({ maxLength: SIMPLE ? 500 : 80 }), { maxItems: SIMPLE ? 1000 : 20 })),
       reviewRequired: optionalStrings,
       verification: Type.Optional(Type.String({ maxLength: 6000, description: "Simple Mode: your determination from fresh persisted readback, not merely 'Save clicked'. Records verification in the audit; no RR cell metadata required." })),
       log: Type.Optional(Type.String({ maxLength: 1200 })),
@@ -1458,6 +1458,24 @@ export default function cventJobTools(pi: any) {
     parameters: Type.Object({}),
     async execute(_id: string, _params: unknown, signal: AbortSignal) {
       return withQueue("browser", async () => {
+        const gatePath = join(jobDir, "browser-gate.json");
+        const statePath = join(jobDir, "state.json");
+        const endLoginWait = async (reason: string) => {
+          const state = await readJson(statePath, {});
+          state.status = "login_required";
+          state.current_stage = "login_handoff";
+          state.current_action = "Login wait ended. Continue this job to reopen its browser and complete sign-in.";
+          state.updated_at = new Date().toISOString();
+          await atomicJson(statePath, state);
+          await appendActivity(`${reason}; ending Pi run so normal teardown releases the worker`);
+          return { ...toolText({ ok: false, loginRequired: true, reason, instruction: state.current_action }), terminate: true };
+        };
+        const initialGate = await readJson(gatePath, {});
+        if (initialGate.ownership === "USER" && initialGate.desiredOwnership === "USER") {
+          // Do not repeatedly call pageInfo/authStatus through a USER-owned gate.
+          // The controller, not this tool, owns lease teardown and uncertainty QA.
+          return endLoginWait("Browser is still handed to the user");
+        }
         let pageResult = await invokeBrowser("pageInfo", { intent: "read" }, signal, 45);
         let pageUrl = String(pageResult?.page?.url ?? "");
         let pageTitle = String(pageResult?.page?.title ?? "");
@@ -1498,12 +1516,10 @@ export default function cventJobTools(pi: any) {
             instruction: "Cvent login already active in this worker's isolated profile; fresh-read a complete snapshot and continue." });
         }
 
-        const gatePath = join(jobDir, "browser-gate.json");
         const gate = await readJson(gatePath, {});
         if (gate.ownership !== "AGENT" || gate.desiredOwnership !== "AGENT" || ![undefined, null, "NONE"].includes(gate.activeActor)) {
           throw new Error("Login handoff requires an idle agent-owned browser gate");
         }
-        const statePath = join(jobDir, "state.json");
         const state = await readJson(statePath, {});
         if (SIMPLE) state.resume_stage = state.current_stage;
         state.status = "login_required";
@@ -1546,7 +1562,7 @@ export default function cventJobTools(pi: any) {
           if (current.ownership === "NONE") throw new Error("Browser return was blocked; human review is required");
         }
         await safeMetric("human_handoff", humanHandoffStarted, { boundary: "cvent_sso_mfa", completed: false });
-        throw new Error("Cvent login handoff timed out after 60 minutes");
+        return endLoginWait("Cvent login handoff timed out after 60 minutes");
       });
     },
   });
@@ -1808,8 +1824,9 @@ export default function cventJobTools(pi: any) {
   const simpleDomainAssessments = Type.Array(Type.Object({
     domain: Type.String({ minLength: 1, maxLength: 80 }),
     outcome: literalUnion(["verified", "review_required", "prohibited"]),
+    allSafeWorkAttempted: Type.Boolean({ description: "True only after attempting every independent permissible requirement in this domain. Unvisited or deferred safe work means false. Exact item-level exceptions need actual attempt evidence; volume and elapsed time are not blockers." }),
     evidence: Type.Array(Type.String({ minLength: 1, maxLength: 3000 }), { minItems: 1, maxItems: 100 }),
-  }), { maxItems: 50, description: "Simple Mode: one assessment for every populated RR domain. Order is yours; coverage is mandatory before final QA." });
+  }), { maxItems: 1000, description: "Simple Mode: assess every populated compiled domain plus any additional domains you discover in the original workbook. You choose the categories and order; the compiler is only a coverage floor." });
 
   pi.registerTool({
     name: "cvent_finish",
@@ -1859,22 +1876,27 @@ export default function cventJobTools(pi: any) {
           for (const assessment of params.domainAssessments ?? []) {
             const domain = String(assessment?.domain ?? "").trim();
             if (!domain || assessments.has(domain)) throw new Error("Each Simple Mode domain assessment must have a unique non-empty domain");
-            if (requiredCounts.size && !requiredCounts.has(domain)) throw new Error(`Unknown or unpopulated RR domain assessment: ${domain}`);
-            assessments.set(domain, { domain, outcome: assessment.outcome, evidence: assessment.evidence, rr_item_count: requiredCounts.get(domain) ?? null });
+            if (!Array.isArray(assessment.evidence) || !assessment.evidence.length || assessment.evidence.some((item: unknown) => !String(item ?? "").trim()))
+              throw new Error(`Domain ${domain} needs actual non-empty Cvent evidence`);
+            if (!["verified", "review_required", "prohibited"].includes(assessment.outcome)) throw new Error(`Invalid domain outcome: ${domain}`);
+            assessments.set(domain, { domain, outcome: assessment.outcome, all_safe_work_attempted: assessment.allSafeWorkAttempted === true,
+              evidence: assessment.evidence, rr_item_count: requiredCounts.get(domain) ?? null });
           }
           if (!params.jobWideBlocker && requiredCounts.size) {
             const outstanding = [...requiredCounts.keys()].filter(domain => !assessments.has(domain));
             if (outstanding.length) throw new Error(`Do not finish early. Inspect and attempt independent safe work in: ${outstanding.join(", ")}. Hold only item-level exceptions, not untouched domains.`);
           }
+          if (!params.jobWideBlocker) {
+            if (!assessments.size) throw new Error("Assess the original workbook before finishing, even when the optional compiler has no categories");
+            const unfinished = [...assessments.values()].filter(assessment => !assessment.all_safe_work_attempted);
+            if (unfinished.length) throw new Error(`Unfinished safe work remains in: ${unfinished.map(item => item.domain).join(", ")}. Continue dynamically with Ego; do not relabel pending work as review.`);
+          }
           if (params.status === "DRAFT_COMPLETE" && [...assessments.values()].some(assessment => assessment.outcome !== "verified"))
             throw new Error("DRAFT_COMPLETE requires every populated RR domain assessment to be verified");
           if (params.status === "REVIEW_REQUIRED") {
             if (!params.unresolvedItems.length) throw new Error("REVIEW_REQUIRED needs exact unresolved item-level exceptions");
-            if (requiredCounts.size && ![...assessments.values()].some(assessment => assessment.outcome === "review_required" || assessment.outcome === "prohibited"))
+            if (![...assessments.values()].some(assessment => assessment.outcome === "review_required" || assessment.outcome === "prohibited"))
               throw new Error("REVIEW_REQUIRED needs at least one domain assessment with a review_required or prohibited outcome");
-            const unfinished = [...assessments.values()].filter(assessment => assessment.evidence.some((entry: unknown) => /(?:time constraints?|not (?:fully |all )?verified|was not (?:verified|configured|inspected|attempted)|were not (?:verified|configured|inspected|attempted))/i.test(String(entry))));
-            if (unfinished.length)
-              throw new Error(`REVIEW_REQUIRED cannot substitute for unfinished safe work. Continue dynamically with Ego in: ${unfinished.map(item => item.domain).join(", ")}.`);
           }
           const report = { status: params.status, execution_mode: "simple", reported_by: "pi",
             job_wide_blocker: params.jobWideBlocker ?? null, completion_reason: params.blockerEvidence ?? "Pi final QA; see actual evidence and review items",
