@@ -163,6 +163,35 @@ class AuthorizationTests(unittest.TestCase):
             with_token = client.post("/api/start", headers={"X-CSRF-Token": me["csrf"]})
             self.assertEqual(with_token.status_code, 404)
 
+    def test_stop_is_idempotent_and_reports_startup_cleanup_without_launching(self):
+        import threading
+        from job_runner import ActiveJob, JobRunner
+        with TestClient(cvent_app.app) as client:
+            me = client.get('/api/me').json()
+            headers = {'X-CSRF-Token': me['csrf']}
+            user = self.store.ensure_user('dev:user-one', 'one@example.test', 'User One', False)
+            job = self.make_job(user, 'stop')
+            runner = JobRunner(self.store)
+            directory = Path(self.temp.name) / 'stop'
+            directory.mkdir()
+            with patch.object(cvent_app, 'runner', runner), \
+                 patch.object(cvent_app, 'directory_for', return_value=directory), \
+                 patch.object(cvent_app, 'browser_directory_for', return_value=directory), \
+                 patch('job_runner.job_dir', return_value=directory), \
+                 patch.object(runner, 'start') as start, patch.object(runner, 'steel_command') as steel:
+                for _ in range(2):
+                    self.assertEqual(client.post('/api/stop-agent?job_id='+job['id'], headers=headers).status_code, 200)
+                lease = self.store.reserve_now(job['id'], user['subject'])
+                active = ActiveJob(job['id'], lease['token'], lease['slot_id'], threading.Event())
+                runner._active[job['id']] = active
+                self.assertEqual(client.post('/api/stop-agent?job_id='+job['id'], headers=headers).status_code, 200)
+                status = client.get('/api/status?job_id='+job['id']).json()
+                self.assertTrue(status['stop_requested'])
+                self.assertEqual(status['status'], 'stopping')
+                self.assertFalse(status['agent_process_running'])
+                self.assertIn('event lock', status['current_action'])
+                start.assert_not_called(); steel.assert_not_called()
+
     def test_development_session_secret_survives_restart(self):
         with patch.object(cvent_app, "DATA_ROOT", Path(self.temp.name)), patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CVENT_SESSION_SECRET", None)

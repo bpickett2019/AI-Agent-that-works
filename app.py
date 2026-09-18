@@ -343,6 +343,11 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     if getattr(active, "read_only", False):
         state["current_action"] = "Read-only uncertainty reconciliation/capability inspection; no configuration writes are enabled"
         state["read_only_reconciliation"] = True
+    stop_event = getattr(active, "stop_requested", None)
+    state["stop_requested"] = bool(stop_event and stop_event.is_set())
+    if state["stop_requested"]:
+        state.update({"status": "stopping", "current_stage": "stopping",
+                      "current_action": "Stopping the agent and closing its browser. Wait for the event lock to be released before restarting."})
     state["agent_process_running"] = bool(active and active.process and active.process.poll() is None)
     state["agent_pid"] = active.process.pid if state["agent_process_running"] else None
     state["agent_session_saved"] = bool(state.get("pi_session"))

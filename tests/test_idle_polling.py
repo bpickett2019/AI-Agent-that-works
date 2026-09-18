@@ -19,7 +19,7 @@ const polling=script.slice(script.indexOf('// Empty/draft/finished'),script.inde
 const poll=script.slice(script.indexOf('async function poll()'),script.indexOf('async function loadAuthorizedEvents()'));
 const binding=script.slice(script.indexOf('function withJob('),script.indexOf('// Empty/draft/finished'));
 const timers=new Map(),calls=[],elements=new Map(); let id=0,nextState={},pending=null;
-const $=name=>{if(!elements.has(name))elements.set(name,{textContent:'',value:'',classList:{add(){},toggle(){}},blur(){}});return elements.get(name)};
+const $=name=>{if(!elements.has(name))elements.set(name,{textContent:'',value:'',classList:{add(){},toggle(){}},blur(){},removeAttribute(){}});return elements.get(name)};
 const context={$,state:{},selectedJob:null,jobsCache:[],workspaceEpoch:0,selectedWorker:1,workbookChanges:new Map(),loadedRRVersion:null,
   browserLoaded:false,viewerRetry:null,request:async url=>{calls.push(url);return pending?await pending:nextState},
   setInterval:fn=>{timers.set(++id,fn);return id},clearInterval:i=>timers.delete(i),clearTimeout(){},
@@ -28,7 +28,7 @@ const context={$,state:{},selectedJob:null,jobsCache:[],workspaceEpoch:0,selecte
 vm.createContext(context);vm.runInContext(polling+'\n'+binding+'\n'+poll,context);
 // No job: local idle rendering only, no requests or timers, no fallback to latest job.
 await context.poll();context.syncPolling();assert.equal(calls.length,0);assert.equal(timers.size,0);
-assert.equal($('stage').textContent,'UPLOAD');assert.equal($('startbtn').disabled,true);
+assert.equal($('error').textContent,'');assert.equal($('stage').textContent,'UPLOAD');assert.equal($('startbtn').disabled,true);
 assert.throws(()=>context.withJob('/api/start'),/upload an RR/);
 // Incomplete binding must not activate polling even if marked running.
 context.selectedJob='job';context.jobsCache=[{id:'job',state:'running',event_id:'event'}];

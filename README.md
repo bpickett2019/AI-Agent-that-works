@@ -32,6 +32,11 @@ event; these local status requests never call the model. Uploading alone does
 not spend model tokens—START BUILD/CONTINUE must be explicitly requested.
 An existing active job retains its stored workbook/target even when new-upload
 fields are blank; its loaded workbook and bound target are displayed separately.
+Use **CLEAR / NEW RR** to clear intake and the workbook preview without deleting
+saved runs (available in the Status list). Stop active work in that User slot
+first. **STOP BUILD** preserves the RR/evidence and holds the event lock until
+cleanup finishes; then **RESTART BUILD** or **REOPEN & CONTINUE** resumes the
+selected run. Unresolved writes still require review, never a blind restart.
 `.env.local`, OAuth credentials,
 workbooks, browser profiles and job logs are not committed. Without the explicit
 Simple Mode/Codex settings, the inherited code defaults to Anthropic/controlled mode.

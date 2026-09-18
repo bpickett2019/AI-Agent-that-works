@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -110,6 +110,8 @@ class ActiveJob:
     stop_heartbeat: threading.Event
     process: subprocess.Popen | None = None
     output: Any = None
+    stop_requested: threading.Event = field(default_factory=threading.Event)
+    lifecycle_lock: Any = field(default_factory=threading.RLock)
 
 
 class JobRunner:
@@ -398,12 +400,14 @@ class JobRunner:
 
     def start(self, job_id: str, actor: str) -> dict[str, Any]:
         """Reserve capacity now and launch; reject busy events/slots immediately."""
-        lease = self.store.reserve_now(job_id, actor)
-        job = self.store.get_job(job_id)
-        if not job:
-            raise ValueError("Job not found")
-        active = ActiveJob(job_id, lease["token"], lease["slot_id"], threading.Event())
         with self._lock:
+            if job_id in self._active:
+                raise ValueError("This job is still running or closing its browser. Wait for cleanup before restarting.")
+            lease = self.store.reserve_now(job_id, actor)
+            job = self.store.get_job(job_id)
+            if not job:
+                raise ValueError("Job not found")
+            active = ActiveJob(job_id, lease["token"], lease["slot_id"], threading.Event())
             self._active[job_id] = active
         directory = job_dir(job["workspace_id"], job_id)
         state = read_json(directory / "state.json", fresh_state(job))
@@ -431,6 +435,11 @@ class JobRunner:
                     self._stop_process_tree(process.pid)
                 return
 
+    @staticmethod
+    def _check_stop(active: ActiveJob) -> None:
+        if active.stop_requested.is_set():
+            raise RuntimeError("Stopped by user during startup; no agent was launched")
+
     def _launch(self, job: dict[str, Any], active: ActiveJob) -> None:
         directory = job_dir(job["workspace_id"], job["id"])
         threading.Thread(target=monitor_performance, args=(directory / "system-metrics.jsonl", active.stop_heartbeat, [
@@ -447,16 +456,20 @@ class JobRunner:
             state.update({"current_action": f"Verifying {pi_provider()}/{pi_model()} access before Cvent", "updated_at": now(),
                           "model_provider": pi_provider(), "model_id": pi_model()})
             atomic_json(directory / "state.json", state)
+            self._check_stop(active)
             provider = self.verify_provider_access(directory)
+            self._check_stop(active)
             append_log(directory, f"{pi_provider()}/{pi_model()} access probe passed in {provider.get('durationMs', 0)} ms")
             state.update({"current_action": "Compiling and verifying the current RR", "updated_at": now()})
             atomic_json(directory / "state.json", state)
             expected = self.prepare_rr(job, active.slot_id)
+            self._check_stop(active)
             append_log(directory, f"RR preflight compiled {expected.get('counts', {}).get('applicableFields', 0)} writable configuration fields")
             state.update({"current_action": "Starting isolated Steel browser", "updated_at": now()})
             atomic_json(directory / "state.json", state)
             append_log(directory, f"Acquired worker {active.slot_id} and event lease {job['event_id']}")
             steel = self.steel_command(job, active.token, active.slot_id, "ensure")
+            self._check_stop(active)
             if not steel.get("running"):
                 raise RuntimeError(steel.get("error") or "Steel failed to start")
             runtime = initialize_browser_runtime(
@@ -472,13 +485,16 @@ class JobRunner:
             sessions = directory / "pi-sessions"
             sessions.mkdir(parents=True, exist_ok=True)
             command_line = self.pi_command(job, directory, state, prompt)
-            output = open(directory / "pi-output.log", "a", buffering=1)
-            process = subprocess.Popen(
-                command_line, cwd=directory, env=self.pi_environment(job, active.token, active.slot_id),
-                stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
-            )
-            active.process = process
-            active.output = output
+            # Stop and spawn are serialized: startup cancellation cannot release
+            # the worker and then allow this thread to start a paid agent anyway.
+            with active.lifecycle_lock:
+                self._check_stop(active)
+                active.output = open(directory / "pi-output.log", "a", buffering=1)
+                process = subprocess.Popen(
+                    command_line, cwd=directory, env=self.pi_environment(job, active.token, active.slot_id),
+                    stdout=active.output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+                )
+                active.process = process
             if not self.store.mark_running(job["id"], active.token, process.pid):
                 self._stop_process_tree(process.pid)
                 raise RuntimeError("Lease was lost before Pi started")
@@ -490,6 +506,8 @@ class JobRunner:
             append_log(directory, f"Started isolated {pi_provider()}/{pi_model()} Pi process PID {process.pid} on worker {active.slot_id}")
             self._monitor(job, active)
         except Exception as exc:
+            if active.output and not active.output.closed:
+                active.output.close()
             append_log(directory, f"Worker launch failed closed: {type(exc).__name__}: {exc}")
             try:
                 self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
@@ -505,6 +523,8 @@ class JobRunner:
             persisted = self.store.get_job(job["id"])
             failed_state = persisted["state"] if persisted else "failed"
             state.update({"status": failed_state, "current_action": f"Worker launch failed: {exc}", "pi_pid": None, "updated_at": now()})
+            if active.stop_requested.is_set():
+                state.update({"current_stage": "stopped", "current_action": str(exc)})
             atomic_json(directory / "state.json", state)
             try:
                 write_telemetry_report(directory, persisted or job, ROOT)
@@ -545,6 +565,10 @@ class JobRunner:
                 reasons.append(f"Runtime recovery stopped: {controller_failure.get('message', '')}")
                 # A terminating tool returns process code 0, but is not a successful build.
                 code, report_status, reported_state = 1, "", ""
+        # An explicit Stop is not another login handoff or a successful build.
+        # Keep mutation uncertainty authoritative when deciding whether retry is safe.
+        if stop_request:
+            code, report_status, reported_state = 1, "", ""
         finish_state, uncertain, error = classify_process_outcome(
             code, report_status, reported_state, writes_exist, outcome["unresolved"], "; ".join(reasons) or None,
         )
@@ -576,6 +600,8 @@ class JobRunner:
             "pi_pid": None, "last_process_started_at": state.get("process_started_at"), "process_started_at": None,
             "worker_slot": None, "updated_at": now(),
         })
+        if stop_request:
+            state["current_stage"] = "stopped"
         atomic_json(directory / "state.json", state)
         active.stop_heartbeat.set()
         try:
@@ -594,27 +620,26 @@ class JobRunner:
         with self._lock:
             active = self._active.get(job_id)
         if not active:
-            raise ValueError("Job is not running")
+            if not self.store.get_job(job_id):
+                raise ValueError("Job not found")
+            return  # Already stopped; repeated Stop is harmless.
         job = self.store.get_job(job_id)
-        process = active.process
-        if process and process.poll() is None:
-            requested = {"actor": actor, "at": now(), "pid": process.pid, "reason": "explicit_stop_request"}
-            atomic_json(job_dir(job["workspace_id"], job_id) / f"stop-request-{process.pid}.json", requested)
+        with active.lifecycle_lock:
+            if active.stop_requested.is_set():
+                return
+            process = active.process
+            if process and process.poll() is not None:
+                return  # Monitor is already cleaning up.
+            requested = {"actor": actor, "at": now(), "pid": process.pid if process else None, "reason": "explicit_stop_request"}
+            suffix = str(process.pid) if process else "startup"
+            atomic_json(job_dir(job["workspace_id"], job_id) / f"stop-request-{suffix}.json", requested)
             self.store.audit(actor, "job.stop_requested", job_id, requested)
-            append_log(job_dir(job["workspace_id"], job_id), f"Stop requested by {actor}; terminating Pi PID {process.pid}")
-            self._stop_process_tree(process.pid)
-        # Monitor owns canonical teardown once a Pi process exists.
+            active.stop_requested.set()
+            append_log(job_dir(job["workspace_id"], job_id), f"Stop requested by {actor}; waiting for process/browser teardown")
         if process:
-            return
-        self.steel_command(job, active.token, active.slot_id, "release", timeout=60)
-        outcome = mutation_outcome(job_dir(job["workspace_id"], job_id))
-        state = "failed_uncertain" if outcome["unresolved"] else ("failed_recoverable" if outcome["hasAttempts"] else "failed_prewrite")
-        self._finish_after_lease_loss(
-            job_id, active.token, state,
-            "Stopped with an unresolved Cvent write" if outcome["unresolved"] else ("Stopped after prior writes were conclusively read back; recompute delta" if outcome["hasAttempts"] else "Stopped before any Cvent write attempt; fresh preflight required"),
-            outcome["unresolved"],
-        )
-        self._remove_active(active)
+            self._stop_process_tree(process.pid)
+        # The launch thread/monitor owns cleanup, including during startup.
+        # Retain leases until its in-flight helper/browser work has settled.
 
     def resume(self, job_id: str, actor: str) -> None:
         job = self.store.get_job(job_id)
@@ -771,7 +796,8 @@ class JobRunner:
     def _remove_active(self, active: ActiveJob) -> None:
         active.stop_heartbeat.set()
         with self._lock:
-            self._active.pop(active.job_id, None)
+            if self._active.get(active.job_id) is active:
+                self._active.pop(active.job_id, None)
 
     @staticmethod
     def _provider_failure(directory: Path) -> str | None:
