@@ -1,4 +1,35 @@
-# CVENT Agent
+# AI Agent that works
+
+## Current version: restored Monday local runner
+
+This fork restores the September 14, 2026 morning **Astra + Simple Mode** runner.
+See [recovery provenance and limitations](docs/MONDAY-ROLLBACK-2026-09-14.md).
+Normal, RR-authorized configuration edits and Save/readback are **enabled**, not
+read-only. The signed-in Cvent account must have edit rights to the selected event;
+this application cannot grant or bypass Cvent account permissions. Publishing,
+communication sends, deletion, cross-event and account-global changes stay blocked.
+
+For a fresh checkout, use Python 3.11+ and the locally installed Pi with your
+existing ChatGPT/Codex OAuth login:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+npm ci
+cp .env.example .env.local
+# Edit .env.local: supply your exact authorized Cvent event UUID, name and code.
+unset ANTHROPIC_API_KEY OPENAI_API_KEY
+python -m uvicorn app:app --env-file .env.local --host 127.0.0.1 --port 8880
+```
+
+Open <http://127.0.0.1:8880>. Docker must be running. Select the approved event,
+upload the RR, then explicitly start the build and complete Cvent login when asked.
+Starting the UI alone does not run a build. `.env.local`, OAuth credentials,
+workbooks, browser profiles and job logs are not committed. Without the explicit
+Simple Mode/Codex settings, the inherited code defaults to Anthropic/controlled mode.
+
+## Upstream architecture and alternative deployments
 
 Forge CVENT Agent production V1 supports Microsoft Entra authentication and up
 to three simultaneous, isolated jobs on one Azure VM. Users can access only
@@ -12,7 +43,7 @@ Jobs for different approved events can use all three workers. A same-event job
 or a fourth simultaneous job is rejected immediately with HTTP 409 and remains
 safely restartable; V1 has no waiting queue.
 
-Pi is explicitly configured as `anthropic/claude-sonnet-4-6`. The Anthropic key
+The inherited production default is `anthropic/claude-sonnet-4-6`. The Anthropic key
 is read only from `ANTHROPIC_API_KEY`; Azure production loads it from Key Vault
 with a VM managed identity. No API key is accepted in the UI, source, Terraform
 variables, or process command line.
