@@ -793,9 +793,26 @@ class JobRunner:
 
     @staticmethod
     def _mutation_attempted(directory: Path) -> bool:
+        if any((directory / name).exists() for name in (
+            "browser-mutation-uncertain.json", "browser-write-readback-required.json",
+        )):
+            return True
         audit = directory / "scope-write-audit.jsonl"
-        uncertain = directory / "browser-mutation-uncertain.json"
-        return uncertain.exists() or (audit.exists() and audit.stat().st_size > 0)
+        if not audit.exists():
+            return False
+        try:
+            for line in audit.read_text().splitlines():
+                item = json.loads(line)
+                # Edit/Cancel/navigation clicks are audited, but are not data
+                # changes. Exempt only explicitly non-persisting UI records;
+                # unknown, malformed, data-write and Save evidence fails closed.
+                if (item.get("result") not in {"ui_action_attempted", "ui_action_completed"}
+                        or any(item.get(flag) is not False for flag in
+                               ("dataChange", "isSave", "potentiallyPersisted"))):
+                    return True
+        except (OSError, UnicodeError, ValueError, AttributeError):
+            return True
+        return False
 
     @staticmethod
     def _is_pi_process(pid: int) -> bool:
