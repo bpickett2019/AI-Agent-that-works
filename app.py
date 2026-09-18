@@ -49,7 +49,7 @@ _session_secret = session_secret()
 app.add_middleware(
     SessionMiddleware,
     secret_key=_session_secret,
-    session_cookie="cvent_agent_session",
+    session_cookie=os.environ.get("CVENT_SESSION_COOKIE", "cvent_agent_session"),
     max_age=8 * 60 * 60,
     same_site="lax",
     https_only=os.environ.get("CVENT_ENV") == "production" or restricted_staging_access(),

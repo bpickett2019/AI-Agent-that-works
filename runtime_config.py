@@ -35,7 +35,10 @@ class WorkerSlot:
 
     @property
     def container_name(self) -> str:
-        return f"cvent-agent-steel-{self.slot_id}"
+        prefix = os.environ.get("CVENT_CONTAINER_PREFIX", "cvent-agent-steel")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}", prefix):
+            raise ValueError("Invalid CVENT_CONTAINER_PREFIX")
+        return f"{prefix}-{self.slot_id}"
 
     @property
     def api_origin(self) -> str:
@@ -46,7 +49,10 @@ class WorkerSlot:
         return f"http://127.0.0.1:{self.cdp_port}"
 
 
-WORKER_SLOTS = tuple(WorkerSlot(i, 3004 + i, 9333 + i) for i in range(1, 4))
+_PORT_OFFSET = int(os.environ.get("CVENT_WORKER_PORT_OFFSET", "0"))
+if not 0 <= _PORT_OFFSET <= 56199:
+    raise ValueError("CVENT_WORKER_PORT_OFFSET must be between 0 and 56199")
+WORKER_SLOTS = tuple(WorkerSlot(i, 3004 + i + _PORT_OFFSET, 9333 + i + _PORT_OFFSET) for i in range(1, 4))
 
 
 def _safe_component(value: str) -> str:
